@@ -17,7 +17,10 @@ defmodule AttestoClient.JARM do
       algorithms PS256/ES256/EdDSA - `none` is never accepted). When the JWT
       header carries a `kid`, only the matching key is tried.
     * `iss` equals the expected authorization server identifier (`:issuer`).
-    * `aud` contains the client's `client_id` (`:client_id`).
+    * `aud` equals, or (an all-string array) contains, the client's `client_id`
+      (`:client_id`); a mixed-type `aud` array is malformed.
+    * `iat`, when present, is a non-negative NumericDate not meaningfully in the
+      future (a 60-second clock-skew tolerance).
     * `exp` is present and in the future.
 
   On success it returns `{:ok, claims}`, the full claim set - the caller reads
@@ -26,6 +29,9 @@ defmodule AttestoClient.JARM do
   """
 
   alias Attesto.SigningAlg
+
+  # Clock-skew tolerance for `iat`, matching attesto's token verification.
+  @clock_skew_seconds 60
 
   @type jwks :: %{optional(String.t()) => term()} | [map()]
 
@@ -39,9 +45,12 @@ defmodule AttestoClient.JARM do
           :invalid_jwks
           | :missing_issuer
           | :missing_client_id
+          | :unsupported_alg
           | :invalid_signature
           | :invalid_issuer
           | :invalid_audience
+          | :invalid_iat
+          | :not_yet_valid
           | :missing_exp
           | :expired
 
@@ -55,13 +64,17 @@ defmodule AttestoClient.JARM do
   """
   @spec verify(String.t(), jwks(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(response_jwt, jwks, opts) when is_binary(response_jwt) and is_list(opts) do
+    now = now(opts)
+
     with {:ok, keys} <- normalize_jwks(jwks),
          {:ok, issuer} <- require_opt(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- require_opt(opts, :client_id, :missing_client_id),
-         {:ok, claims} <- verify_signature(response_jwt, keys, accepted_algs(opts)),
+         {:ok, algs} <- accepted_algs(opts),
+         {:ok, claims} <- verify_signature(response_jwt, keys, algs),
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience(claims, client_id),
-         :ok <- check_expiry(claims, now(opts)) do
+         :ok <- check_issued_at(claims, now),
+         :ok <- check_expiry(claims, now) do
       {:ok, claims}
     end
   end
@@ -81,12 +94,22 @@ defmodule AttestoClient.JARM do
     end
   end
 
-  # The FAPI signing algorithms by default (PS256/ES256/EdDSA); `none` can never
-  # be supplied because it is not an asymmetric algorithm in attesto's set.
+  # The FAPI signing algorithms by default (PS256/ES256/EdDSA). A caller-supplied
+  # list is validated against attesto's asymmetric allow-list at this boundary,
+  # so `accepted_algs: ["none"]` or an unknown value is a clear :unsupported_alg
+  # rather than relying on JOSE to fail closed downstream.
   defp accepted_algs(opts) do
     case Keyword.get(opts, :accepted_algs) do
-      algs when is_list(algs) and algs != [] -> algs
-      _ -> SigningAlg.fapi_algs()
+      nil ->
+        {:ok, SigningAlg.fapi_algs()}
+
+      algs when is_list(algs) and algs != [] ->
+        if Enum.all?(algs, &(&1 in SigningAlg.allowed())),
+          do: {:ok, algs},
+          else: {:error, :unsupported_alg}
+
+      _other ->
+        {:error, :unsupported_alg}
     end
   end
 
@@ -126,12 +149,37 @@ defmodule AttestoClient.JARM do
     if Map.get(claims, "iss") == issuer, do: :ok, else: {:error, :invalid_issuer}
   end
 
+  # An `aud` array is honoured only when every member is a string (a mixed-type
+  # array is malformed, even if the client_id is present), matching attesto's
+  # token/ID-token audience hardening.
   defp check_audience(claims, client_id) do
     case Map.get(claims, "aud") do
-      ^client_id -> :ok
-      auds when is_list(auds) -> if client_id in auds, do: :ok, else: {:error, :invalid_audience}
-      _other -> {:error, :invalid_audience}
+      ^client_id ->
+        :ok
+
+      auds when is_list(auds) ->
+        if Enum.all?(auds, &is_binary/1) and client_id in auds,
+          do: :ok,
+          else: {:error, :invalid_audience}
+
+      _other ->
+        {:error, :invalid_audience}
     end
+  end
+
+  # `iat` is optional in JARM, but when present it must be a non-negative
+  # NumericDate (RFC 7519 §2) and not meaningfully in the future (a JARM response
+  # is consumed immediately); a small skew tolerates a fast issuer clock.
+  defp check_issued_at(claims, now) do
+    case Map.get(claims, "iat") do
+      nil -> :ok
+      iat when is_integer(iat) and iat >= 0 -> within_skew(iat, now)
+      _other -> {:error, :invalid_iat}
+    end
+  end
+
+  defp within_skew(iat, now) do
+    if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
   end
 
   defp check_expiry(claims, now) do

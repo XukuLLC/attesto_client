@@ -139,6 +139,40 @@ defmodule AttestoClient.JARMTest do
       assert {:error, :missing_client_id} = JARM.verify(jwt, jwks(key), issuer: @issuer)
       assert {:error, :invalid_jwks} = verify(jwt, "not-a-jwks")
     end
+
+    test "a mixed-type aud array is malformed even if the client_id is present" do
+      key = as_key()
+      jwt = sign(key, success_claims(%{"aud" => [@client_id, 42]}))
+
+      assert {:error, :invalid_audience} = verify(jwt, jwks(key))
+    end
+
+    test "a malformed or future iat" do
+      key = as_key()
+
+      assert {:error, :invalid_iat} =
+               verify(sign(key, success_claims(%{"iat" => -1})), jwks(key))
+
+      assert {:error, :invalid_iat} =
+               verify(sign(key, success_claims(%{"iat" => "soon"})), jwks(key))
+
+      assert {:error, :not_yet_valid} =
+               verify(sign(key, success_claims(%{"iat" => @now + 3600})), jwks(key))
+
+      # Within the clock-skew tolerance is accepted.
+      assert {:ok, _} = verify(sign(key, success_claims(%{"iat" => @now + 30})), jwks(key))
+    end
+
+    test "an invalid :accepted_algs option" do
+      key = as_key()
+      jwt = sign(key, success_claims())
+
+      assert {:error, :unsupported_alg} = verify(jwt, jwks(key), accepted_algs: ["none"])
+      assert {:error, :unsupported_alg} = verify(jwt, jwks(key), accepted_algs: ["bogus"])
+      assert {:error, :unsupported_alg} = verify(jwt, jwks(key), accepted_algs: "ES256")
+      # A valid restricted list still works.
+      assert {:ok, _} = verify(jwt, jwks(key), accepted_algs: ["ES256"])
+    end
   end
 
   describe "interop" do
