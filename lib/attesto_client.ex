@@ -11,8 +11,10 @@ defmodule AttestoClient do
 
     * `AttestoClient.ClientAssertion` - build a `private_key_jwt` client
       authentication assertion (RFC 7523 / OpenID Connect Core §9).
-    * (planned) signed request objects (JAR, RFC 9101) and JARM response
-      verification (FAPI 2.0 Message Signing §5.4).
+    * `AttestoClient.RequestObject` - build a signed authorization request object
+      (JAR, RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
+    * (planned) JARM response verification (FAPI 2.0 Message Signing §5.4) and a
+      thin discovery-metadata lookup.
 
   It is deliberately **not** a full OAuth client framework: it has no flow
   orchestrator, token store, or session handling. It produces and checks the
