@@ -11,9 +11,19 @@ defmodule AttestoClient.Builder do
   # share one allow-list.
   @allowed_algs SigningAlg.allowed()
 
-  @spec to_jose_jwk(JOSE.JWK.t() | map()) :: JOSE.JWK.t()
-  def to_jose_jwk(%JOSE.JWK{} = jwk), do: jwk
-  def to_jose_jwk(map) when is_map(map), do: JOSE.JWK.from_map(map)
+  # Normalise the client key to a `JOSE.JWK`. A `%JOSE.JWK{}` passes through; a
+  # JWK map is parsed, and a malformed/unparseable map (or a non-map) is rejected
+  # as {:error, :invalid_key} rather than raising, so the build/2 contract holds.
+  @spec normalize_key(JOSE.JWK.t() | map()) :: {:ok, JOSE.JWK.t()} | {:error, :invalid_key}
+  def normalize_key(%JOSE.JWK{} = jwk), do: {:ok, jwk}
+
+  def normalize_key(map) when is_map(map) do
+    {:ok, JOSE.JWK.from_map(map)}
+  rescue
+    _error -> {:error, :invalid_key}
+  end
+
+  def normalize_key(_other), do: {:error, :invalid_key}
 
   # A non-empty string option, or `{:error, error}` — a security artifact builder
   # rejects bad input rather than signing it.
@@ -25,12 +35,14 @@ defmodule AttestoClient.Builder do
     end
   end
 
-  @spec validate_lifetime(keyword(), pos_integer()) ::
+  # A positive `:lifetime` option (default `default`), optionally capped at `max`
+  # (`:infinity` for no cap); anything else is `{:error, :invalid_lifetime}`.
+  @spec validate_lifetime(keyword(), pos_integer(), pos_integer() | :infinity) ::
           {:ok, pos_integer()} | {:error, :invalid_lifetime}
-  def validate_lifetime(opts, default) do
+  def validate_lifetime(opts, default, max \\ :infinity) do
     case Keyword.fetch(opts, :lifetime) do
       :error -> {:ok, default}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, n} when is_integer(n) and n > 0 and (max == :infinity or n <= max) -> {:ok, n}
       {:ok, _invalid} -> {:error, :invalid_lifetime}
     end
   end

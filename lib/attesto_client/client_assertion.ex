@@ -77,7 +77,8 @@ defmodule AttestoClient.ClientAssertion do
     * `:jti` - the assertion identifier; defaults to a fresh random value.
   """
   @type error ::
-          :invalid_client_id
+          :invalid_key
+          | :invalid_client_id
           | :invalid_audience
           | :invalid_lifetime
           | :invalid_jti
@@ -87,9 +88,8 @@ defmodule AttestoClient.ClientAssertion do
 
   @spec build(jwk(), [build_opt()]) :: {:ok, String.t()} | {:error, error()}
   def build(jwk, opts) when is_list(opts) do
-    jose_jwk = Builder.to_jose_jwk(jwk)
-
-    with {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
+    with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
+         {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
          {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),

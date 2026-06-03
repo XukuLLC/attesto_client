@@ -132,6 +132,17 @@ defmodule AttestoClient.ClientAssertionTest do
       assert {:error, :unsupported_key} =
                ClientAssertion.build(key, client_id: @client_id, audience: @audience)
     end
+
+    test "a malformed JWK map fails as invalid_key, not a raise" do
+      assert {:error, :invalid_key} =
+               ClientAssertion.build(%{"kty" => "bogus"},
+                 client_id: @client_id,
+                 audience: @audience
+               )
+
+      assert {:error, :invalid_key} =
+               ClientAssertion.build(%{}, client_id: @client_id, audience: @audience)
+    end
   end
 
   describe "interop" do

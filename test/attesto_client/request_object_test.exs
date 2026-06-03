@@ -92,6 +92,7 @@ defmodule AttestoClient.RequestObjectTest do
       assert {:error, :invalid_params} = build(params: %{:not => "stringkey"})
       assert {:error, :invalid_params} = build(params: "nope")
       assert {:error, :invalid_typ} = build(typ: "")
+      assert {:error, :invalid_typ} = build(typ: "   ")
       assert {:error, :invalid_lifetime} = build(lifetime: 0)
       assert {:error, :invalid_jti} = build(jti: "")
       assert {:error, :unsupported_alg} = build(alg: "none")
@@ -102,6 +103,25 @@ defmodule AttestoClient.RequestObjectTest do
                  client_id: @client_id,
                  audience: @audience
                )
+
+      # A malformed JWK map is rejected, not raised (build/2 contract).
+      assert {:error, :invalid_key} =
+               RequestObject.build(%{"kty" => "bogus"},
+                 client_id: @client_id,
+                 audience: @audience
+               )
+
+      assert {:error, :invalid_key} =
+               RequestObject.build(%{}, client_id: @client_id, audience: @audience)
+    end
+
+    test "a lifetime beyond the FAPI 60-minute bound is rejected" do
+      assert {:ok, _} = build(lifetime: 3600)
+      assert {:error, :invalid_lifetime} = build(lifetime: 3601)
+    end
+
+    test "a negative now (invalid NumericDate) is rejected" do
+      assert {:error, :invalid_time} = build(now: -10)
     end
   end
 

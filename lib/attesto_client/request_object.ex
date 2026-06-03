@@ -36,8 +36,9 @@ defmodule AttestoClient.RequestObject do
   @fapi_typ "oauth-authz-req+jwt"
 
   # FAPI 2.0 Message Signing §5.3.1 bounds the lifetime to 60 minutes; default to
-  # a short window well inside it.
+  # a short window well inside it and never build one outside the bound.
   @default_lifetime_seconds 300
+  @max_lifetime_seconds 3600
 
   @type jwk :: JOSE.JWK.t() | map()
 
@@ -53,11 +54,13 @@ defmodule AttestoClient.RequestObject do
           | {:jti, String.t()}
 
   @type error ::
-          :invalid_client_id
+          :invalid_key
+          | :invalid_client_id
           | :invalid_audience
           | :invalid_params
           | :invalid_typ
           | :invalid_lifetime
+          | :invalid_time
           | :invalid_jti
           | :unsupported_alg
           | :unsupported_key
@@ -75,17 +78,16 @@ defmodule AttestoClient.RequestObject do
   """
   @spec build(jwk(), [build_opt()]) :: {:ok, String.t()} | {:error, error()}
   def build(jwk, opts) when is_list(opts) do
-    jose_jwk = Builder.to_jose_jwk(jwk)
-
-    with {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
+    with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
+         {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
          {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
          {:ok, params} <- validate_params(opts),
          {:ok, typ} <- validate_typ(opts),
-         {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
+         {:ok, lifetime} <-
+           Builder.validate_lifetime(opts, @default_lifetime_seconds, @max_lifetime_seconds),
+         {:ok, now} <- validate_now(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
-      now = Builder.now(opts)
-
       claims =
         Map.merge(params, %{
           "iss" => client_id,
@@ -117,8 +119,21 @@ defmodule AttestoClient.RequestObject do
 
   defp validate_typ(opts) do
     case Keyword.get(opts, :typ, @fapi_typ) do
-      typ when is_binary(typ) and typ != "" -> {:ok, typ}
-      _other -> {:error, :invalid_typ}
+      typ when is_binary(typ) ->
+        if String.trim(typ) == "", do: {:error, :invalid_typ}, else: {:ok, typ}
+
+      _other ->
+        {:error, :invalid_typ}
+    end
+  end
+
+  # NumericDate is a non-negative seconds count (RFC 7519 §2); a request object's
+  # iat/nbf/exp must not be built from a negative `now`.
+  defp validate_now(opts) do
+    case Keyword.fetch(opts, :now) do
+      :error -> {:ok, System.system_time(:second)}
+      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
+      {:ok, _invalid} -> {:error, :invalid_time}
     end
   end
 end
