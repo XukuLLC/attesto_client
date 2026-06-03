@@ -21,3 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PyJWT reference and in-family against `Attesto.RequestObject.verify/3` under
   the FAPI Message Signing policy.
 - Internal `AttestoClient.Builder` shared by the builders (not public API).
+- `AttestoClient.JARM` - verify a signed authorization response (JARM, FAPI 2.0
+  Message Signing §5.4): JWS signature against the authorization server's JWKS
+  (FAPI algorithm allow-list, `none` rejected, kid selection), plus `iss`/`aud`/
+  `exp`, returning the response parameters. Parity-tested by verifying a JARM
+  token signed by an independent PyJWT signer (the flipped external direction)
+  and one signed by `Attesto.JARM.response_jwt/4` (in-family).

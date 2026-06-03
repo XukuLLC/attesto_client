@@ -13,8 +13,9 @@ defmodule AttestoClient do
       authentication assertion (RFC 7523 / OpenID Connect Core §9).
     * `AttestoClient.RequestObject` - build a signed authorization request object
       (JAR, RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
-    * (planned) JARM response verification (FAPI 2.0 Message Signing §5.4) and a
-      thin discovery-metadata lookup.
+    * `AttestoClient.JARM` - verify a signed authorization response (JARM,
+      FAPI 2.0 Message Signing §5.4).
+    * (planned) a thin discovery-metadata lookup.
 
   It is deliberately **not** a full OAuth client framework: it has no flow
   orchestrator, token store, or session handling. It produces and checks the

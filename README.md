@@ -23,8 +23,9 @@ proof generation for outgoing requests is
   assertions (RFC 7523 / OpenID Connect Core §9).
 - `AttestoClient.RequestObject` — signed authorization request objects (JAR,
   RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
-- _planned:_ JARM response verification (FAPI 2.0 Message Signing §5.4) and a
-  thin discovery-metadata lookup.
+- `AttestoClient.JARM` — verify signed authorization responses (JARM, FAPI 2.0
+  Message Signing §5.4).
+- _planned:_ a thin discovery-metadata lookup.
 
 ## Example
 
