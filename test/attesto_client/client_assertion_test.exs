@@ -8,6 +8,8 @@ defmodule AttestoClient.ClientAssertionTest do
 
   defp es256_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
 
+  defp es256_map, do: es256_key() |> JOSE.JWK.to_map() |> elem(1)
+
   defp public_jwk(jose_jwk, overrides) do
     {_, public} = JOSE.JWK.to_public_map(jose_jwk)
     Map.merge(public, overrides)
@@ -63,9 +65,65 @@ defmodule AttestoClient.ClientAssertionTest do
       assert kid == "key-1"
     end
 
+    test "carries the kid embedded in a JOSE.JWK struct (no explicit :kid)" do
+      # A caller naturally keeps the key as a %JOSE.JWK{}; an embedded kid must
+      # still reach the header so the AS can select the verification key.
+      struct_key = JOSE.JWK.from_map(Map.put(es256_map(), "kid", "struct-kid"))
+
+      {:ok, assertion} =
+        ClientAssertion.build(struct_key, client_id: @client_id, audience: @audience)
+
+      %{"kid" => kid} = assertion |> JOSE.JWS.peek_protected() |> JSON.decode!()
+      assert kid == "struct-kid"
+    end
+
     test "the assertion_type/0 is the RFC 7523 jwt-bearer value" do
       assert ClientAssertion.assertion_type() ==
                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    end
+  end
+
+  describe "build/2 rejects invalid input (fail fast)" do
+    test "empty or missing client_id / audience" do
+      key = es256_key()
+
+      assert {:error, :invalid_client_id} =
+               ClientAssertion.build(key, client_id: "", audience: @audience)
+
+      assert {:error, :invalid_client_id} = ClientAssertion.build(key, audience: @audience)
+
+      assert {:error, :invalid_audience} =
+               ClientAssertion.build(key, client_id: @client_id, audience: "")
+
+      assert {:error, :invalid_audience} = ClientAssertion.build(key, client_id: @client_id)
+    end
+
+    test "a non-positive lifetime or empty jti" do
+      key = es256_key()
+      base = [client_id: @client_id, audience: @audience]
+
+      assert {:error, :invalid_lifetime} = ClientAssertion.build(key, base ++ [lifetime: -5])
+      assert {:error, :invalid_lifetime} = ClientAssertion.build(key, base ++ [lifetime: 0])
+      assert {:error, :invalid_jti} = ClientAssertion.build(key, base ++ [jti: ""])
+    end
+
+    test "an unsupported algorithm, including none" do
+      key = es256_key()
+      base = [client_id: @client_id, audience: @audience]
+
+      assert {:error, :unsupported_alg} = ClientAssertion.build(key, base ++ [alg: "none"])
+      assert {:error, :unsupported_alg} = ClientAssertion.build(key, base ++ [alg: "bogus"])
+    end
+
+    test "a key/algorithm mismatch fails as signing_failed rather than raising" do
+      key = es256_key()
+
+      assert {:error, {:signing_failed, _msg}} =
+               ClientAssertion.build(key,
+                 client_id: @client_id,
+                 audience: @audience,
+                 alg: "RS256"
+               )
     end
   end
 

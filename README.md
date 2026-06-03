@@ -48,6 +48,19 @@ so correctness does not rest on this library and `attesto` agreeing with each
 other. The parity tests skip cleanly when the reference toolchain is absent, so
 they never block a plain `mix test`.
 
+For release confidence, run them explicitly against a Python with the reference
+libraries installed (the system Python is usually PEP-668 externally managed, so
+use a venv):
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install "pyjwt[crypto]"
+ATTESTO_CLIENT_PYTHON=.venv/bin/python ATTESTO_PATH=1 mix test
+```
+
+When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
+`PATH`.
+
 ## Status
 
 A `0.x` release: pre-1.0, API may change between minor versions. Pin to
