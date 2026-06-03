@@ -15,7 +15,8 @@ defmodule AttestoClient do
       (JAR, RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
     * `AttestoClient.JARM` - verify a signed authorization response (JARM,
       FAPI 2.0 Message Signing §5.4).
-    * (planned) a thin discovery-metadata lookup.
+    * `AttestoClient.Discovery` - fetch and read authorization-server metadata
+      and JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
 
   It is deliberately **not** a full OAuth client framework: it has no flow
   orchestrator, token store, or session handling. It produces and checks the

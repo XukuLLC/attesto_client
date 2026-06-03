@@ -46,6 +46,12 @@ defmodule AttestoClient.MixProject do
       # what attesto's server side issues.
       attesto_dep(),
       {:jose, "~> 1.11"},
+      # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
+      # as in req_dpop).
+      {:req, "~> 0.5"},
+
+      # Req's plug-based test adapter (Req.Test) for the discovery HTTP tests.
+      {:plug, "~> 1.16", only: :test},
 
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

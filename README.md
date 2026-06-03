@@ -25,7 +25,8 @@ proof generation for outgoing requests is
   RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
 - `AttestoClient.JARM` — verify signed authorization responses (JARM, FAPI 2.0
   Message Signing §5.4).
-- _planned:_ a thin discovery-metadata lookup.
+- `AttestoClient.Discovery` — fetch and read authorization-server metadata and
+  JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
 
 ## Example
 

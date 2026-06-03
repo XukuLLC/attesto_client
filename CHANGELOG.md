@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `AttestoClient.JARM` - verify a signed authorization response (JARM, FAPI 2.0
   Message Signing §5.4): JWS signature against the authorization server's JWKS
   (FAPI algorithm allow-list, `none` rejected, kid selection), plus `iss`/`aud`/
-  `exp`, returning the response parameters. Parity-tested by verifying a JARM
-  token signed by an independent PyJWT signer (the flipped external direction)
-  and one signed by `Attesto.JARM.response_jwt/4` (in-family).
+  `iat`/`exp`, returning the response parameters. Parity-tested by verifying a
+  JARM token signed by an independent PyJWT signer (the flipped external
+  direction) and one signed by `Attesto.JARM.response_jwt/4` (in-family).
+- `AttestoClient.Discovery` - fetch and read OAuth 2.0 / OpenID Connect
+  authorization-server metadata and JWKS (RFC 8414 / OpenID Connect Discovery
+  1.0) over `Req`, with `https` and RFC 8414 §3.3 issuer-match validation.
+  Verified in-family against `Attesto.OpenIDDiscovery.metadata/2` output.
