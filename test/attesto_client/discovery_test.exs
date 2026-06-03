@@ -41,19 +41,34 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:ok, _} = fetch(@issuer, plug)
     end
 
-    test "honours a custom :well_known_path" do
+    test "uses the RFC 8414 document (segment before path) for a path-based issuer" do
+      issuer = "https://op.example.com/tenant"
+
       plug = fn conn ->
-        assert conn.request_path == "/.well-known/oauth-authorization-server"
-        json_plug(200, %{"issuer" => @issuer}).(conn)
+        # RFC 8414 §3.1: inserted before the issuer path, not appended.
+        assert conn.request_path == "/.well-known/oauth-authorization-server/tenant"
+        json_plug(200, %{"issuer" => issuer}).(conn)
       end
 
-      assert {:ok, _} =
-               fetch(@issuer, plug, well_known_path: "/.well-known/oauth-authorization-server")
+      assert {:ok, _} = fetch(issuer, plug, well_known: :oauth_authorization_server)
     end
 
-    test "rejects a non-https issuer" do
+    test "normalises a trailing slash for both the request and the issuer match" do
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/openid-configuration"
+        # The authorization server's canonical issuer has no trailing slash.
+        json_plug(200, %{"issuer" => "https://op.example.com"}).(conn)
+      end
+
+      assert {:ok, _} = fetch("https://op.example.com/", plug)
+    end
+
+    test "rejects a non-https issuer, or one with a query or fragment (RFC 8414 §2)" do
       assert {:error, :invalid_issuer} = Discovery.fetch("http://op.example.com")
       assert {:error, :invalid_issuer} = Discovery.fetch("not a url")
+      assert {:error, :invalid_issuer} = Discovery.fetch("https://op.example.com?x=1")
+      assert {:error, :invalid_issuer} = Discovery.fetch("https://op.example.com#frag")
+      assert {:error, :invalid_issuer} = Discovery.fetch(:not_a_string)
     end
 
     test "rejects an issuer mismatch (RFC 8414 §3.3)" do
@@ -81,6 +96,12 @@ defmodule AttestoClient.DiscoveryTest do
                Discovery.fetch_jwks("#{@issuer}/jwks",
                  req_options: [plug: json_plug(200, %{"x" => 1})]
                )
+    end
+
+    test "rejects a non-https (or non-string) JWKS URI - it is the signature trust root" do
+      assert {:error, :invalid_jwks_uri} = Discovery.fetch_jwks("http://op.example.com/jwks")
+      assert {:error, :invalid_jwks_uri} = Discovery.fetch_jwks("not a url")
+      assert {:error, :invalid_jwks_uri} = Discovery.fetch_jwks(:nope)
     end
   end
 
