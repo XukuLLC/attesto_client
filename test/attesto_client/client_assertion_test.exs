@@ -125,6 +125,13 @@ defmodule AttestoClient.ClientAssertionTest do
                  alg: "RS256"
                )
     end
+
+    test "an unsupported key type (symmetric oct) fails as unsupported_key, not a raise" do
+      key = JOSE.JWK.generate_key({:oct, 32})
+
+      assert {:error, :unsupported_key} =
+               ClientAssertion.build(key, client_id: @client_id, audience: @audience)
+    end
   end
 
   describe "interop" do

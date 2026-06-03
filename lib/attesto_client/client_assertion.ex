@@ -23,12 +23,7 @@ defmodule AttestoClient.ClientAssertion do
   overridden with `:alg`.
   """
 
-  alias Attesto.SigningAlg
-
-  # The asymmetric JWS algorithms an explicit `:alg` may name; `none` and any
-  # unknown value are rejected. Inherited from attesto so client and server share
-  # one allow-list.
-  @allowed_algs SigningAlg.allowed()
+  alias AttestoClient.Builder
 
   # RFC 7523 §2.2 / OpenID Connect Core §9: the fixed assertion type a client
   # sends in `client_assertion_type`.
@@ -87,18 +82,19 @@ defmodule AttestoClient.ClientAssertion do
           | :invalid_lifetime
           | :invalid_jti
           | :unsupported_alg
+          | :unsupported_key
           | {:signing_failed, String.t()}
 
   @spec build(jwk(), [build_opt()]) :: {:ok, String.t()} | {:error, error()}
   def build(jwk, opts) when is_list(opts) do
-    jose_jwk = to_jose_jwk(jwk)
+    jose_jwk = Builder.to_jose_jwk(jwk)
 
-    with {:ok, client_id} <- require_string(opts, :client_id, :invalid_client_id),
-         {:ok, audience} <- require_string(opts, :audience, :invalid_audience),
-         {:ok, lifetime} <- validate_lifetime(opts),
-         {:ok, jti} <- validate_jti(opts),
-         {:ok, alg} <- resolve_alg(jose_jwk, opts) do
-      now = now(opts)
+    with {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
+         {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
+         {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
+         {:ok, jti} <- Builder.validate_jti(opts),
+         {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
+      now = Builder.now(opts)
 
       claims = %{
         "iss" => client_id,
@@ -109,81 +105,8 @@ defmodule AttestoClient.ClientAssertion do
         "jti" => jti
       }
 
-      header = jose_header(alg, jose_jwk, opts)
-      sign(jose_jwk, header, claims)
-    end
-  end
-
-  # A security artifact builder fails fast: explicit bad input is rejected rather
-  # than silently signed, so a host bug surfaces here, not as a server rejection.
-  defp require_string(opts, key, error) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, error}
-    end
-  end
-
-  defp validate_lifetime(opts) do
-    case Keyword.fetch(opts, :lifetime) do
-      :error -> {:ok, @default_lifetime_seconds}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_lifetime}
-    end
-  end
-
-  defp validate_jti(opts) do
-    case Keyword.fetch(opts, :jti) do
-      :error -> {:ok, 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)}
-      {:ok, jti} when is_binary(jti) and jti != "" -> {:ok, jti}
-      {:ok, _invalid} -> {:error, :invalid_jti}
-    end
-  end
-
-  # An explicit `:alg` is honoured only if it is a supported asymmetric algorithm
-  # (`none` and any unknown value are rejected); otherwise the key's natural
-  # algorithm is inferred. A key/alg mismatch (e.g. RS256 with an EC key) is
-  # caught at signing time as {:signing_failed, _}.
-  defp resolve_alg(jose_jwk, opts) do
-    case Keyword.get(opts, :alg) do
-      nil -> {:ok, SigningAlg.infer(jose_jwk)}
-      alg when alg in @allowed_algs -> {:ok, alg}
-      _ -> {:error, :unsupported_alg}
-    end
-  end
-
-  defp jose_header(alg, jose_jwk, opts) do
-    case kid(jose_jwk, opts) do
-      nil -> %{"alg" => alg}
-      kid -> %{"alg" => alg, "kid" => kid}
-    end
-  end
-
-  defp sign(jose_jwk, header, claims) do
-    {_protected, compact} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    {:ok, compact}
-  rescue
-    error -> {:error, {:signing_failed, Exception.message(error)}}
-  end
-
-  defp to_jose_jwk(%JOSE.JWK{} = jwk), do: jwk
-  defp to_jose_jwk(map) when is_map(map), do: JOSE.JWK.from_map(map)
-
-  # An explicit `:kid` wins; otherwise carry the key's own `kid` so the server
-  # can select the verification key, reading it from a JOSE.JWK struct as well as
-  # a raw JWK map. Defaults to no kid.
-  defp kid(jose_jwk, opts) do
-    Keyword.get(opts, :kid) || jwk_kid(jose_jwk)
-  end
-
-  defp jwk_kid(%JOSE.JWK{} = jwk) do
-    {_type, map} = JOSE.JWK.to_map(jwk)
-    Map.get(map, "kid")
-  end
-
-  defp now(opts) do
-    case Keyword.get(opts, :now) do
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
+      header = Builder.put_kid(%{"alg" => alg}, jose_jwk, opts)
+      Builder.sign(jose_jwk, header, claims)
     end
   end
 end
