@@ -66,4 +66,4 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 ## Status
 
 A `0.x` release: pre-1.0, API may change between minor versions. Pin to
-`~> 0.1`.
+`~> 0.5`.
