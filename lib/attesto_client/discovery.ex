@@ -45,6 +45,7 @@ defmodule AttestoClient.Discovery do
           | :invalid_jwks_uri
           | :issuer_mismatch
           | :invalid_metadata
+          | :blocked_host
           | {:http_status, pos_integer()}
           | {:transport, term()}
 
@@ -139,15 +140,85 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    req = Req.new([url: url] ++ Keyword.get(opts, :req_options, []))
+    with :ok <- guard_host(url) do
+      # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
+      # any caller `:req_options`). Otherwise the https/host validation, which
+      # only covers the INITIAL URL, would be bypassed by a 3xx `Location` to an
+      # internal address (e.g. the cloud metadata service). A 3xx therefore
+      # surfaces as `{:http_status, 3xx}` rather than being chased.
+      req =
+        Req.new([url: url] ++ Keyword.get(opts, :req_options, []) ++ [redirect: false])
 
-    case Req.request(req) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
-      {:ok, %Req.Response{status: 200}} -> {:error, :invalid_metadata}
-      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
-      {:error, reason} -> {:error, {:transport, reason}}
+      case Req.request(req) do
+        {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
+        {:ok, %Req.Response{status: 200}} -> {:error, :invalid_metadata}
+        {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+        {:error, reason} -> {:error, {:transport, reason}}
+      end
     end
   rescue
     error -> {:error, {:transport, Exception.message(error)}}
   end
+
+  # SSRF guard: reject a URL whose host resolves to a loopback, private,
+  # link-local, or unique-local address (RFC 1918 / RFC 4193 / 169.254.0.0/16 /
+  # 127.0.0.0/8 / ::1 / fe80::/10 / fc00::/7), so an attacker-influenced issuer
+  # or jwks_uri cannot point the fetch at an internal service or the cloud
+  # metadata endpoint. A host that does not resolve is left to the transport
+  # (it cannot reach an internal target). NOTE: this is a pre-flight check; it
+  # does not by itself defeat DNS rebinding (a connect-time peer-IP check would
+  # be required for that), but combined with `redirect: false` it closes the
+  # practical SSRF vectors.
+  defp guard_host(url) do
+    case URI.parse(url).host do
+      host when is_binary(host) and host != "" -> check_host_addrs(host)
+      _ -> {:error, :blocked_host}
+    end
+  end
+
+  defp check_host_addrs(host) do
+    case resolve_addrs(host) do
+      {:ok, addrs} -> if Enum.any?(addrs, &blocked_ip?/1), do: {:error, :blocked_host}, else: :ok
+      :unresolved -> :ok
+    end
+  end
+
+  defp resolve_addrs(host) do
+    charlist = String.to_charlist(host)
+    v4 = case :inet.getaddrs(charlist, :inet) do
+      {:ok, addrs} -> addrs
+      _ -> []
+    end
+
+    v6 = case :inet.getaddrs(charlist, :inet6) do
+      {:ok, addrs} -> addrs
+      _ -> []
+    end
+
+    case v4 ++ v6 do
+      [] -> :unresolved
+      addrs -> {:ok, addrs}
+    end
+  end
+
+  # IPv4 ranges that must never be the target of a server-side fetch.
+  defp blocked_ip?({127, _, _, _}), do: true
+  defp blocked_ip?({10, _, _, _}), do: true
+  defp blocked_ip?({192, 168, _, _}), do: true
+  defp blocked_ip?({172, b, _, _}) when b in 16..31, do: true
+  defp blocked_ip?({169, 254, _, _}), do: true
+  defp blocked_ip?({100, b, _, _}) when b in 64..127, do: true
+  defp blocked_ip?({0, _, _, _}), do: true
+  # IPv6: ::1 loopback.
+  defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  # IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap and re-check the embedded v4.
+  defp blocked_ip?({0, 0, 0, 0, 0, 0xFFFF, g, h}),
+    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
+
+  # Other IPv6: fe80::/10 link-local OR fc00::/7 unique-local (bit math in the
+  # body — band/2 is not guard-safe as a qualified call).
+  defp blocked_ip?({a, _, _, _, _, _, _, _}) when is_integer(a),
+    do: Bitwise.band(a, 0xFFC0) == 0xFE80 or Bitwise.band(a, 0xFE00) == 0xFC00
+
+  defp blocked_ip?(_addr), do: false
 end

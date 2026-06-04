@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- `AttestoClient.Discovery` hardens its discovery/JWKS fetches against SSRF:
+  redirects are no longer followed (a 3xx surfaces as `{:http_status, _}` rather
+  than being chased to its `Location`), and a URL whose host resolves to a
+  loopback, private, link-local, or unique-local address is rejected with
+  `:blocked_host` — so an attacker-influenced `issuer`/`jwks_uri` cannot point a
+  server-side fetch at an internal service or the cloud metadata endpoint. An
+  unresolvable host is left to the transport.
+
 ### Added
 
 - `AttestoClient.ClientAssertion` - build `private_key_jwt` client

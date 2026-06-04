@@ -113,6 +113,42 @@ defmodule AttestoClient.DiscoveryTest do
     end
   end
 
+  describe "SSRF hardening" do
+    # A plug that 302-redirects to an internal target; if redirects were
+    # followed, this would reach the metadata service.
+    defp redirect_plug(location) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", location)
+        |> Plug.Conn.send_resp(302, "")
+      end
+    end
+
+    test "rejects an issuer that resolves to a link-local address (cloud metadata)" do
+      assert {:error, :blocked_host} = Discovery.fetch("https://169.254.169.254")
+    end
+
+    test "rejects loopback and private issuers/JWKS URIs" do
+      assert {:error, :blocked_host} = Discovery.fetch("https://127.0.0.1")
+      assert {:error, :blocked_host} = Discovery.fetch("https://10.0.0.1")
+      assert {:error, :blocked_host} = Discovery.fetch("https://192.168.1.1")
+      assert {:error, :blocked_host} = Discovery.fetch_jwks("https://127.0.0.1/jwks")
+      assert {:error, :blocked_host} = Discovery.fetch_jwks("https://[::1]/jwks")
+    end
+
+    test "does not follow redirects (a 3xx is surfaced, never chased to its Location)" do
+      # If redirects were followed, the fetch would chase the Location to the
+      # internal target; instead the 302 is returned as a status error.
+      assert {:error, {:http_status, 302}} =
+               fetch(@issuer, redirect_plug("http://169.254.169.254/latest/meta-data/"))
+
+      assert {:error, {:http_status, 302}} =
+               Discovery.fetch_jwks("#{@issuer}/jwks",
+                 req_options: [plug: redirect_plug("http://127.0.0.1/jwks")]
+               )
+    end
+  end
+
   describe "interop" do
     defmodule Keystore do
       @moduledoc false
