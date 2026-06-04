@@ -117,7 +117,16 @@ defmodule AttestoClient.JARMTest do
     test "a tampered token" do
       key = as_key()
       jwt = sign(key, success_claims())
-      tampered = String.slice(jwt, 0..-2//1) <> "x"
+      # Flip the first character of the signature segment - fully significant
+      # bits, so the signature bytes always change (unlike the last char, whose
+      # trailing bits are not all significant under base64url).
+      [header, payload, signature] = String.split(jwt, ".")
+
+      flipped =
+        if(String.first(signature) == "A", do: "B", else: "A") <>
+          String.slice(signature, 1..-1//1)
+
+      tampered = Enum.join([header, payload, flipped], ".")
 
       assert {:error, :invalid_signature} = verify(tampered, jwks(key))
     end

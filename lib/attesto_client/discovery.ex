@@ -41,6 +41,7 @@ defmodule AttestoClient.Discovery do
 
   @type error ::
           :invalid_issuer
+          | :invalid_well_known
           | :invalid_jwks_uri
           | :issuer_mismatch
           | :invalid_metadata
@@ -58,7 +59,8 @@ defmodule AttestoClient.Discovery do
   @spec fetch(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch(issuer, opts \\ []) when is_list(opts) do
     with {:ok, uri, canonical} <- validate_issuer(issuer),
-         {:ok, body} <- get_json(metadata_url(uri, well_known(opts)), opts) do
+         {:ok, well_known} <- well_known(opts),
+         {:ok, body} <- get_json(metadata_url(uri, well_known), opts) do
       check_issuer(body, canonical)
     end
   end
@@ -101,10 +103,13 @@ defmodule AttestoClient.Discovery do
 
   defp validate_https(_url, error), do: {:error, error}
 
+  # Fail fast on an unknown :well_known rather than silently fetching the wrong
+  # document (a typo would otherwise return {:ok, _} for the wrong metadata).
   defp well_known(opts) do
     case Keyword.get(opts, :well_known, :openid_configuration) do
-      :oauth_authorization_server -> :oauth_authorization_server
-      _ -> :openid_configuration
+      :openid_configuration -> {:ok, :openid_configuration}
+      :oauth_authorization_server -> {:ok, :oauth_authorization_server}
+      _other -> {:error, :invalid_well_known}
     end
   end
 

@@ -71,6 +71,14 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:error, :invalid_issuer} = Discovery.fetch(:not_a_string)
     end
 
+    test "rejects an unknown :well_known value (fail fast, no wrong-document fetch)" do
+      # Must not fall through to the default document on a typo.
+      assert {:error, :invalid_well_known} =
+               fetch(@issuer, json_plug(200, %{"issuer" => @issuer}),
+                 well_known: :oauth_authorization
+               )
+    end
+
     test "rejects an issuer mismatch (RFC 8414 §3.3)" do
       assert {:error, :issuer_mismatch} =
                fetch(@issuer, json_plug(200, %{"issuer" => "https://evil.example"}))
