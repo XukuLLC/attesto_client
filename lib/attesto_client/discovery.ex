@@ -185,15 +185,18 @@ defmodule AttestoClient.Discovery do
 
   defp resolve_addrs(host) do
     charlist = String.to_charlist(host)
-    v4 = case :inet.getaddrs(charlist, :inet) do
-      {:ok, addrs} -> addrs
-      _ -> []
-    end
 
-    v6 = case :inet.getaddrs(charlist, :inet6) do
-      {:ok, addrs} -> addrs
-      _ -> []
-    end
+    v4 =
+      case :inet.getaddrs(charlist, :inet) do
+        {:ok, addrs} -> addrs
+        _ -> []
+      end
+
+    v6 =
+      case :inet.getaddrs(charlist, :inet6) do
+        {:ok, addrs} -> addrs
+        _ -> []
+      end
 
     case v4 ++ v6 do
       [] -> :unresolved

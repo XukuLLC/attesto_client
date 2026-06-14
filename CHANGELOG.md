@@ -30,7 +30,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounded to the FAPI 60-minute window. Parity-tested against an independent
   PyJWT reference and in-family against `Attesto.RequestObject.verify/3` under
   the FAPI Message Signing policy.
-- Internal `AttestoClient.Builder` shared by the builders (not public API).
+- Internal AttestoClient.Builder shared by the builders (not public API; hidden from docs).
 - `AttestoClient.JARM` - verify a signed authorization response (JARM, FAPI 2.0
   Message Signing §5.4): JWS signature against the authorization server's JWKS
   (FAPI algorithm allow-list, `none` rejected, kid selection), plus `iss`/`aud`/
