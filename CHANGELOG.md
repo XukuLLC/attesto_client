@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-06-21
 
 ### Security
 
@@ -18,6 +18,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `AttestoClient.IDToken` - verify OpenID Connect ID Tokens against authorization
+  server JWKS/discovery, including issuer, audience, `azp`, expiration,
+  issued-at, nonce, `max_age`/`auth_time`, and detached `at_hash` / `c_hash` /
+  `s_hash` validation. Interop-tested against `Attesto.IDToken.mint/4`.
+- `AttestoClient.IdentityAssertion` - build Identity Assertion JWT
+  Authorization Grant assertions (ID-JAG / EMA) with the `oauth-id-jag+jwt`
+  header and the required `iss`/`sub`/`aud`/`client_id`/`jti`/`iat`/`exp`
+  claims. Interop-tested against `Attesto.IdentityAssertion.verify/3`.
+- `AttestoClient.PKCE` - generate S256 PKCE verifier/challenge pairs, delegating
+  challenge computation to `Attesto.PKCE.challenge/1` so generated pairs verify
+  under `Attesto.PKCE.verify/3`.
+- `AttestoClient.SignedIntrospection` - verify RFC 9701 signed token
+  introspection responses against authorization-server JWKS/discovery.
+  Interop-tested against `Attesto.SignedIntrospection.response_jwt/4`.
+- `AttestoClient.UserInfo` - verify signed OpenID Connect UserInfo JWT
+  responses, including issuer/audience/subject checks and optional binding to a
+  previously verified ID Token subject.
+- Internal AttestoClient.Verifier shared by the AS-signed JWT verifiers (not
+  public API; hidden from docs).
 - `AttestoClient.ClientAssertion` - build `private_key_jwt` client
   authentication assertions (RFC 7523 / OpenID Connect Core §9), signed with the
   client's own key. Carries a cross-language parity test against an independent
@@ -41,3 +60,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authorization-server metadata and JWKS (RFC 8414 / OpenID Connect Discovery
   1.0) over `Req`, with `https` and RFC 8414 §3.3 issuer-match validation.
   Verified in-family against `Attesto.OpenIDDiscovery.metadata/2` output.
+
+### Changed
+
+- Require `attesto ~> 0.9` so the client mirror can use the current ID Token,
+  ID-JAG, PKCE, signed introspection, signing-algorithm, and hash primitives.

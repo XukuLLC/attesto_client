@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.6.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -15,7 +15,7 @@ defmodule AttestoClient.MixProject do
       start_permanent: Mix.env() == :prod,
       description:
         "Client-side OAuth 2.0 / OpenID Connect / FAPI 2.0 artifacts and verification: " <>
-          "private_key_jwt assertions, signed request objects (JAR), and JARM verification.",
+          "private_key_jwt, JAR, ID Tokens, JARM, ID-JAG, PKCE, and signed response verification.",
       package: package(),
       source_url: @url,
       homepage_url: @url,
@@ -68,7 +68,7 @@ defmodule AttestoClient.MixProject do
     if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, "~> 0.6"}
+      {:attesto, "~> 0.9"}
     end
   end
 
