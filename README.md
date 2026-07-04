@@ -28,6 +28,12 @@ and issues server artifacts with the authorization server's keystore;
 `AttestoClient` builds artifacts signed with the client's own key and verifies
 the server artifacts a client receives.
 
+On the server side of the same family,
+[`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix) is the
+batteries-included Phoenix/Ecto authorization server built on `attesto`, and
+[`attesto_mcp`](https://github.com/XukuLLC/attesto_mcp) protects a Model Context
+Protocol server as an OAuth resource server.
+
 It is **not** a full OAuth client framework: no flow orchestrator, token store,
 or session handling. It produces and checks the cryptographic wire-format
 artifacts a FAPI client needs and leaves HTTP orchestration to the host. DPoP
