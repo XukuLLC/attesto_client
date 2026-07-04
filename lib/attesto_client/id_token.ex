@@ -38,10 +38,12 @@ defmodule AttestoClient.IDToken do
   @clock_skew_seconds 60
   @id_token_typ "JWT"
 
+  @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
+
   @type verify_opt ::
           {:issuer, String.t()}
           | {:client_id, String.t()}
-          | {:jwks, Verifier.jwks()}
+          | {:jwks, jwks()}
           | {:metadata, map()}
           | {:jwks_uri, String.t()}
           | {:nonce, String.t()}

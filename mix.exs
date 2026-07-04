@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "0.6.0"
+  @version "1.0.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -68,7 +68,7 @@ defmodule AttestoClient.MixProject do
     if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, "~> 0.9"}
+      {:attesto, "~> 1.0"}
     end
   end
 

@@ -14,10 +14,12 @@ defmodule AttestoClient.SignedIntrospection do
   @clock_skew_seconds 60
   @typ "token-introspection+jwt"
 
+  @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
+
   @type verify_opt ::
           {:issuer, String.t()}
           | {:audience, String.t()}
-          | {:jwks, Verifier.jwks()}
+          | {:jwks, jwks()}
           | {:metadata, map()}
           | {:jwks_uri, String.t()}
           | {:accepted_algs, [SigningAlg.alg()]}

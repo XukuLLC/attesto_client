@@ -13,11 +13,13 @@ defmodule AttestoClient.UserInfo do
 
   @clock_skew_seconds 60
 
+  @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
+
   @type verify_opt ::
           {:issuer, String.t()}
           | {:client_id, String.t()}
           | {:id_token_sub, String.t()}
-          | {:jwks, Verifier.jwks()}
+          | {:jwks, jwks()}
           | {:metadata, map()}
           | {:jwks_uri, String.t()}
           | {:accepted_algs, [SigningAlg.alg()]}
