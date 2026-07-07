@@ -72,6 +72,50 @@ defmodule AttestoClient.Verifier do
 
   def verify_signature(_jwt, _keys, _accepted_algs), do: {:error, :invalid_token}
 
+  @doc """
+  True when `jwt` parses as a compact JWS whose JOSE header `alg` is `"none"`.
+  """
+  @spec unsigned?(String.t()) :: boolean()
+  def unsigned?(jwt) when is_binary(jwt) do
+    match?({:ok, %{"alg" => "none"}}, peek_header(jwt))
+  end
+
+  def unsigned?(_jwt), do: false
+
+  @doc """
+  Decode an **unsigned** (`alg: "none"`) JWT without signature verification,
+  returning `{:ok, claims, header}`.
+
+  The compact form must be canonical, the header `alg` must be exactly
+  `"none"`, and the signature part must be empty (RFC 7519 §6.1) - a token
+  that carries a signature alongside `alg: "none"` is rejected. Callers gate
+  this behind an explicit opt-in; it exists for the OIDC Core §3.1.3.7 case
+  where a code-flow client registered `id_token_signed_response_alg` `none`
+  and TLS server authentication stands in for the signature.
+  """
+  @spec decode_unsigned(String.t()) :: {:ok, map(), map()} | {:error, :invalid_token}
+  def decode_unsigned(jwt) when is_binary(jwt) do
+    with :ok <- check_compact_form(jwt),
+         {:ok, %{"alg" => "none"} = header} <- peek_header(jwt),
+         :ok <- check_crit_result(header),
+         [_header, payload, ""] <- String.split(jwt, "."),
+         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
+         {:ok, %{} = claims} <- JSON.decode(decoded) do
+      {:ok, claims, header}
+    else
+      _other -> {:error, :invalid_token}
+    end
+  end
+
+  def decode_unsigned(_jwt), do: {:error, :invalid_token}
+
+  defp check_crit_result(header) do
+    case check_crit(header) do
+      :ok -> :ok
+      {:error, _reason} -> :error
+    end
+  end
+
   @spec normalize_jwks(jwks()) :: {:ok, [map()]} | {:error, :invalid_jwks}
   def normalize_jwks(%{"keys" => keys}) when is_list(keys), do: normalize_jwks(keys)
 

@@ -245,4 +245,62 @@ defmodule AttestoClient.IDTokenTest do
                IDToken.verify("not.a.jwt", issuer: @issuer, client_id: @client_id, jwks: jwks())
     end
   end
+
+  describe "verify/2 unsigned (alg none)" do
+    defp unsigned(claims, header \\ %{"alg" => "none"}) do
+      Enum.map_join([header, claims], ".", fn part ->
+        part |> JSON.encode!() |> Base.url_encode64(padding: false)
+      end) <> "."
+    end
+
+    test "rejected by default" do
+      assert {:error, :invalid_signature} = verify(unsigned(base_claims()))
+    end
+
+    test "accepted with allow_unsigned: true (OIDC Core §3.1.3.7 code-flow case)" do
+      assert {:ok, claims} = verify(unsigned(base_claims()), allow_unsigned: true)
+      assert claims["sub"] == @subject
+    end
+
+    test "all claim checks still run when unsigned" do
+      assert {:error, :invalid_issuer} =
+               verify(unsigned(base_claims(%{"iss" => "https://evil.example"})),
+                 allow_unsigned: true
+               )
+
+      assert {:error, :invalid_audience} =
+               verify(unsigned(base_claims(%{"aud" => "other-client"})), allow_unsigned: true)
+
+      assert {:error, :nonce_mismatch} =
+               verify(unsigned(base_claims(%{"nonce" => "wrong"})),
+                 allow_unsigned: true,
+                 nonce: "expected"
+               )
+
+      assert {:error, :expired} =
+               verify(unsigned(base_claims(%{"exp" => @now - 1})), allow_unsigned: true)
+
+      assert {:error, :invalid_claims} =
+               verify(unsigned(Map.delete(base_claims(), "sub")), allow_unsigned: true)
+    end
+
+    test "does not weaken signed tokens: a bad signature still fails" do
+      other = JOSE.JWK.generate_key({:rsa, 2048})
+      {_, jwt} = other |> JOSE.JWT.sign(%{"alg" => "RS256"}, base_claims()) |> JOSE.JWS.compact()
+
+      assert {:error, :invalid_signature} = verify(jwt, allow_unsigned: true)
+    end
+
+    test "rejects alg none with a non-empty signature part (RFC 7519 §6.1)" do
+      forged = unsigned(base_claims()) <> Base.url_encode64("sig", padding: false)
+      assert {:error, :invalid_token} = verify(forged, allow_unsigned: true)
+    end
+
+    test "rejects an unsigned token carrying a crit header" do
+      header = %{"alg" => "none", "crit" => ["exp"]}
+
+      assert {:error, :invalid_token} =
+               verify(unsigned(base_claims(), header), allow_unsigned: true)
+    end
+  end
 end

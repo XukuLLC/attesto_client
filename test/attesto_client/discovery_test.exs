@@ -53,14 +53,26 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:ok, _} = fetch(issuer, plug, well_known: :oauth_authorization_server)
     end
 
-    test "normalises a trailing slash for both the request and the issuer match" do
+    test "removes a trailing slash for the request URL but matches the issuer exactly" do
+      # A slash-terminated (e.g. multi-tenant path) issuer: the well-known
+      # segment replaces the terminating slash (OIDC Discovery §4 / RFC 8414
+      # §3.1), and the document's issuer must be byte-identical to the supplied
+      # value - including the slash (RFC 8414 §3.3 / OIDC Discovery §4.3).
+      issuer = "https://op.example.com/test/a/alias/"
+
       plug = fn conn ->
-        assert conn.request_path == "/.well-known/openid-configuration"
-        # The authorization server's canonical issuer has no trailing slash.
-        json_plug(200, %{"issuer" => "https://op.example.com"}).(conn)
+        assert conn.request_path == "/test/a/alias/.well-known/openid-configuration"
+        json_plug(200, %{"issuer" => issuer}).(conn)
       end
 
-      assert {:ok, _} = fetch("https://op.example.com/", plug)
+      assert {:ok, %{"issuer" => ^issuer}} = fetch(issuer, plug)
+    end
+
+    test "rejects a document whose issuer differs only by a trailing slash" do
+      # "https://op.example.com/" and "https://op.example.com" are different
+      # issuer identifiers; a normalising comparison would conflate them.
+      plug = json_plug(200, %{"issuer" => "https://op.example.com"})
+      assert {:error, :issuer_mismatch} = fetch("https://op.example.com/", plug)
     end
 
     test "rejects a non-https issuer, or one with a query or fragment (RFC 8414 §2)" do

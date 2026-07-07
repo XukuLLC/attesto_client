@@ -29,6 +29,17 @@ defmodule AttestoClient.IDToken do
   `:jwks` may be supplied directly. Otherwise the verifier can fetch through
   `AttestoClient.Discovery`: pass `:metadata`, `:jwks_uri`, or just `:issuer`
   with optional `:req_options` / `:well_known`.
+
+  ## Unsigned ID Tokens (`alg: "none"`)
+
+  By default an unsigned ID Token is rejected. OIDC Core §3.1.3.7 permits a
+  client to skip signature validation only when the ID Token was received
+  directly from the token endpoint over TLS **and** the client registered
+  `id_token_signed_response_alg` `none`. Pass `allow_unsigned: true` to opt
+  into that case: a token whose JOSE header `alg` is exactly `"none"` (with an
+  empty signature part) is then accepted without signature verification, while
+  **all claim checks still run**. The option has no effect on signed tokens,
+  and never applies to artifacts received through the front channel.
   """
 
   alias Attesto.SecureCompare
@@ -52,6 +63,7 @@ defmodule AttestoClient.IDToken do
           | {:code, String.t()}
           | {:state, String.t()}
           | {:accepted_algs, [SigningAlg.alg()]}
+          | {:allow_unsigned, boolean()}
           | {:now, integer() | DateTime.t()}
           | {:req_options, keyword()}
           | {:well_known, AttestoClient.Discovery.well_known()}
@@ -112,9 +124,7 @@ defmodule AttestoClient.IDToken do
 
     with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
-         {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
-         {:ok, algs} <- Verifier.accepted_algs(opts),
-         {:ok, claims, header} <- Verifier.verify_signature(id_token, jwks, algs),
+         {:ok, claims, header} <- verify_or_decode(id_token, opts, issuer),
          :ok <- check_header_typ(header),
          :ok <- check_token_purpose(claims),
          :ok <- check_issuer(claims, issuer),
@@ -133,6 +143,23 @@ defmodule AttestoClient.IDToken do
   end
 
   def verify(_id_token, _opts), do: {:error, :invalid_token}
+
+  # The signature path resolves the issuer JWKS and verifies against it. The
+  # unsigned path is taken only under the explicit `allow_unsigned: true`
+  # opt-in AND a header alg of exactly "none" (OIDC Core §3.1.3.7, token
+  # endpoint over TLS); it needs no JWKS. A signed token is never affected by
+  # the opt-in, and an unsigned token without the opt-in falls through to the
+  # signature path, where it fails.
+  defp verify_or_decode(id_token, opts, issuer) do
+    if Keyword.get(opts, :allow_unsigned, false) == true and Verifier.unsigned?(id_token) do
+      Verifier.decode_unsigned(id_token)
+    else
+      with {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
+           {:ok, algs} <- Verifier.accepted_algs(opts) do
+        Verifier.verify_signature(id_token, jwks, algs)
+      end
+    end
+  end
 
   defp check_header_typ(%{"typ" => @id_token_typ}), do: :ok
   defp check_header_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}

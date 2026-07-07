@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `AttestoClient.Discovery.fetch/2` now compares the document's `issuer`
+  **exactly** against the supplied issuer (RFC 8414 §3.3 / OpenID Connect
+  Discovery 1.0 §4.3) instead of normalising a trailing slash away. A
+  slash-terminated path issuer (e.g. a multi-tenant issuer, or the OpenID
+  conformance suite's `https://.../test/a/<alias>/`) was previously rejected
+  with `:issuer_mismatch`; conversely, two identifiers that differ only by a
+  trailing slash no longer match. The trailing slash is still removed when
+  constructing the well-known request URL, as both specs require.
+
+### Added
+
+- `AttestoClient.IDToken.verify/2` accepts `allow_unsigned: true`, an explicit
+  opt-in for the OIDC Core §3.1.3.7 case: a client that registered
+  `id_token_signed_response_alg` `none` and received the ID Token directly from
+  the token endpoint over TLS may accept an unsigned (`alg: "none"`) token. All
+  claim checks still run; the signature part must be empty; signed tokens are
+  unaffected; the default remains to reject unsigned tokens.
+
 ## [1.0.0] - 2026-07-04
 
 First stable release; the public API is now under semantic versioning. No

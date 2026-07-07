@@ -20,10 +20,13 @@ defmodule AttestoClient.Discovery do
   ## Issuer / transport validation
 
     * The issuer MUST be an `https` URL with no query or fragment (RFC 8414 §2).
-    * The document's own `issuer` member MUST equal the issuer it was fetched
-      from (RFC 8414 §3.3), defending against a metadata mix-up. A trailing slash
-      on the supplied issuer is normalised away for both the request and this
-      comparison.
+    * The document's own `issuer` member MUST be **identical** to the issuer it
+      was fetched for (RFC 8414 §3.3 / OpenID Connect Discovery 1.0 §4.3),
+      defending against a metadata mix-up. The comparison is exact - no
+      trailing-slash normalisation - so a path-based issuer that ends in `/`
+      (e.g. a multi-tenant issuer) must be supplied exactly as the server
+      publishes it. A trailing slash is removed only when constructing the
+      well-known request URL, as both specs require.
     * A JWKS is fetched only over `https`, since it is the trust root for
       verifying the authorization server's signatures.
 
@@ -80,13 +83,13 @@ defmodule AttestoClient.Discovery do
   end
 
   # RFC 8414 §2: the issuer is an https URL with no query or fragment. Returns
-  # the parsed URI and the canonical issuer (trailing slash removed) used for the
-  # §3.3 match.
+  # the parsed URI and the issuer exactly as supplied, which is what the §3.3
+  # document match compares against.
   defp validate_issuer(issuer) when is_binary(issuer) do
     case URI.parse(issuer) do
       %URI{scheme: "https", host: host, query: nil, fragment: nil} = uri
       when is_binary(host) and host != "" ->
-        {:ok, uri, String.trim_trailing(issuer, "/")}
+        {:ok, uri, issuer}
 
       _other ->
         {:error, :invalid_issuer}
@@ -128,10 +131,13 @@ defmodule AttestoClient.Discovery do
     (path || "") |> String.trim_trailing("/")
   end
 
-  # RFC 8414 §3.3: the `issuer` in the document MUST equal the issuer it was
-  # retrieved for (compared against the canonical, slash-normalised value).
-  defp check_issuer(metadata, canonical) when is_map(metadata) do
-    if Map.get(metadata, "issuer") == canonical,
+  # RFC 8414 §3.3 / OIDC Discovery §4.3: the `issuer` in the document MUST be
+  # identical to the issuer it was retrieved for. Exact string comparison - a
+  # slash-normalising match would accept a subtly different identifier, and
+  # would reject legitimate slash-terminated path issuers (the value in the
+  # document is what ID Token `iss` claims are later matched against).
+  defp check_issuer(metadata, supplied) when is_map(metadata) do
+    if Map.get(metadata, "issuer") == supplied,
       do: {:ok, metadata},
       else: {:error, :issuer_mismatch}
   end
