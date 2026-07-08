@@ -101,5 +101,6 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 ## Status
 
-A `0.x` release: pre-1.0, API may change between minor versions. Pin to
-`~> 0.6`.
+A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) —
+minor and patch releases are backward-compatible, and breaking changes wait for
+a new major version. Pin to `~> 1.1`.
