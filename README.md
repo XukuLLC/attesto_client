@@ -3,6 +3,14 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/attesto_client)](https://hex.pm/packages/attesto_client)
 [![Hexdocs.pm](https://img.shields.io/badge/docs-hexdocs.pm-blue)](https://hexdocs.pm/attesto_client)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![OpenID Certified](https://img.shields.io/badge/OpenID-Certified-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
+
+<a href="https://openid.net/certification/certified-openid-relying-parties-profiles/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
+
+AttestoClient is
+[OpenID Certified](https://openid.net/certification/certified-openid-relying-parties-profiles/)
+as a Relying Party library to the **Basic**, **Config**, and **Dynamic** OP
+profiles, run against the OpenID Foundation's conformance suite.
 
 Build and verify the OAuth and OpenID Connect wire artifacts an Elixir client
 needs when your app already owns the HTTP flow: `private_key_jwt`, signed
