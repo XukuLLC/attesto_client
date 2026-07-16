@@ -81,6 +81,18 @@ defmodule AttestoClient.AuthorizationTransaction.Store.ETS do
     {:reply, reply, store}
   end
 
+  @impl true
+  def format_status(status) do
+    status
+    |> Map.update(:state, :redacted, fn store ->
+      %{table: :redacted, max_entries: Map.get(store, :max_entries)}
+    end)
+    |> Map.update(:message, :redacted, fn _message -> :redacted end)
+    |> Map.update(:messages, [], fn messages ->
+      if messages == [], do: [], else: [:redacted]
+    end)
+  end
+
   defp insert_unless_full(store, state, transaction, expires_at) do
     if :ets.info(store.table, :size) < store.max_entries do
       true = :ets.insert(store.table, {state, expires_at, transaction})

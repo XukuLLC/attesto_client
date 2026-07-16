@@ -48,7 +48,7 @@ defmodule AttestoClient.MixProject do
       {:jose, "~> 1.11"},
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
-      {:req, "~> 0.5"},
+      {:req, ">= 0.6.1 and < 1.0.0"},
 
       # Req's plug-based test adapter (Req.Test) for the discovery HTTP tests.
       {:plug, "~> 1.16", only: :test},

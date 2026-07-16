@@ -148,6 +148,21 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:error, :blocked_host} = Discovery.fetch_jwks("https://[::1]/jwks")
     end
 
+    test "Req plug tests bypass DNS because no network transport is used" do
+      plug = json_plug(200, %{"issuer" => "https://127.0.0.1"})
+
+      assert :ok =
+               Discovery.validate_endpoint("https://127.0.0.1/token",
+                 req_options: [plug: plug]
+               )
+
+      assert {:ok, %{"issuer" => "https://127.0.0.1"}} =
+               Discovery.fetch("https://127.0.0.1", req_options: [plug: plug])
+
+      assert {:error, :blocked_host} =
+               Discovery.validate_endpoint("https://127.0.0.1/token")
+    end
+
     test "does not follow redirects (a 3xx is surfaced, never chased to its Location)" do
       # If redirects were followed, the fetch would chase the Location to the
       # internal target; instead the 302 is returned as a status error.

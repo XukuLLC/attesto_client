@@ -23,6 +23,11 @@ If callbacks can land on different nodes, implement
 Its `put_new/4` and `take/2` operations must be atomic, and `take/2` must delete
 before returning.
 
+Login starts can allocate store capacity before authentication. Rate-limit the
+start endpoint per client and network/user signal, and monitor
+`:capacity_exceeded` rather than treating the configured bound as abuse
+protection by itself.
+
 Single-flight refresh protection covers callers sharing one coordinator
 process. In a cluster, route each token-record key to one coordinator or place a
 distributed lock/serialization layer around refresh; independent coordinators
@@ -33,10 +38,15 @@ cannot prevent cross-node reuse of the same refresh token.
 ```elixir
 store = {AttestoClient.AuthorizationTransaction.Store.ETS, MyApp.OIDCTransactions}
 
+# Generate this once per initiating browser session and retain it only in the
+# application's secure, HttpOnly session. Do not put it in the redirect URL.
+browser_binding = application_browser_session_binding
+
 {:ok, request} =
   AttestoClient.AuthorizationCode.start(store,
     issuer: "https://accounts.example.com",
     client_id: "my-client",
+    browser_binding: browser_binding,
     redirect_uri: "https://app.example.com/oidc/callback",
     scopes: ["openid", "profile", "email"],
     id_token_alg: "RS256"
@@ -49,6 +59,17 @@ store = {AttestoClient.AuthorizationTransaction.Store.ETS, MyApp.OIDCTransaction
 checked against provider metadata and then used as the sole accepted ID Token
 algorithm.
 
+The browser binding is mandatory protocol correlation: a callback created in
+one browser session cannot establish a login in another. AttestoClient treats
+it as an opaque value and does not create, retain, or authorize the application
+session. A fresh random value with at least 256 bits of entropy retained in the
+server-side session (or protected by the framework's secure session mechanism)
+is a suitable binding.
+
+HTTPS redirect URIs are required for web clients. HTTP is accepted only for
+loopback redirects (`127.0.0.0/8`, `[::1]`, or `localhost`) used by native
+clients.
+
 ## Handle the callback
 
 Pass the callback's string-keyed parameter map. State is consumed before the
@@ -57,6 +78,7 @@ token request, including for provider errors and invalid responses:
 ```elixir
 {:ok, completed} =
   AttestoClient.AuthorizationCode.callback(store, callback_params,
+    browser_binding: browser_binding_from_secure_session,
     client_auth: {:private_key_jwt, client_private_jwk},
     timeout: 10_000
   )
@@ -71,6 +93,10 @@ have already been consumed and must not be retried.
 Successful verification establishes protocol facts such as issuer, audience,
 nonce, signature, and time validity. It does not decide that the subject may
 access your application. Apply authorization before creating a session.
+
+When several providers share a client, prefer a distinct registered redirect
+URI for each provider. This prevents provider mix-up when an older provider
+does not return the authorization-response `iss` parameter.
 
 ## Refresh rotation
 

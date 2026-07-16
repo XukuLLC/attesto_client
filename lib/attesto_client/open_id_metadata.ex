@@ -44,21 +44,35 @@ defmodule AttestoClient.OpenIDMetadata do
   end
 
   defp validate_endpoints(metadata) do
-    fields = @required_string_fields ++ ~w(revocation_endpoint end_session_endpoint)
+    fields = [
+      {"authorization_endpoint", :browser},
+      {"end_session_endpoint", :browser},
+      {"token_endpoint", :server},
+      {"jwks_uri", :server},
+      {"revocation_endpoint", :server}
+    ]
 
-    Enum.reduce_while(fields, :ok, fn field, :ok ->
+    Enum.reduce_while(fields, :ok, fn {field, endpoint_kind}, :ok ->
       case Map.fetch(metadata, field) do
         :error ->
           {:cont, :ok}
 
         {:ok, endpoint} ->
-          endpoint_validation_step(endpoint)
+          endpoint_validation_step(endpoint, endpoint_kind)
       end
     end)
   end
 
-  defp endpoint_validation_step(endpoint) do
-    case Discovery.validate_endpoint(endpoint) do
+  defp endpoint_validation_step(endpoint, :browser) do
+    endpoint_validation_result(Discovery.validate_browser_endpoint(endpoint))
+  end
+
+  defp endpoint_validation_step(endpoint, :server) do
+    endpoint_validation_result(Discovery.validate_browser_endpoint(endpoint))
+  end
+
+  defp endpoint_validation_result(result) do
+    case result do
       :ok -> {:cont, :ok}
       {:error, reason} -> {:halt, {:error, reason}}
     end

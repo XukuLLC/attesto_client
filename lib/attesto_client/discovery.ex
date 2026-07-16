@@ -90,19 +90,37 @@ defmodule AttestoClient.Discovery do
   Applications normally use this indirectly through the authorization-code,
   refresh, and revocation APIs.
   """
-  @spec validate_endpoint(term()) :: :ok | {:error, :invalid_endpoint | :blocked_host}
-  def validate_endpoint(endpoint) when is_binary(endpoint) do
+  @spec validate_endpoint(term(), keyword()) ::
+          :ok | {:error, :invalid_endpoint | :blocked_host}
+  def validate_endpoint(endpoint, opts \\ [])
+
+  def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
     case URI.parse(endpoint) do
       %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
       when is_binary(host) and host != "" ->
-        guard_host(endpoint)
+        guard_host(endpoint, opts)
 
       _invalid ->
         {:error, :invalid_endpoint}
     end
   end
 
-  def validate_endpoint(_endpoint), do: {:error, :invalid_endpoint}
+  def validate_endpoint(_endpoint, _opts), do: {:error, :invalid_endpoint}
+
+  @doc false
+  @spec validate_browser_endpoint(term()) :: :ok | {:error, :invalid_endpoint}
+  def validate_browser_endpoint(endpoint) when is_binary(endpoint) do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        :ok
+
+      _invalid ->
+        {:error, :invalid_endpoint}
+    end
+  end
+
+  def validate_browser_endpoint(_endpoint), do: {:error, :invalid_endpoint}
 
   @doc false
   @spec validate_issuer_identifier(term()) :: :ok | {:error, :invalid_issuer}
@@ -131,8 +149,12 @@ defmodule AttestoClient.Discovery do
 
   defp validate_https(url, error) when is_binary(url) do
     case URI.parse(url) do
-      %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> {:ok, url}
-      _other -> {:error, error}
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        {:ok, url}
+
+      _other ->
+        {:error, error}
     end
   end
 
@@ -177,17 +199,18 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    with :ok <- guard_host(url) do
+    with :ok <- guard_host(url, opts) do
       # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
       # any caller `:req_options`). Otherwise the https/host validation, which
       # only covers the INITIAL URL, would be bypassed by a 3xx `Location` to an
       # internal address (e.g. the cloud metadata service). A 3xx therefore
       # surfaces as `{:http_status, 3xx}` rather than being chased.
-      req =
-        Req.new(
-          Keyword.get(opts, :req_options, []) ++
-            [url: url, redirect: false, receive_timeout: 10_000]
-        )
+      req_options =
+        opts
+        |> Keyword.get(:req_options, [])
+        |> Keyword.put_new(:receive_timeout, 10_000)
+
+      req = Req.new(req_options ++ [url: url, redirect: false])
 
       case Req.request(req) do
         {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
@@ -209,11 +232,24 @@ defmodule AttestoClient.Discovery do
   # does not by itself defeat DNS rebinding (a connect-time peer-IP check would
   # be required for that), but combined with `redirect: false` it closes the
   # practical SSRF vectors.
-  defp guard_host(url) do
-    case URI.parse(url).host do
-      host when is_binary(host) and host != "" -> check_host_addrs(host)
-      _ -> {:error, :blocked_host}
+  defp guard_host(url, opts) do
+    if req_test_transport?(opts) do
+      :ok
+    else
+      case URI.parse(url).host do
+        host when is_binary(host) and host != "" -> check_host_addrs(host)
+        _ -> {:error, :blocked_host}
+      end
     end
+  end
+
+  # A Req plug handles the request in-process and cannot connect to the URL's
+  # resolved address. Skipping DNS in that case keeps tests deterministic
+  # without weakening any real network transport.
+  defp req_test_transport?(opts) do
+    opts
+    |> Keyword.get(:req_options, [])
+    |> Keyword.has_key?(:plug)
   end
 
   defp check_host_addrs(host) do

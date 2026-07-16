@@ -13,7 +13,9 @@ defmodule AttestoClient.AuthorizationTransactionStoreTest do
       client_id: "client",
       redirect_uri: "https://rp.example.com/callback",
       metadata: %{},
-      id_token_alg: "RS256"
+      id_token_alg: "RS256",
+      browser_binding: "browser-binding",
+      max_age: nil
     }
   end
 
@@ -50,5 +52,24 @@ defmodule AttestoClient.AuthorizationTransactionStoreTest do
     store = start_supervised!(ETS)
     assert :ok = ETS.put_new(store, "state", transaction("state"), 1_000)
     assert {:error, :already_exists} = ETS.put_new(store, "state", transaction("state"), 1_000)
+  end
+
+  test "redacts transaction secrets from formatted process status" do
+    status = %{
+      state: %{table: :private_table, max_entries: 10},
+      message: {:put_new, "state", transaction("secret-message"), 1_000},
+      messages: [{:put_new, "state", transaction("secret-state"), 1_000}]
+    }
+
+    formatted = ETS.format_status(status)
+    inspected = inspect(formatted)
+
+    assert formatted.state == %{table: :redacted, max_entries: 10}
+    assert formatted.message == :redacted
+    assert formatted.messages == [:redacted]
+    refute inspected =~ "secret-state"
+    refute inspected =~ "secret-message"
+    refute inspected =~ "browser-binding"
+    refute inspected =~ String.duplicate("v", 43)
   end
 end

@@ -29,7 +29,8 @@ protocol mechanics without delegating application policy:
 - Build ID-JAG/EMA identity assertions for the JWT-bearer grant.
 - Generate S256 PKCE verifier/challenge pairs.
 - Fetch authorization-server metadata and JWKS with issuer validation.
-- Correlate state/nonce/PKCE in an atomic, expiring transaction store.
+- Correlate state/nonce/PKCE and an opaque browser-session binding in an atomic,
+  expiring transaction store.
 - Single-flight concurrent refresh-token rotation with bounded deadlines.
 - Revoke tokens and create RP-Initiated Logout requests.
 
@@ -73,7 +74,7 @@ policy. DPoP proof generation for outgoing requests is
 - `AttestoClient.Discovery` — fetch and read authorization-server metadata and
   JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
 - `AttestoClient.AuthorizationCode` — complete OIDC Authorization Code flow
-  with S256 PKCE, nonce, issuer binding, and one-time state.
+  with S256 PKCE, nonce, issuer and browser-session binding, and one-time state.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
   single-node transaction store with atomic consumption.
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,

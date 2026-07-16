@@ -9,6 +9,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
   @issuer "https://op.example.com"
   @client_id "client-123"
   @redirect_uri "https://rp.example.com/callback"
+  @browser_binding "opaque-browser-binding"
   @now System.system_time(:second)
   @key JOSE.JWK.generate_key({:rsa, 2048})
 
@@ -35,11 +36,20 @@ defmodule AttestoClient.AuthorizationCodeTest do
         [
           issuer: @issuer,
           client_id: @client_id,
+          browser_binding: @browser_binding,
           redirect_uri: @redirect_uri,
           metadata: metadata()
         ],
         opts
       )
+    )
+  end
+
+  defp callback(store, params, opts \\ []) do
+    AuthorizationCode.callback(
+      store,
+      params,
+      Keyword.put_new(opts, :browser_binding, @browser_binding)
     )
   end
 
@@ -129,6 +139,65 @@ defmodule AttestoClient.AuthorizationCodeTest do
     )
   end
 
+  test "requires and atomically consumes opaque browser-session binding" do
+    store = start_supervised!(ETS)
+
+    assert {:error, :missing_browser_binding} =
+             start_flow(store, browser_binding: nil)
+
+    assert {:ok, wrong} = start_flow(store)
+
+    assert {:error, :browser_binding_mismatch} =
+             AuthorizationCode.callback(
+               {ETS, store},
+               %{"state" => wrong.state, "code" => "code"},
+               browser_binding: "different-browser-session"
+             )
+
+    assert {:error, {:invalid_state, :not_found}} =
+             callback({ETS, store}, %{"state" => wrong.state, "code" => "code"})
+
+    assert {:ok, missing} = start_flow(store)
+
+    assert {:error, :missing_browser_binding} =
+             AuthorizationCode.callback(
+               {ETS, store},
+               %{"state" => missing.state, "code" => "code"}
+             )
+
+    assert {:error, {:invalid_state, :not_found}} =
+             callback({ETS, store}, %{"state" => missing.state, "code" => "code"})
+  end
+
+  test "allows HTTP redirect URIs only for loopback hosts" do
+    store = start_supervised!(ETS)
+
+    Enum.each(
+      [
+        "http://127.0.0.1/callback",
+        "http://127.255.12.34:49152/callback",
+        "http://[::1]:49152/callback",
+        "http://localhost:49152/callback",
+        "https://rp.example.com/callback"
+      ],
+      fn redirect_uri ->
+        assert {:ok, _started} = start_flow(store, redirect_uri: redirect_uri)
+      end
+    )
+
+    Enum.each(
+      [
+        "http://rp.example.com/callback",
+        "http://192.168.1.10/callback",
+        "http://localhost.example.com/callback",
+        "http://[::2]/callback"
+      ],
+      fn redirect_uri ->
+        assert {:error, :invalid_redirect_uri} = start_flow(store, redirect_uri: redirect_uri)
+      end
+    )
+  end
+
   test "exchanges once and binds issuer, nonce, access token, and PKCE verifier" do
     store = start_supervised!(ETS)
     assert {:ok, started} = start_flow(store)
@@ -164,7 +233,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     end
 
     assert {:ok, result} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => started.state, "code" => "code-1", "iss" => @issuer},
                req_options: [plug: plug],
@@ -182,7 +251,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:ok, query["code_challenge"]} == PKCE.code_challenge(form["code_verifier"])
 
     assert {:error, {:invalid_state, :not_found}} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => started.state, "code" => "code-1"},
                req_options: [plug: plug]
@@ -219,7 +288,55 @@ defmodule AttestoClient.AuthorizationCodeTest do
         end
 
         result =
-          AuthorizationCode.callback(
+          callback(
+            {ETS, store},
+            %{"state" => started.state, "code" => "code"},
+            req_options: [plug: plug]
+          )
+
+        case expectation do
+          :ok -> assert {:ok, _completed} = result
+          error -> assert {:error, ^error} = result
+        end
+    end)
+  end
+
+  test "enforces authorization-request max_age against callback auth_time" do
+    store = start_supervised!(ETS)
+
+    assert {:error, :invalid_max_age} =
+             start_flow(store, authorization_params: %{"max_age" => "not-a-number"})
+
+    Enum.each([{@now - 30, :ok}, {@now - 120, :max_age_exceeded}], fn
+      {auth_time, expectation} ->
+        assert {:ok, started} =
+                 start_flow(store, authorization_params: %{"max_age" => "60"})
+
+        query = started.url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+        access_token = "access"
+
+        plug = fn conn ->
+          case conn.request_path do
+            "/jwks" ->
+              conn
+              |> Plug.Conn.put_resp_content_type("application/json")
+              |> Plug.Conn.send_resp(200, JSON.encode!(public_jwks()))
+
+            "/token" ->
+              response = %{
+                "access_token" => access_token,
+                "token_type" => "Bearer",
+                "id_token" => id_token(query["nonce"], access_token, %{"auth_time" => auth_time})
+              }
+
+              conn
+              |> Plug.Conn.put_resp_content_type("application/json")
+              |> Plug.Conn.send_resp(200, JSON.encode!(response))
+          end
+        end
+
+        result =
+          callback(
             {ETS, store},
             %{"state" => started.state, "code" => "code"},
             req_options: [plug: plug]
@@ -238,13 +355,13 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:ok, first} = start_flow(store)
 
     assert {:error, {:authorization_error, "access_denied", nil}} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => first.state, "error" => "access_denied"}
              )
 
     assert {:error, {:invalid_state, :not_found}} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => first.state, "code" => "code"}
              )
@@ -252,7 +369,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:ok, mixed} = start_flow(store)
 
     assert {:error, :mixed_authorization_response} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => mixed.state, "code" => "code", "error" => "denied"}
              )
@@ -260,7 +377,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:ok, wrong_issuer} = start_flow(store)
 
     assert {:error, :issuer_mismatch} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => wrong_issuer.state, "code" => "code", "iss" => "https://evil.example"}
              )
@@ -271,7 +388,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
              )
 
     assert {:error, :missing_response_issuer} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => required_issuer.state, "code" => "code"}
              )
@@ -281,7 +398,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     Process.sleep(5)
 
     assert {:error, {:invalid_state, :expired}} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => expired.state, "code" => "code"}
              )
@@ -307,7 +424,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     end
 
     assert {:error, :timeout} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => started.state, "code" => "code"},
                req_options: [plug: plug],
@@ -317,7 +434,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert Agent.get(counter, & &1) == 1
 
     assert {:error, {:invalid_state, :not_found}} =
-             AuthorizationCode.callback(
+             callback(
                {ETS, store},
                %{"state" => started.state, "code" => "code"}
              )

@@ -9,10 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - Add a complete OpenID Connect Authorization Code flow that always uses S256
-  PKCE, binds callbacks to high-entropy state and nonce, validates the response
-  issuer when supplied, atomically consumes expiring transaction state, pins
-  the registered ID Token algorithm, and gives the code exchange a bounded
-  deadline with retries disabled.
+  PKCE, binds callbacks to high-entropy state, nonce, and a mandatory opaque
+  application browser-session value, validates the response issuer when
+  supplied, atomically consumes expiring transaction state, pins the registered
+  ID Token algorithm, and gives the code exchange a bounded deadline with
+  retries disabled.
 - ID Token verification now rejects ambiguous eligible JWKS keys and RSA keys
   below 2048 bits, honors JWK `use` / `key_ops`, validates optional `nbf`, and
   uses constant-time nonce/subject comparisons. A missing `kid` remains valid
@@ -20,6 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Add bounded single-flight refresh-token rotation. Concurrent callers for one
   application key share one request and one result; timeout and worker failure
   wake all waiters and clear the flight.
+- Require HTTPS redirect URIs except for native-client loopback HTTP redirects.
+- Raise the Req dependency floor to 0.6.1, the first release patched for
+  EEF-CVE-2026-49755 decompression-bomb denial of service.
 
 ### Added
 
@@ -34,6 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Adversarial coverage for replay and concurrent state consumption, expiry,
   issuer/audience/nonce confusion, ambiguous or ineligible keys, weak RSA,
   malformed discovery, refresh races, independent refreshes, and deadlines.
+- Authorization-request `max_age` is retained in the transaction and enforced
+  against the callback ID Token's `auth_time`.
 
 ### Changed
 
@@ -48,6 +54,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Migration
 
+- `AttestoClient.AuthorizationCode.start/2` and `callback/3` now require the
+  same opaque `:browser_binding`. Generate or retain it in the initiating user
+  agent's secure application session; callbacks with a missing or different
+  binding consume state and fail before token exchange.
 - The key-selection and minimum-RSA checks intentionally reject tokens that 1.x
   could accept. Applications with duplicate `kid` values, multiple eligible
   kid-less keys, encryption-only verification keys, or RSA keys below 2048 bits

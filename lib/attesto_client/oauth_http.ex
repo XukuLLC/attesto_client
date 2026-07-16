@@ -8,7 +8,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   @spec post_form(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    with :ok <- AttestoClient.Discovery.validate_endpoint(endpoint),
+    with :ok <- validate_endpoint(endpoint, opts),
          {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
@@ -20,7 +20,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   @spec post_form_unit(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def post_form_unit(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    with :ok <- AttestoClient.Discovery.validate_endpoint(endpoint),
+    with :ok <- validate_endpoint(endpoint, opts),
          {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
@@ -28,6 +28,12 @@ defmodule AttestoClient.OAuthHTTP do
         timeout_ms
       )
     end
+  end
+
+  defp validate_endpoint(endpoint, opts) do
+    AttestoClient.Discovery.validate_endpoint(endpoint,
+      req_options: Keyword.get(opts, :req_options, [])
+    )
   end
 
   defp authenticate(form, endpoint, opts) do

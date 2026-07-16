@@ -149,8 +149,8 @@ defmodule AttestoClient.TokenTest do
         Token.refresh(coordinator, :second, tokens("refresh-2", "openid email"), opts)
       end)
 
-    assert_receive {:started, first_worker}
-    assert_receive {:started, second_worker}
+    assert_receive {:started, first_worker}, 500
+    assert_receive {:started, second_worker}, 500
     send(first_worker, :continue)
     send(second_worker, :continue)
 
@@ -264,11 +264,11 @@ defmodule AttestoClient.TokenTest do
         )
       end)
 
-    assert_receive {:refresh_request_started, request_pid}
+    assert_receive {:refresh_request_started, request_pid}, 500
     request_monitor = Process.monitor(request_pid)
     :ok = GenServer.stop(coordinator, :shutdown)
 
-    assert_receive {:DOWN, ^request_monitor, :process, ^request_pid, _reason}
+    assert_receive {:DOWN, ^request_monitor, :process, ^request_pid, _reason}, 500
     assert {:error, {:coordinator_exit, _reason}} = Task.await(task)
     refute_receive :rotation_completed
   end

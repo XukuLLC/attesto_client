@@ -8,11 +8,14 @@ defmodule AttestoClient.AuthorizationCode do
   exactly once, and verifies the ID Token against the stored issuer, client,
   nonce, configured algorithm, and returned access token.
 
-  The store protects protocol correlation only. Applications remain
+  Transactions are also bound to an opaque application-supplied browser-session
+  value, preventing a response initiated in one user agent from being used in
+  another. The store protects protocol correlation only. Applications remain
   responsible for deciding whether verified claims authorize a user, creating
   or retaining a session, and persisting rotated tokens.
   """
 
+  alias Attesto.SecureCompare
   alias Attesto.SigningAlg
   alias AttestoClient.AuthorizationTransaction
   alias AttestoClient.AuthorizationTransaction.Store
@@ -32,10 +35,15 @@ defmodule AttestoClient.AuthorizationCode do
   @doc """
   Begin an authorization transaction.
 
-  Required options are `:issuer`, `:client_id`, and `:redirect_uri`. Discovery
-  is fetched unless `:metadata` is supplied. `:scopes` defaults to `["openid"]`
-  and must include `openid`. `:id_token_alg` defaults to `"RS256"` and must
-  match the client's registration and the provider metadata.
+  Required options are `:issuer`, `:client_id`, `:redirect_uri`, and an opaque
+  `:browser_binding` retained in the initiating user agent's secure, HttpOnly
+  application session. The same binding is mandatory at callback. The value is
+  protocol correlation only; authorization and session policy remain
+  application-owned.
+
+  Discovery is fetched unless `:metadata` is supplied. `:scopes` defaults to
+  `["openid"]` and must include `openid`. `:id_token_alg` defaults to `"RS256"`
+  and must match the client's registration and the provider metadata.
 
   Additional request values may be supplied in `:authorization_params`, but
   protocol-bound parameters cannot be overridden.
@@ -48,6 +56,7 @@ defmodule AttestoClient.AuthorizationCode do
 
     with {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, client_id} <- required_string(opts, :client_id),
+         {:ok, browser_binding} <- required_string(opts, :browser_binding),
          {:ok, redirect_uri} <- redirect_uri(opts),
          {:ok, scopes} <- scopes(opts),
          {:ok, extra_params} <- authorization_params(opts),
@@ -55,14 +64,19 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, id_token_alg} <- id_token_alg(opts),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
          :ok <- metadata_supports_alg(metadata, id_token_alg),
+         {:ok, max_age} <- max_age(extra_params),
          {:ok, state, transaction} <-
            store_transaction(
              store,
-             issuer,
-             client_id,
-             redirect_uri,
-             metadata,
-             id_token_alg,
+             %{
+               issuer: issuer,
+               client_id: client_id,
+               redirect_uri: redirect_uri,
+               metadata: metadata,
+               id_token_alg: id_token_alg,
+               browser_binding: browser_binding,
+               max_age: max_age
+             },
              ttl_ms
            ) do
       params =
@@ -92,7 +106,9 @@ defmodule AttestoClient.AuthorizationCode do
   Consume an authorization response and complete the code exchange.
 
   `params` is the string-keyed callback parameter map. State is consumed before
-  any token request, so replay and concurrent duplicate callbacks fail. The
+  any token request, so replay and concurrent duplicate callbacks fail.
+  `:browser_binding` is required and must equal the opaque value supplied to
+  `start/2`; a mismatch consumes state and fails before token exchange. The
   client authentication option is forwarded as `:client_auth`; supported forms
   are `:none`, `{:client_secret_basic, secret}`,
   `{:client_secret_post, secret}`, and `{:private_key_jwt, jwk}`.
@@ -111,6 +127,7 @@ defmodule AttestoClient.AuthorizationCode do
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
     with {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state),
+         :ok <- check_browser_binding(transaction, opts),
          :ok <- check_response_issuer(params, transaction),
          {:ok, code} <- callback_code(params),
          {:ok, timeout_ms} <- positive_integer(opts, :timeout, @default_timeout_ms) do
@@ -120,20 +137,19 @@ defmodule AttestoClient.AuthorizationCode do
 
   def callback(_store, _params, _opts), do: {:error, :invalid_callback}
 
-  defp store_transaction(store, issuer, client_id, redirect_uri, metadata, id_token_alg, ttl_ms) do
+  defp store_transaction(store, context, ttl_ms) do
     Enum.reduce_while(1..3, {:error, :state_collision}, fn _attempt, _acc ->
       state = random_value()
 
-      transaction = %AuthorizationTransaction{
-        state: state,
-        nonce: random_value(),
-        code_verifier: PKCE.code_verifier(),
-        issuer: issuer,
-        client_id: client_id,
-        redirect_uri: redirect_uri,
-        metadata: metadata,
-        id_token_alg: id_token_alg
-      }
+      transaction =
+        struct!(
+          AuthorizationTransaction,
+          Map.merge(context, %{
+            state: state,
+            nonce: random_value(),
+            code_verifier: PKCE.code_verifier()
+          })
+        )
 
       case Store.put_new(store, state, transaction, ttl_ms) do
         :ok -> {:halt, {:ok, state, transaction}}
@@ -190,6 +206,7 @@ defmodule AttestoClient.AuthorizationCode do
       access_token: tokens.access_token,
       code: code,
       require_c_hash: false,
+      max_age: transaction.max_age,
       accepted_algs: [transaction.id_token_alg]
     ]
 
@@ -225,6 +242,18 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
+  defp check_browser_binding(transaction, opts) do
+    case Keyword.get(opts, :browser_binding) do
+      binding when is_binary(binding) and binding != "" ->
+        if SecureCompare.equal?(binding, transaction.browser_binding),
+          do: :ok,
+          else: {:error, :browser_binding_mismatch}
+
+      _missing ->
+        {:error, :missing_browser_binding}
+    end
+  end
+
   defp scopes(opts) do
     case Keyword.get(opts, :scopes, ["openid"]) do
       scopes when is_list(scopes) and scopes != [] ->
@@ -242,7 +271,7 @@ defmodule AttestoClient.AuthorizationCode do
       %{} = params ->
         valid? =
           Enum.all?(params, fn {key, value} ->
-            is_binary(key) and key not in @reserved_params and scalar_or_string_list?(value)
+            is_binary(key) and key not in @reserved_params and scalar_authorization_value?(value)
           end)
 
         if valid?, do: {:ok, params}, else: {:error, :invalid_authorization_params}
@@ -255,13 +284,36 @@ defmodule AttestoClient.AuthorizationCode do
   defp redirect_uri(opts) do
     with {:ok, value} <- required_string(opts, :redirect_uri) do
       case URI.parse(value) do
-        %URI{scheme: scheme, host: host, userinfo: nil, fragment: nil}
-        when scheme in ["https", "http"] and is_binary(host) and host != "" ->
+        %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+        when is_binary(host) and host != "" ->
           {:ok, value}
+
+        %URI{scheme: "http", host: host, userinfo: nil, fragment: nil}
+        when is_binary(host) and host != "" ->
+          validate_http_redirect(value, host)
 
         _invalid ->
           {:error, :invalid_redirect_uri}
       end
+    end
+  end
+
+  defp validate_http_redirect(value, host) do
+    if loopback_host?(host), do: {:ok, value}, else: {:error, :invalid_redirect_uri}
+  end
+
+  defp loopback_host?(host) do
+    case String.downcase(host) do
+      "localhost" -> true
+      "::1" -> true
+      host -> ipv4_loopback?(host)
+    end
+  end
+
+  defp ipv4_loopback?(host) do
+    case :inet.parse_ipv4_address(String.to_charlist(host)) do
+      {:ok, {127, _, _, _}} -> true
+      _other -> false
     end
   end
 
@@ -292,15 +344,31 @@ defmodule AttestoClient.AuthorizationCode do
 
   defp missing_error(:issuer), do: :missing_issuer
   defp missing_error(:client_id), do: :missing_client_id
+  defp missing_error(:browser_binding), do: :missing_browser_binding
   defp missing_error(:redirect_uri), do: :missing_redirect_uri
 
   defp invalid_error(:transaction_ttl_ms), do: :invalid_transaction_ttl_ms
   defp invalid_error(:timeout), do: :invalid_timeout
 
-  defp scalar_or_string_list?(value) when is_binary(value), do: true
-  defp scalar_or_string_list?(value) when is_integer(value), do: true
+  defp scalar_authorization_value?(value) when is_binary(value), do: true
+  defp scalar_authorization_value?(value) when is_integer(value), do: true
+  defp scalar_authorization_value?(_value), do: false
 
-  defp scalar_or_string_list?(_value), do: false
+  defp max_age(params) do
+    case Map.get(params, "max_age") do
+      nil -> {:ok, nil}
+      age when is_integer(age) and age >= 0 -> {:ok, age}
+      age when is_binary(age) -> parse_max_age(age)
+      _invalid -> {:error, :invalid_max_age}
+    end
+  end
+
+  defp parse_max_age(age) do
+    case Integer.parse(age) do
+      {parsed, ""} when parsed >= 0 -> {:ok, parsed}
+      _invalid -> {:error, :invalid_max_age}
+    end
+  end
 
   defp random_value, do: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
 
