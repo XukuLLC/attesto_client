@@ -29,6 +29,9 @@ protocol mechanics without delegating application policy:
 - Build ID-JAG/EMA identity assertions for the JWT-bearer grant.
 - Generate S256 PKCE verifier/challenge pairs.
 - Fetch authorization-server metadata and JWKS with issuer validation.
+- Verify RFC 9068 JWT access tokens from a remote issuer with coordinated JWKS
+  rotation, bounded caching and stale-key use, DPoP/mTLS binding, and Plug
+  integration.
 - Correlate state/nonce/PKCE and an opaque browser-session binding in an atomic,
   expiring transaction store.
 - Single-flight concurrent refresh-token rotation with bounded deadlines.
@@ -73,6 +76,11 @@ policy. DPoP proof generation for outgoing requests is
   and bind them to a verified ID Token subject when supplied.
 - `AttestoClient.Discovery` — fetch and read authorization-server metadata and
   JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
+- `AttestoClient.ResourceServer` — verify remote-issuer RFC 9068 JWT access
+  tokens, coordinate JWKS refresh, and enforce exact OAuth scopes.
+- `AttestoClient.ResourceServer.Plug` — authenticate Bearer, DPoP, and mTLS
+  requests, fail closed on missing sender-constraint evidence, and assign
+  verified claims.
 - `AttestoClient.AuthorizationCode` — complete OIDC Authorization Code flow
   with S256 PKCE, nonce, issuer and browser-session binding, and one-time state.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
@@ -100,6 +108,10 @@ key = JOSE.JWK.generate_key({:ec, "P-256"})
 For a full authorization flow, store setup, callback handling, refresh,
 revocation, and logout, see the
 [Authorization Code guide](guides/authorization-code.md).
+
+For inbound JWT access-token verification backed by a remote issuer, including
+key rotation, stale-key behavior, scope checks, and Plug wiring, see the
+[Remote issuer resource-server guide](guides/resource-server.md).
 
 ## Assurance
 

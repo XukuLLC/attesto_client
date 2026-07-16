@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.0.0"
+  @version "2.1.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -50,8 +50,8 @@ defmodule AttestoClient.MixProject do
       # as in req_dpop).
       {:req, ">= 0.6.1 and < 1.0.0"},
 
-      # Req's plug-based test adapter (Req.Test) for the discovery HTTP tests.
-      {:plug, "~> 1.16", only: :test},
+      # Optional Plug integration for inbound resource-server verification.
+      {:plug, "~> 1.16", optional: true},
 
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
@@ -88,7 +88,13 @@ defmodule AttestoClient.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
-      extras: ["README.md", "guides/authorization-code.md", "CHANGELOG.md", "LICENSE"],
+      extras: [
+        "README.md",
+        "guides/authorization-code.md",
+        "guides/resource-server.md",
+        "CHANGELOG.md",
+        "LICENSE"
+      ],
       groups_for_extras: [
         Guides: ~r/guides\//,
         Changelog: ~r/CHANGELOG\.md/,

@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-16
+
+### Added
+
+- Add `AttestoClient.ResourceServer`, a supervised remote-issuer RFC 9068 JWT
+  access-token verifier. It performs exact issuer and audience checks, strict
+  algorithm/key selection, required claim and time validation, exact scope
+  enforcement, optional subject/client and token-age/lifetime policy, explicit
+  warming/readiness, and fail-closed DPoP/mTLS confirmation binding.
+- Add coordinated discovery/JWKS caching with bounded key count, configurable
+  fresh and stale intervals, transient-error-only stale-key use, single-flight
+  refresh, unknown-`kid` rotation refresh, response-size limits, and refresh-
+  storm throttling/backoff.
+- Add `AttestoClient.ResourceServer.Plug` for Bearer, DPoP, and mTLS protected
+  resources, including fail-closed DPoP replay wiring and RFC 6750 error and
+  insufficient-scope responses. Upstream key availability failures produce a
+  detail-free `503` rather than an `invalid_token` challenge.
+- Add bidirectional PyJWT parity coverage for RFC 9068 signing and verification,
+  including an independently signed unknown-`kid` key-rotation flow.
+
+### Security
+
+- Remote discovery and JWKS refreshes retain HTTPS, exact-issuer, SSRF, and
+  redirect protections; disable Req retries and bound each coordinated refresh
+  with an application-configured deadline.
+
 ## [2.0.0] - 2026-07-16
 
 ### Security

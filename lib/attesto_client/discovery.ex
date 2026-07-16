@@ -48,6 +48,7 @@ defmodule AttestoClient.Discovery do
           | :invalid_jwks_uri
           | :issuer_mismatch
           | :invalid_metadata
+          | :response_too_large
           | :blocked_host
           | {:http_status, pos_integer()}
           | {:transport, term()}
@@ -213,10 +214,20 @@ defmodule AttestoClient.Discovery do
       req = Req.new(req_options ++ [url: url, redirect: false])
 
       case Req.request(req) do
-        {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
-        {:ok, %Req.Response{status: 200}} -> {:error, :invalid_metadata}
-        {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
-        {:error, reason} -> {:error, {:transport, reason}}
+        {:ok, %Req.Response{private: %{attesto_client_response_too_large: true}}} ->
+          {:error, :response_too_large}
+
+        {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+          {:ok, body}
+
+        {:ok, %Req.Response{status: 200}} ->
+          {:error, :invalid_metadata}
+
+        {:ok, %Req.Response{status: status}} ->
+          {:error, {:http_status, status}}
+
+        {:error, reason} ->
+          {:error, {:transport, reason}}
       end
     end
   rescue

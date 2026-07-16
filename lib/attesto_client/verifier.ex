@@ -131,6 +131,16 @@ defmodule AttestoClient.Verifier do
   def normalize_jwks(%{} = jwk), do: {:ok, [jwk]}
   def normalize_jwks(_other), do: {:error, :invalid_jwks}
 
+  @doc false
+  @spec validate_verification_keys([map()], [SigningAlg.alg()]) ::
+          :ok | {:error, :invalid_jwks}
+  def validate_verification_keys(keys, accepted_algs)
+      when is_list(keys) and is_list(accepted_algs) do
+    if Enum.any?(keys, &usable_verification_key?(&1, accepted_algs)),
+      do: :ok,
+      else: {:error, :invalid_jwks}
+  end
+
   defp fetch_jwks(opts, issuer) do
     with {:ok, jwks_uri} <- jwks_uri(opts, issuer),
          {:ok, jwks} <- Discovery.fetch_jwks(jwks_uri, discovery_opts(opts)) do
@@ -186,7 +196,9 @@ defmodule AttestoClient.Verifier do
     end
   end
 
-  defp peek_header(jwt) do
+  @doc false
+  @spec peek_header(String.t()) :: {:ok, map()} | {:error, :invalid_token}
+  def peek_header(jwt) do
     with [header, _payload, _signature] <- String.split(jwt, ".", parts: 3),
          {:ok, decoded} <- Base.url_decode64(header, padding: false),
          {:ok, %{} = map} <- JSON.decode(decoded) do
@@ -238,6 +250,13 @@ defmodule AttestoClient.Verifier do
       end
 
     use_allows_verification? and operations_allow_verification?
+  end
+
+  defp usable_verification_key?(key, accepted_algs) do
+    verification_key?(key) and
+      key
+      |> candidate(accepted_algs)
+      |> Enum.any?(&match?({:ok, _candidates}, validate_key_strength(&1)))
   end
 
   defp candidate(key_map, accepted_algs) do
