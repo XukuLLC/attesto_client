@@ -25,12 +25,17 @@ defmodule AttestoClient do
       responses.
     * `AttestoClient.Discovery` - fetch and read authorization-server metadata
       and JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
+    * `AttestoClient.AuthorizationCode` - run the Authorization Code flow with
+      S256 PKCE and atomically consumed transaction state.
+    * `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` - refresh
+      rotation single-flight and RFC 7009 revocation with bounded deadlines.
+    * `AttestoClient.Logout` - build an RP-Initiated Logout request.
 
-  It is deliberately **not** a full OAuth client framework: it has no flow
-  orchestrator, token store, or session handling. It produces and checks the
-  cryptographic, wire-format artifacts an OAuth/OIDC/FAPI client needs, leaving
-  HTTP orchestration to the host (DPoP-bound requests are
-  [`req_dpop`](https://hex.pm/packages/req_dpop)'s job).
+  The lifecycle helpers retain only short-lived protocol transactions and
+  in-flight refresh calls. They do not make authorization decisions, create
+  sessions, or choose token/session retention policy; those remain with the
+  host application. DPoP-bound requests are
+  [`req_dpop`](https://hex.pm/packages/req_dpop)'s job.
 
   ## Assurance
 

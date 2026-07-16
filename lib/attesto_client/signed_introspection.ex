@@ -36,6 +36,8 @@ defmodule AttestoClient.SignedIntrospection do
           | :unsupported_alg
           | :invalid_token
           | :invalid_signature
+          | :ambiguous_key
+          | :weak_key
           | :unsupported_critical_header
           | :invalid_typ
           | :invalid_issuer

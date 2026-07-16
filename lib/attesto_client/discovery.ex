@@ -82,12 +82,61 @@ defmodule AttestoClient.Discovery do
     end
   end
 
+  @doc """
+  Validate an authorization-server endpoint before making a server-side
+  request. The endpoint must use HTTPS, must not contain userinfo or a fragment,
+  and must not resolve to a private, loopback, or link-local address.
+
+  Applications normally use this indirectly through the authorization-code,
+  refresh, and revocation APIs.
+  """
+  @spec validate_endpoint(term(), keyword()) ::
+          :ok | {:error, :invalid_endpoint | :blocked_host}
+  def validate_endpoint(endpoint, opts \\ [])
+
+  def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        guard_host(endpoint, opts)
+
+      _invalid ->
+        {:error, :invalid_endpoint}
+    end
+  end
+
+  def validate_endpoint(_endpoint, _opts), do: {:error, :invalid_endpoint}
+
+  @doc false
+  @spec validate_browser_endpoint(term()) :: :ok | {:error, :invalid_endpoint}
+  def validate_browser_endpoint(endpoint) when is_binary(endpoint) do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        :ok
+
+      _invalid ->
+        {:error, :invalid_endpoint}
+    end
+  end
+
+  def validate_browser_endpoint(_endpoint), do: {:error, :invalid_endpoint}
+
+  @doc false
+  @spec validate_issuer_identifier(term()) :: :ok | {:error, :invalid_issuer}
+  def validate_issuer_identifier(issuer) do
+    case validate_issuer(issuer) do
+      {:ok, _uri, _canonical} -> :ok
+      {:error, :invalid_issuer} = error -> error
+    end
+  end
+
   # RFC 8414 §2: the issuer is an https URL with no query or fragment. Returns
   # the parsed URI and the issuer exactly as supplied, which is what the §3.3
   # document match compares against.
   defp validate_issuer(issuer) when is_binary(issuer) do
     case URI.parse(issuer) do
-      %URI{scheme: "https", host: host, query: nil, fragment: nil} = uri
+      %URI{scheme: "https", host: host, userinfo: nil, query: nil, fragment: nil} = uri
       when is_binary(host) and host != "" ->
         {:ok, uri, issuer}
 
@@ -100,8 +149,12 @@ defmodule AttestoClient.Discovery do
 
   defp validate_https(url, error) when is_binary(url) do
     case URI.parse(url) do
-      %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> {:ok, url}
-      _other -> {:error, error}
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        {:ok, url}
+
+      _other ->
+        {:error, error}
     end
   end
 
@@ -146,14 +199,18 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    with :ok <- guard_host(url) do
+    with :ok <- guard_host(url, opts) do
       # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
       # any caller `:req_options`). Otherwise the https/host validation, which
       # only covers the INITIAL URL, would be bypassed by a 3xx `Location` to an
       # internal address (e.g. the cloud metadata service). A 3xx therefore
       # surfaces as `{:http_status, 3xx}` rather than being chased.
-      req =
-        Req.new([url: url] ++ Keyword.get(opts, :req_options, []) ++ [redirect: false])
+      req_options =
+        opts
+        |> Keyword.get(:req_options, [])
+        |> Keyword.put_new(:receive_timeout, 10_000)
+
+      req = Req.new(req_options ++ [url: url, redirect: false])
 
       case Req.request(req) do
         {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
@@ -175,11 +232,29 @@ defmodule AttestoClient.Discovery do
   # does not by itself defeat DNS rebinding (a connect-time peer-IP check would
   # be required for that), but combined with `redirect: false` it closes the
   # practical SSRF vectors.
-  defp guard_host(url) do
-    case URI.parse(url).host do
-      host when is_binary(host) and host != "" -> check_host_addrs(host)
-      _ -> {:error, :blocked_host}
+  defp guard_host(url, opts) do
+    if req_test_transport?(opts) do
+      :ok
+    else
+      case URI.parse(url).host do
+        host when is_binary(host) and host != "" -> check_host_addrs(host)
+        _ -> {:error, :blocked_host}
+      end
     end
+  end
+
+  # An active Req plug handles the request in-process and cannot connect to the
+  # URL's resolved address. Skipping DNS in that case keeps tests deterministic
+  # without weakening any real network transport. Req treats nil and false as
+  # inactive, so those values must retain the network guard.
+  defp req_test_transport?(opts) do
+    plug =
+      opts
+      |> Keyword.get(:req_options, [])
+      |> Map.new()
+      |> Map.get(:plug)
+
+    plug not in [nil, false]
   end
 
   defp check_host_addrs(host) do

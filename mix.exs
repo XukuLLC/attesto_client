@@ -14,8 +14,8 @@ defmodule AttestoClient.MixProject do
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       description:
-        "Client-side OAuth 2.0 / OpenID Connect / FAPI 2.0 artifacts and verification: " <>
-          "private_key_jwt, JAR, ID Tokens, JARM, ID-JAG, PKCE, and signed response verification.",
+        "Secure OpenID Connect code + PKCE, refresh, revocation, logout, and " <>
+          "OAuth 2.0 / FAPI client artifacts and verification.",
       package: package(),
       source_url: @url,
       homepage_url: @url,
@@ -48,7 +48,7 @@ defmodule AttestoClient.MixProject do
       {:jose, "~> 1.11"},
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
-      {:req, "~> 0.5"},
+      {:req, ">= 0.6.1 and < 1.0.0"},
 
       # Req's plug-based test adapter (Req.Test) for the discovery HTTP tests.
       {:plug, "~> 1.16", only: :test},
@@ -88,8 +88,9 @@ defmodule AttestoClient.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
+      extras: ["README.md", "guides/authorization-code.md", "CHANGELOG.md", "LICENSE"],
       groups_for_extras: [
+        Guides: ~r/guides\//,
         Changelog: ~r/CHANGELOG\.md/,
         License: ~r/LICENSE/
       ]
@@ -104,7 +105,7 @@ defmodule AttestoClient.MixProject do
         "Changelog" => "https://hexdocs.pm/attesto_client/changelog.html",
         "GitHub" => @url
       },
-      files: ~w(lib LICENSE mix.exs README.md CHANGELOG.md)
+      files: ~w(lib guides LICENSE mix.exs README.md CHANGELOG.md)
     ]
   end
 end

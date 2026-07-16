@@ -4,6 +4,68 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Add a complete OpenID Connect Authorization Code flow that always uses S256
+  PKCE, binds callbacks to high-entropy state, nonce, and a mandatory opaque
+  application browser-session value, validates the response issuer when
+  supplied, atomically consumes expiring transaction state, pins the registered
+  ID Token algorithm, and gives the code exchange a bounded deadline with
+  retries disabled.
+- ID Token verification now rejects ambiguous eligible JWKS keys and RSA keys
+  below 2048 bits, honors JWK `use` / `key_ops`, validates optional `nbf`, and
+  uses constant-time nonce/subject comparisons. A missing `kid` remains valid
+  only when exactly one eligible verification key exists.
+- Add bounded single-flight refresh-token rotation. Concurrent callers for one
+  application key share one request and one result; timeout and worker failure
+  wake all waiters and clear the flight.
+- Require HTTPS redirect URIs except for native-client loopback HTTP redirects.
+- Raise the Req dependency floor to 0.6.1, the first release patched for
+  EEF-CVE-2026-49755 decompression-bomb denial of service.
+
+### Added
+
+- `AttestoClient.AuthorizationTransaction.Store` and a bounded, single-node ETS
+  implementation with atomic insert/consume and monotonic expiry.
+- `AttestoClient.Token` refresh and RFC 7009 revocation operations,
+  `AttestoClient.RefreshCoordinator`, `AttestoClient.TokenSet`, and verified
+  refresh ID Token results.
+- `AttestoClient.Logout.url/1` for OpenID Connect RP-Initiated Logout.
+- Structural discovery validation for required OIDC endpoints and capability
+  fields before an authorization flow uses them.
+- Adversarial coverage for replay and concurrent state consumption, expiry,
+  issuer/audience/nonce confusion, ambiguous or ineligible keys, weak RSA,
+  malformed discovery, refresh races, independent refreshes, and deadlines.
+- Authorization-request `max_age` is retained in the transaction and enforced
+  against the callback ID Token's `auth_time`.
+
+### Changed
+
+- Supplying `:access_token` to `AttestoClient.IDToken.verify/2` validates
+  `at_hash` when present but no longer requires the claim for a token-endpoint
+  ID Token, where OIDC Core permits omission. Pass `require_at_hash: true` for
+  front-channel or profile rules that require it.
+- Authorization decisions, durable token persistence, refresh-result
+  compare-and-swap, and session-retention/termination remain application-owned.
+- The Elixir floor remains 1.18: this package and its required `attesto`
+  dependency both depend on Elixir's built-in `JSON` module.
+
+### Migration
+
+- `AttestoClient.AuthorizationCode.start/2` and `callback/3` now require the
+  same opaque `:browser_binding`. Generate or retain it in the initiating user
+  agent's secure application session; callbacks with a missing or different
+  binding consume state and fail before token exchange.
+- The key-selection and minimum-RSA checks intentionally reject tokens that 1.x
+  could accept. Applications with duplicate `kid` values, multiple eligible
+  kid-less keys, encryption-only verification keys, or RSA keys below 2048 bits
+  must correct their JWKS before upgrading.
+- Because those security checks tighten existing public verification APIs, the
+  next release should be a **2.0.0** major release. The source version remains
+  unchanged until release preparation.
+
 ## [1.1.0] - 2026-07-07
 
 ### Changed
