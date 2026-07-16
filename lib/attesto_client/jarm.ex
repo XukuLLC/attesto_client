@@ -47,6 +47,8 @@ defmodule AttestoClient.JARM do
           | :missing_client_id
           | :unsupported_alg
           | :invalid_signature
+          | :ambiguous_key
+          | :weak_key
           | :invalid_issuer
           | :invalid_audience
           | :invalid_iat

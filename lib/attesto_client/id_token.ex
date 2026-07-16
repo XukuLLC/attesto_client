@@ -18,7 +18,7 @@ defmodule AttestoClient.IDToken do
     * `azp` equals `:client_id` whenever present, and is required when `aud`
       contains multiple audiences.
     * `sub`, `exp`, and `iat` are present and well-typed; `exp` must be in the
-      future and `iat` must not be meaningfully in the future.
+      future and `iat` / optional `nbf` must not be meaningfully in the future.
     * a supplied `:nonce` must match the token's `nonce` claim.
     * `auth_time`, when present, must not be meaningfully in the future; a
       supplied `:max_age` requires `auth_time` and enforces the age.
@@ -58,9 +58,12 @@ defmodule AttestoClient.IDToken do
           | {:metadata, map()}
           | {:jwks_uri, String.t()}
           | {:nonce, String.t()}
+          | {:subject, String.t()}
           | {:max_age, non_neg_integer()}
           | {:access_token, String.t()}
+          | {:require_at_hash, boolean()}
           | {:code, String.t()}
+          | {:require_c_hash, boolean()}
           | {:state, String.t()}
           | {:accepted_algs, [SigningAlg.alg()]}
           | {:allow_unsigned, boolean()}
@@ -77,6 +80,8 @@ defmodule AttestoClient.IDToken do
           | :unsupported_alg
           | :invalid_token
           | :invalid_signature
+          | :ambiguous_key
+          | :weak_key
           | :unsupported_critical_header
           | :unexpected_typ
           | :invalid_issuer
@@ -84,10 +89,12 @@ defmodule AttestoClient.IDToken do
           | :missing_azp
           | :invalid_azp
           | :invalid_claims
+          | :subject_mismatch
           | :missing_exp
           | :expired
           | :invalid_iat
           | :not_yet_valid
+          | :invalid_nbf
           | :nonce_required
           | :nonce_mismatch
           | :invalid_max_age
@@ -110,6 +117,9 @@ defmodule AttestoClient.IDToken do
     * `:issuer` - expected OpenID Provider issuer.
     * `:client_id` - this relying party's client id.
 
+  Pass `:subject` when a later ID Token (for example, from refresh) must remain
+  bound to the subject of an earlier verified ID Token.
+
   JWKS options:
 
     * `:jwks` - a JWKS map/list supplied by the caller.
@@ -130,8 +140,10 @@ defmodule AttestoClient.IDToken do
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience_and_azp(claims, client_id),
          :ok <- check_required_claims(claims),
+         :ok <- check_subject(claims, Keyword.get(opts, :subject)),
          :ok <- check_expiry(claims, now),
          :ok <- check_issued_at(claims, now),
+         :ok <- check_not_before(claims, now),
          :ok <- check_nonce(claims, Keyword.get(opts, :nonce)),
          :ok <- check_max_age(claims, opts, now),
          :ok <-
@@ -212,6 +224,15 @@ defmodule AttestoClient.IDToken do
     end
   end
 
+  defp check_subject(_claims, nil), do: :ok
+
+  defp check_subject(%{"sub" => actual}, expected)
+       when is_binary(actual) and is_binary(expected) and expected != "" do
+    if SecureCompare.equal?(actual, expected), do: :ok, else: {:error, :subject_mismatch}
+  end
+
+  defp check_subject(_claims, _expected), do: {:error, :subject_mismatch}
+
   defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) do
     if exp > now, do: :ok, else: {:error, :expired}
   end
@@ -224,13 +245,25 @@ defmodule AttestoClient.IDToken do
 
   defp check_issued_at(_claims, _now), do: {:error, :invalid_iat}
 
+  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
+    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+  end
+
+  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
+  defp check_not_before(_claims, _now), do: :ok
+
   defp check_nonce(_claims, nil), do: :ok
 
   defp check_nonce(claims, expected) when is_binary(expected) and expected != "" do
     case Map.get(claims, "nonce") do
-      ^expected -> :ok
-      nil -> {:error, :nonce_required}
-      _other -> {:error, :nonce_mismatch}
+      actual when is_binary(actual) ->
+        if SecureCompare.equal?(actual, expected), do: :ok, else: {:error, :nonce_mismatch}
+
+      nil ->
+        {:error, :nonce_required}
+
+      _other ->
+        {:error, :nonce_mismatch}
     end
   end
 
@@ -284,26 +317,33 @@ defmodule AttestoClient.IDToken do
         :ok
 
       value when is_binary(value) ->
-        compare_hash_claim(claims, header, claim_name, value)
+        compare_hash_claim(claims, header, claim_name, value, required_hash?(claim_name, opts))
 
       _other ->
         hash_error(claim_name)
     end
   end
 
-  defp compare_hash_claim(claims, header, claim_name, value) do
+  defp compare_hash_claim(claims, header, claim_name, value, required?) do
     expected = hash_claim(value, Map.get(header, "alg"))
 
     case Map.get(claims, claim_name) do
       actual when is_binary(actual) ->
         if SecureCompare.equal?(actual, expected), do: :ok, else: hash_error(claim_name)
 
-      _missing ->
+      _missing when required? ->
         missing_hash_error(claim_name)
+
+      _missing ->
+        :ok
     end
   rescue
     _error -> hash_error(claim_name)
   end
+
+  defp required_hash?("at_hash", opts), do: Keyword.get(opts, :require_at_hash, false) == true
+  defp required_hash?("c_hash", opts), do: Keyword.get(opts, :require_c_hash, true) == true
+  defp required_hash?("s_hash", _opts), do: true
 
   defp hash_claim(value, alg) when is_binary(value) and is_binary(alg) do
     alg

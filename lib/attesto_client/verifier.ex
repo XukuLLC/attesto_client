@@ -4,6 +4,8 @@ defmodule AttestoClient.Verifier do
   alias Attesto.SigningAlg
   alias AttestoClient.Discovery
 
+  @minimum_rsa_bits 2048
+
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
 
   @spec require_string(keyword(), atom(), term()) :: {:ok, String.t()} | {:error, term()}
@@ -59,13 +61,16 @@ defmodule AttestoClient.Verifier do
           | {:error,
              :invalid_token
              | :unsupported_critical_header
-             | :invalid_signature}
+             | :invalid_signature
+             | :ambiguous_key
+             | :weak_key}
   def verify_signature(jwt, keys, accepted_algs)
       when is_binary(jwt) and is_list(keys) and is_list(accepted_algs) do
     with :ok <- check_compact_form(jwt),
          {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
-         {:ok, claims} <- verify_against_any(jwt, candidates(keys, header, accepted_algs)) do
+         {:ok, candidates} <- candidates(keys, header, accepted_algs),
+         {:ok, claims} <- verify_against_any(jwt, candidates) do
       {:ok, claims, header}
     end
   end
@@ -195,15 +200,45 @@ defmodule AttestoClient.Verifier do
     if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
   end
 
-  defp candidates(keys, header, accepted_algs) do
-    keys
-    |> filter_by_kid(Map.get(header, "kid"))
-    |> Enum.flat_map(&candidate(&1, accepted_algs))
+  defp candidates(keys, %{"alg" => alg} = header, accepted_algs) when is_binary(alg) do
+    if alg in accepted_algs do
+      candidates =
+        keys
+        |> filter_by_kid(Map.get(header, "kid"))
+        |> Enum.filter(&verification_key?/1)
+        |> Enum.flat_map(&candidate(&1, [alg]))
+
+      case candidates do
+        [] -> {:error, :invalid_signature}
+        [candidate] -> validate_key_strength(candidate)
+        _multiple -> {:error, :ambiguous_key}
+      end
+    else
+      {:error, :invalid_signature}
+    end
   end
 
+  defp candidates(_keys, _header, _accepted_algs), do: {:error, :invalid_signature}
+
+  # A `kid` must resolve to exactly one eligible key. When the token omits a
+  # `kid`, verification remains interoperable with a JWKS containing exactly
+  # one eligible signing key, but never guesses between multiple keys.
   defp filter_by_kid(keys, nil), do: keys
 
   defp filter_by_kid(keys, kid), do: Enum.filter(keys, &(Map.get(&1, "kid") == kid))
+
+  defp verification_key?(key) do
+    use_allows_verification? = Map.get(key, "use") in [nil, "sig"]
+
+    operations_allow_verification? =
+      case Map.fetch(key, "key_ops") do
+        :error -> true
+        {:ok, operations} when is_list(operations) -> "verify" in operations
+        {:ok, _invalid} -> false
+      end
+
+    use_allows_verification? and operations_allow_verification?
+  end
 
   defp candidate(key_map, accepted_algs) do
     jwk = JOSE.JWK.from_map(key_map)
@@ -215,10 +250,31 @@ defmodule AttestoClient.Verifier do
 
     case algs do
       [] -> []
-      [_ | _] -> [{Map.get(key_map, "kid"), algs, jwk}]
+      [_ | _] -> [{Map.get(key_map, "kid"), algs, jwk, key_map}]
     end
   rescue
     _error -> []
+  end
+
+  defp validate_key_strength({_kid, _algs, _jwk, %{"kty" => "RSA", "n" => modulus}} = candidate) do
+    case Base.url_decode64(modulus, padding: false) do
+      {:ok, bytes} ->
+        if modulus_bits(bytes) >= @minimum_rsa_bits,
+          do: {:ok, [candidate]},
+          else: {:error, :weak_key}
+
+      :error ->
+        {:error, :invalid_signature}
+    end
+  end
+
+  defp validate_key_strength(candidate), do: {:ok, [candidate]}
+
+  defp modulus_bits(bytes) do
+    bytes
+    |> :binary.decode_unsigned()
+    |> Integer.digits(2)
+    |> length()
   end
 
   defp key_algs(%{"alg" => alg}, jwk) do
@@ -236,10 +292,8 @@ defmodule AttestoClient.Verifier do
     end
   end
 
-  defp verify_against_any(_jwt, []), do: {:error, :invalid_signature}
-
   defp verify_against_any(jwt, candidates) do
-    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, algs, jwk}, acc ->
+    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, algs, jwk, _map}, acc ->
       case JOSE.JWT.verify_strict(jwk, algs, jwt) do
         {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:halt, {:ok, claims}}
         {false, _jwt_struct, _jws_struct} -> {:cont, acc}

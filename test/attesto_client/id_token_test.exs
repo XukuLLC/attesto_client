@@ -156,6 +156,21 @@ defmodule AttestoClient.IDTokenTest do
       assert {:ok, _claims} = verify(jwt, jwks: jwks)
     end
 
+    test "selects exactly one key eligible for the protected-header algorithm" do
+      pem = Keystore.signing_pem()
+      {_, ec_map} = JOSE.JWK.generate_key({:ec, "P-256"}) |> JOSE.JWK.to_public_map()
+      jwt = sign(base_claims())
+
+      jwks = %{
+        "keys" => [
+          Map.merge(ec_map, %{"kid" => "signing", "alg" => "ES256", "use" => "sig"}),
+          public_jwk(pem, %{"alg" => "RS256"})
+        ]
+      }
+
+      assert {:ok, _claims} = verify(jwt, jwks: jwks)
+    end
+
     test "accepts PS256 for a bare RSA JWKS key when policy allows it" do
       pem = Keystore.signing_pem()
 
@@ -214,13 +229,24 @@ defmodule AttestoClient.IDTokenTest do
       assert {:error, :not_yet_valid} =
                verify(sign(base_claims(%{"iat" => @now + 120})))
 
+      assert {:error, :not_yet_valid} =
+               verify(sign(base_claims(%{"nbf" => @now + 120})))
+
+      assert {:error, :invalid_nbf} =
+               verify(sign(base_claims(%{"nbf" => "later"})))
+
       assert {:error, :invalid_claims} =
                verify(sign(base_claims(%{"sub" => ""})))
     end
 
     test "detached hash failures" do
       assert {:error, :missing_at_hash} =
-               verify(sign(base_claims()), access_token: "access-token")
+               verify(sign(base_claims()), access_token: "access-token", require_at_hash: true)
+
+      assert {:ok, _claims} = verify(sign(base_claims()), access_token: "access-token")
+
+      assert {:error, :missing_c_hash} = verify(sign(base_claims()), code: "code-123")
+      assert {:error, :missing_s_hash} = verify(sign(base_claims()), state: "state-123")
 
       assert {:error, :invalid_at_hash} =
                verify(sign(base_claims(%{"at_hash" => hash_claim("other")})),
@@ -243,6 +269,45 @@ defmodule AttestoClient.IDTokenTest do
 
       assert {:error, :invalid_token} =
                IDToken.verify("not.a.jwt", issuer: @issuer, client_id: @client_id, jwks: jwks())
+    end
+
+    test "rejects ambiguous, unknown, ineligible, and weak verification keys" do
+      pem = Keystore.signing_pem()
+      jwt = sign(base_claims())
+      key = public_jwk(pem, %{"alg" => "RS256"})
+
+      assert {:error, :ambiguous_key} = verify(jwt, jwks: %{"keys" => [key, key]})
+
+      assert {:error, :invalid_signature} =
+               verify(jwt, jwks: %{"keys" => [%{key | "kid" => "other"}]})
+
+      assert {:error, :invalid_signature} =
+               verify(jwt, jwks: %{"keys" => [%{key | "use" => "enc"}]})
+
+      assert {:error, :invalid_signature} =
+               verify(jwt, jwks: %{"keys" => [Map.put(key, "key_ops", ["sign"])]})
+
+      assert {:error, :invalid_signature} =
+               verify(jwt,
+                 jwks: %{
+                   "keys" => [key |> Map.put("use", "sig") |> Map.put("key_ops", ["encrypt"])]
+                 }
+               )
+
+      weak = JOSE.JWK.generate_key({:rsa, 1024})
+      {_, weak_public} = JOSE.JWK.to_public_map(weak)
+
+      {_, weak_jwt} =
+        weak
+        |> JOSE.JWT.sign(%{"alg" => "RS256", "kid" => "weak", "typ" => "JWT"}, base_claims())
+        |> JOSE.JWS.compact()
+
+      assert {:error, :weak_key} =
+               verify(weak_jwt,
+                 jwks: %{
+                   "keys" => [Map.merge(weak_public, %{"kid" => "weak", "alg" => "RS256"})]
+                 }
+               )
     end
   end
 
