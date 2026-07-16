@@ -25,6 +25,11 @@ defmodule AttestoClient do
       responses.
     * `AttestoClient.Discovery` - fetch and read authorization-server metadata
       and JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
+    * `AttestoClient.ResourceServer` - verify RFC 9068 JWT access tokens from a
+      remote issuer with coordinated JWKS rotation, bounded stale-key use, and
+      optional DPoP/mTLS request binding.
+    * `AttestoClient.ResourceServer.Plug` - authenticate Bearer, DPoP, and mTLS
+      protected-resource requests and enforce route scopes.
     * `AttestoClient.AuthorizationCode` - run the Authorization Code flow with
       S256 PKCE and atomically consumed transaction state.
     * `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` - refresh
