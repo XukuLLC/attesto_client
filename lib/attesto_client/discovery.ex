@@ -243,13 +243,18 @@ defmodule AttestoClient.Discovery do
     end
   end
 
-  # A Req plug handles the request in-process and cannot connect to the URL's
-  # resolved address. Skipping DNS in that case keeps tests deterministic
-  # without weakening any real network transport.
+  # An active Req plug handles the request in-process and cannot connect to the
+  # URL's resolved address. Skipping DNS in that case keeps tests deterministic
+  # without weakening any real network transport. Req treats nil and false as
+  # inactive, so those values must retain the network guard.
   defp req_test_transport?(opts) do
-    opts
-    |> Keyword.get(:req_options, [])
-    |> Keyword.has_key?(:plug)
+    plug =
+      opts
+      |> Keyword.get(:req_options, [])
+      |> Map.new()
+      |> Map.get(:plug)
+
+    plug not in [nil, false]
   end
 
   defp check_host_addrs(host) do

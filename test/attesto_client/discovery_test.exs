@@ -163,6 +163,18 @@ defmodule AttestoClient.DiscoveryTest do
                Discovery.validate_endpoint("https://127.0.0.1/token")
     end
 
+    test "nil and false Req plugs retain the DNS guard" do
+      Enum.each([nil, false], fn plug ->
+        opts = [req_options: [plug: plug]]
+
+        assert {:error, :blocked_host} =
+                 Discovery.validate_endpoint("https://127.0.0.1/token", opts)
+
+        assert {:error, :blocked_host} =
+                 Discovery.fetch("https://127.0.0.1", opts)
+      end)
+    end
+
     test "does not follow redirects (a 3xx is surfaced, never chased to its Location)" do
       # If redirects were followed, the fetch would chase the Location to the
       # internal target; instead the 302 is returned as a status error.
