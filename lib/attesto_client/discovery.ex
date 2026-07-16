@@ -82,12 +82,43 @@ defmodule AttestoClient.Discovery do
     end
   end
 
+  @doc """
+  Validate an authorization-server endpoint before making a server-side
+  request. The endpoint must use HTTPS, must not contain userinfo or a fragment,
+  and must not resolve to a private, loopback, or link-local address.
+
+  Applications normally use this indirectly through the authorization-code,
+  refresh, and revocation APIs.
+  """
+  @spec validate_endpoint(term()) :: :ok | {:error, :invalid_endpoint | :blocked_host}
+  def validate_endpoint(endpoint) when is_binary(endpoint) do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        guard_host(endpoint)
+
+      _invalid ->
+        {:error, :invalid_endpoint}
+    end
+  end
+
+  def validate_endpoint(_endpoint), do: {:error, :invalid_endpoint}
+
+  @doc false
+  @spec validate_issuer_identifier(term()) :: :ok | {:error, :invalid_issuer}
+  def validate_issuer_identifier(issuer) do
+    case validate_issuer(issuer) do
+      {:ok, _uri, _canonical} -> :ok
+      {:error, :invalid_issuer} = error -> error
+    end
+  end
+
   # RFC 8414 §2: the issuer is an https URL with no query or fragment. Returns
   # the parsed URI and the issuer exactly as supplied, which is what the §3.3
   # document match compares against.
   defp validate_issuer(issuer) when is_binary(issuer) do
     case URI.parse(issuer) do
-      %URI{scheme: "https", host: host, query: nil, fragment: nil} = uri
+      %URI{scheme: "https", host: host, userinfo: nil, query: nil, fragment: nil} = uri
       when is_binary(host) and host != "" ->
         {:ok, uri, issuer}
 
@@ -153,7 +184,10 @@ defmodule AttestoClient.Discovery do
       # internal address (e.g. the cloud metadata service). A 3xx therefore
       # surfaces as `{:http_status, 3xx}` rather than being chased.
       req =
-        Req.new([url: url] ++ Keyword.get(opts, :req_options, []) ++ [redirect: false])
+        Req.new(
+          Keyword.get(opts, :req_options, []) ++
+            [url: url, redirect: false, receive_timeout: 10_000]
+        )
 
       case Req.request(req) do
         {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}

@@ -12,14 +12,14 @@ AttestoClient is
 as a Relying Party library to the **Basic**, **Config**, and **Dynamic** OP
 profiles, run against the OpenID Foundation's conformance suite.
 
-Build and verify the OAuth and OpenID Connect wire artifacts an Elixir client
-needs when your app already owns the HTTP flow: `private_key_jwt`, signed
-authorization request objects (JAR), ID Token verification, JARM verification,
-ID-JAG/EMA assertions, PKCE generation, signed introspection and UserInfo
-verification, and discovery/JWKS fetching.
+Run a secure OpenID Connect Authorization Code + PKCE exchange, refresh and
+revoke tokens, build RP-Initiated Logout requests, and build or verify the OAuth
+and OpenID Connect wire artifacts an Elixir client needs: `private_key_jwt`,
+signed authorization request objects (JAR), strict ID Token verification, JARM,
+ID-JAG/EMA assertions, signed introspection and UserInfo, and discovery/JWKS.
 
-Use it when you are writing a relying party or OAuth client that needs the
-cryptographic pieces without adopting a full redirect/session/token framework:
+Use it when you are writing a relying party or OAuth client that needs secure
+protocol mechanics without delegating application policy:
 
 - Authenticate to token, PAR, or introspection endpoints with
   `private_key_jwt`.
@@ -29,6 +29,9 @@ cryptographic pieces without adopting a full redirect/session/token framework:
 - Build ID-JAG/EMA identity assertions for the JWT-bearer grant.
 - Generate S256 PKCE verifier/challenge pairs.
 - Fetch authorization-server metadata and JWKS with issuer validation.
+- Correlate state/nonce/PKCE in an atomic, expiring transaction store.
+- Single-flight concurrent refresh-token rotation with bounded deadlines.
+- Revoke tokens and create RP-Initiated Logout requests.
 
 `AttestoClient` is the client-side counterpart to
 [`attesto`](https://hex.pm/packages/attesto). `attesto` verifies client artifacts
@@ -42,10 +45,12 @@ batteries-included Phoenix/Ecto authorization server built on `attesto`, and
 [`attesto_mcp`](https://github.com/XukuLLC/attesto_mcp) protects a Model Context
 Protocol server as an OAuth resource server.
 
-It is **not** a full OAuth client framework: no flow orchestrator, token store,
-or session handling. It produces and checks the cryptographic wire-format
-artifacts a FAPI client needs and leaves HTTP orchestration to the host. DPoP
-proof generation for outgoing requests is
+It does **not** make authorization decisions or own application sessions. Its
+included ETS store retains only short-lived protocol correlation data, and its
+refresh coordinator retains no token set after a flight completes. The host
+chooses its durable/distributed store, atomically persists rotation results,
+maps verified identities to authorization, and applies session-retention
+policy. DPoP proof generation for outgoing requests is
 [`req_dpop`](https://hex.pm/packages/req_dpop)'s job.
 
 ## What it provides
@@ -67,6 +72,13 @@ proof generation for outgoing requests is
   and bind them to a verified ID Token subject when supplied.
 - `AttestoClient.Discovery` — fetch and read authorization-server metadata and
   JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
+- `AttestoClient.AuthorizationCode` — complete OIDC Authorization Code flow
+  with S256 PKCE, nonce, issuer binding, and one-time state.
+- `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
+  single-node transaction store with atomic consumption.
+- `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,
+  single-flight refresh rotation and RFC 7009 revocation.
+- `AttestoClient.Logout` — RP-Initiated Logout request construction.
 
 ## Example
 
@@ -83,6 +95,10 @@ key = JOSE.JWK.generate_key({:ec, "P-256"})
 #   client_assertion_type = AttestoClient.ClientAssertion.assertion_type()
 #   client_assertion      = assertion
 ```
+
+For a full authorization flow, store setup, callback handling, refresh,
+revocation, and logout, see the
+[Authorization Code guide](guides/authorization-code.md).
 
 ## Assurance
 
@@ -112,3 +128,9 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
 a new major version. Pin to `~> 1.1`.
+
+## Requirements
+
+AttestoClient requires Elixir 1.18 or later. Both this package and its required
+`attesto` dependency use Elixir's built-in `JSON` module, so lowering only this
+package's declared floor would not create a working older-Elixir installation.
