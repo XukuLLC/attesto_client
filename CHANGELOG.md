@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-16
+
 ### Security
 
 - Add a complete OpenID Connect Authorization Code flow that always uses S256
@@ -62,9 +64,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could accept. Applications with duplicate `kid` values, multiple eligible
   kid-less keys, encryption-only verification keys, or RSA keys below 2048 bits
   must correct their JWKS before upgrading.
-- Because those security checks tighten existing public verification APIs, the
-  next release should be a **2.0.0** major release. The source version remains
-  unchanged until release preparation.
+- Because those security checks tighten existing public verification APIs,
+  this release is a **2.0.0** major release.
 
 ## [1.1.0] - 2026-07-07
 
