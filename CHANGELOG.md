@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-16
+
+### Security
+
+- Restrict the optional Plug integration to the security-patched releases on
+  every supported minor line: Plug 1.16.6, 1.17.4, 1.18.5, 1.19.5, and 1.20.3
+  and later 1.x releases.
+- Raise the JOSE floor to 1.11.9, excluding releases affected by
+  GHSA-9mg4-v392-8j68 / CVE-2023-50966 and the security-fixed 1.11.7-1.11.8
+  packages that included development-only tooling as runtime dependencies.
+- Refresh the development lock to Mint 1.9.3, resolving
+  EEF-CVE-2026-59249 / CVE-2026-59249.
+
 ## [2.1.0] - 2026-07-16
 
 ### Added
