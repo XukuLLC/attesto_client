@@ -413,12 +413,36 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> external_https_conn()
       |> put_req_header("authorization", "DPoP #{token}")
       |> put_req_header("dpop", proof)
-      |> ResourceServerPlug.call(ResourceServerPlug.init(server: ctx.server, now: @now))
+      |> ResourceServerPlug.call(
+        ResourceServerPlug.init(
+          server: ctx.server,
+          dpop_replay_unprotected_acknowledged?: true,
+          now: @now
+        )
+      )
 
     assert conn.halted
     assert conn.status == 401
     assert [challenge] = get_resp_header(conn, "www-authenticate")
     assert challenge =~ ~s(DPoP error="invalid_dpop_proof")
+    refute challenge =~ "replay_check_unconfigured"
+    assert JSON.decode!(conn.resp_body) == %{"error" => "invalid_dpop_proof"}
+  end
+
+  test "does not expose token-verification reasons in OAuth errors", ctx do
+    expired = access_token(ctx.key, %{"exp" => @now - 1})
+
+    conn =
+      :get
+      |> conn("/documents")
+      |> put_req_header("authorization", "Bearer #{expired}")
+      |> ResourceServerPlug.call(ResourceServerPlug.init(server: ctx.server, now: @now))
+
+    assert conn.status == 401
+    assert JSON.decode!(conn.resp_body) == %{"error" => "invalid_token"}
+    assert [challenge] = get_resp_header(conn, "www-authenticate")
+    refute challenge =~ "expired"
+    refute challenge =~ "error_description"
   end
 
   test "validates plug options at initialization", ctx do

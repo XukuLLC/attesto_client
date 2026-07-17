@@ -296,7 +296,8 @@ defmodule AttestoClient.Discovery do
     end
   end
 
-  # IPv4 ranges that must never be the target of a server-side fetch.
+  # IPv4 ranges that must never be the target of a server-side fetch. The
+  # globally reachable anycast exceptions inside 192.0.0.0/24 remain usable.
   defp blocked_ip?({127, _, _, _}), do: true
   defp blocked_ip?({10, _, _, _}), do: true
   defp blocked_ip?({192, 168, _, _}), do: true
@@ -304,16 +305,46 @@ defmodule AttestoClient.Discovery do
   defp blocked_ip?({169, 254, _, _}), do: true
   defp blocked_ip?({100, b, _, _}) when b in 64..127, do: true
   defp blocked_ip?({0, _, _, _}), do: true
-  # IPv6: ::1 loopback.
+  defp blocked_ip?({192, 0, 0, d}) when d in [9, 10], do: false
+  defp blocked_ip?({192, 0, 0, _}), do: true
+  defp blocked_ip?({192, 0, 2, _}), do: true
+  defp blocked_ip?({192, 88, 99, _}), do: true
+  defp blocked_ip?({198, b, _, _}) when b in 18..19, do: true
+  defp blocked_ip?({198, 51, 100, _}), do: true
+  defp blocked_ip?({203, 0, 113, _}), do: true
+  defp blocked_ip?({a, _, _, _}) when a in 224..255, do: true
+
+  # IPv6 unspecified and loopback addresses.
+  defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
   defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+
+  # Deprecated IPv4-compatible IPv6 (::a.b.c.d) — unwrap and re-check the
+  # embedded v4 address so compatible private/loopback targets cannot bypass
+  # the IPv4 policy.
+  defp blocked_ip?({0, 0, 0, 0, 0, 0, g, h}),
+    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
+
   # IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap and re-check the embedded v4.
   defp blocked_ip?({0, 0, 0, 0, 0, 0xFFFF, g, h}),
     do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
 
-  # Other IPv6: fe80::/10 link-local OR fc00::/7 unique-local (bit math in the
-  # body — band/2 is not guard-safe as a qualified call).
+  # The globally reachable RFC 6052 NAT64 prefix may carry a public IPv4
+  # destination, so unwrap it and apply the IPv4 policy rather than blocking
+  # the entire prefix.
+  defp blocked_ip?({0x64, 0xFF9B, 0, 0, 0, 0, g, h}),
+    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
+
+  # RFC 8215's local-use NAT64 prefix is not globally reachable.
+  defp blocked_ip?({0x64, 0xFF9B, 1, _, _, _, _, _}), do: true
+
+  # Other IPv6: fe80::/10 link-local, fec0::/10 deprecated site-local, or
+  # fc00::/7 unique-local (bit math in the body — band/2 is not guard-safe as a
+  # qualified call).
   defp blocked_ip?({a, _, _, _, _, _, _, _}) when is_integer(a),
-    do: Bitwise.band(a, 0xFFC0) == 0xFE80 or Bitwise.band(a, 0xFE00) == 0xFC00
+    do:
+      Bitwise.band(a, 0xFFC0) == 0xFE80 or
+        Bitwise.band(a, 0xFFC0) == 0xFEC0 or
+        Bitwise.band(a, 0xFE00) == 0xFC00
 
   defp blocked_ip?(_addr), do: false
 end

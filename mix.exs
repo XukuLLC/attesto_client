@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.1.0"
+  @version "2.1.1"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -45,13 +45,14 @@ defmodule AttestoClient.MixProject do
       # resolution and (for the response side) its verification, the mirror of
       # what attesto's server side issues.
       attesto_dep(),
-      {:jose, "~> 1.11"},
+      {:jose, "~> 1.11.12"},
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
       {:req, ">= 0.6.1 and < 1.0.0"},
 
       # Optional Plug integration for inbound resource-server verification.
-      {:plug, "~> 1.16", optional: true},
+      {:plug, "~> 1.16.6 or ~> 1.17.4 or ~> 1.18.5 or ~> 1.19.5 or >= 1.20.3 and < 2.0.0",
+       optional: true},
 
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
