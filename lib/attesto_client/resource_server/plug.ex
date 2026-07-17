@@ -25,8 +25,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       * `:max_token_age_seconds` / `:max_token_lifetime_seconds` - optional
         token-age policy forwarded to the verifier.
       * `:claims_key` - the `conn.assigns` key (default `:attesto_claims`).
-      * `:replay_check` - required for DPoP unless the explicit
-        `:dpop_replay_unprotected_acknowledged?` test-only escape hatch is true.
+      * `:replay_check` - required for every DPoP request.
       * `:nonce_check` / `:nonce_issue` - RFC 9449 server nonce callbacks.
       * `:dpop_max_age_seconds` - maximum DPoP proof age passed to Attesto.
       * `:cert_der` - callback returning the authenticated client certificate's
@@ -118,20 +117,20 @@ if Code.ensure_loaded?(Plug.Conn) do
         {:dpop_error, :use_dpop_nonce} ->
           dpop_nonce_challenge(conn, opts)
 
-        {:dpop_error, reason} ->
+        {:dpop_error, _reason} ->
           OAuthError.unauthorized(
             conn,
             :dpop,
             "invalid_dpop_proof",
-            error_opts(opts, description: inspect(reason))
+            error_opts(opts)
           )
 
-        {:certificate_error, reason} ->
+        {:certificate_error, _reason} ->
           OAuthError.unauthorized(
             conn,
             :bearer,
             "invalid_token",
-            error_opts(opts, description: inspect(reason))
+            error_opts(opts)
           )
 
         {:error, {:jwks_refresh_failed, _reason}} ->
@@ -150,7 +149,7 @@ if Code.ensure_loaded?(Plug.Conn) do
             conn,
             token_error_scheme(conn, reason),
             "invalid_token",
-            error_opts(opts, description: inspect(reason))
+            error_opts(opts)
           )
       end
     end
@@ -220,8 +219,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     defp replay_protected?(opts) do
-      is_function(Keyword.get(opts, :replay_check), 2) or
-        Keyword.get(opts, :dpop_replay_unprotected_acknowledged?, false) == true
+      is_function(Keyword.get(opts, :replay_check), 2)
     end
 
     defp certificate_thumbprint(conn, opts) do
@@ -307,12 +305,12 @@ if Code.ensure_loaded?(Plug.Conn) do
             error_opts(opts, dpop_nonce: nonce)
           )
 
-        {:error, reason} ->
+        {:error, _reason} ->
           OAuthError.unauthorized(
             conn,
             :dpop,
             "invalid_dpop_proof",
-            error_opts(opts, description: inspect(reason))
+            error_opts(opts)
           )
       end
     end

@@ -45,7 +45,7 @@ defmodule AttestoClient.MixProject do
       # resolution and (for the response side) its verification, the mirror of
       # what attesto's server side issues.
       attesto_dep(),
-      {:jose, "~> 1.11.9"},
+      {:jose, "~> 1.11.12"},
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
       {:req, ">= 0.6.1 and < 1.0.0"},

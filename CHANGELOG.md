@@ -6,18 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.1.1] - 2026-07-16
+## [2.1.1] - 2026-07-17
 
 ### Security
 
 - Restrict the optional Plug integration to the security-patched releases on
   every supported minor line: Plug 1.16.6, 1.17.4, 1.18.5, 1.19.5, and 1.20.3
   and later 1.x releases.
-- Raise the JOSE floor to 1.11.9, excluding releases affected by
-  GHSA-9mg4-v392-8j68 / CVE-2023-50966 and the security-fixed 1.11.7-1.11.8
-  packages that included development-only tooling as runtime dependencies.
+- Raise the JOSE floor to 1.11.12, excluding releases affected by
+  GHSA-9mg4-v392-8j68 / CVE-2023-50966, the 1.11.7-1.11.8 packages that
+  included development-only tooling as runtime dependencies, and the
+  1.11.9-1.11.10 releases with broken EC key conversion on OTP 28. JOSE
+  1.11.11 fixed that conversion but could encode Elixir `nil` as the JSON
+  string `"nil"` with OTP's built-in JSON module; 1.11.12 fixes that too.
 - Refresh the development lock to Mint 1.9.3, resolving
   EEF-CVE-2026-59249 / CVE-2026-59249.
+- Extend discovery and JWKS SSRF checks across non-global IPv4, translated
+  IPv6, deprecated site-local, and local-use NAT64 destinations while retaining
+  globally reachable anycast and public NAT64 targets.
+- Require a replay callback for every DPoP request; the former test-only
+  acknowledgement flag can no longer disable replay protection.
+- Keep internal token, DPoP, certificate, and nonce rejection reasons out of
+  OAuth error responses.
 
 ## [2.1.0] - 2026-07-16
 

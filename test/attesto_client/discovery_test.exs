@@ -148,6 +148,46 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:error, :blocked_host} = Discovery.fetch_jwks("https://[::1]/jwks")
     end
 
+    test "rejects non-global IPv4 special-purpose destinations" do
+      for host <- [
+            "192.0.0.1",
+            "192.0.2.1",
+            "192.88.99.1",
+            "198.18.0.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "255.255.255.255"
+          ] do
+        assert {:error, :blocked_host} =
+                 Discovery.validate_endpoint("https://#{host}/token"),
+               host
+      end
+
+      # IANA carves these globally reachable anycast addresses out of the
+      # otherwise non-global 192.0.0.0/24 protocol-assignment block.
+      assert :ok = Discovery.validate_endpoint("https://192.0.0.9/token")
+      assert :ok = Discovery.validate_endpoint("https://192.0.0.10/token")
+    end
+
+    test "rejects translated private and non-global IPv6 destinations" do
+      for host <- [
+            "[::]",
+            "[::127.0.0.1]",
+            "[64:ff9b::7f00:1]",
+            "[64:ff9b:1::1]",
+            "[fec0::1]"
+          ] do
+        assert {:error, :blocked_host} =
+                 Discovery.validate_endpoint("https://#{host}/token"),
+               host
+      end
+
+      # The globally reachable NAT64 prefix remains usable when its embedded
+      # IPv4 destination is public.
+      assert :ok = Discovery.validate_endpoint("https://[64:ff9b::808:808]/token")
+    end
+
     test "Req plug tests bypass DNS because no network transport is used" do
       plug = json_plug(200, %{"issuer" => "https://127.0.0.1"})
 
