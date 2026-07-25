@@ -18,9 +18,13 @@ defmodule AttestoClient.ClientAssertion do
     * `iat`, `exp` = issuance and a short expiry.
 
   Signing uses the client key directly (a `JOSE.JWK` or a JWK map); the algorithm
-  defaults to the key's natural algorithm (`Attesto.SigningAlg.infer/1`: the FAPI
-  algorithms PS256/ES256/EdDSA for the corresponding key types) and may be
-  overridden with `:alg`.
+  defaults to the key's natural algorithm (`Attesto.SigningAlg.infer/1`:
+  RS256 for RSA, the curve-matched ES algorithm for EC, or legacy `EdDSA` for
+  Edwards keys) and may be overridden with `:alg`. A FAPI client using RSA must
+  therefore select `alg: "PS256"` explicitly; FAPI does not permit the inferred
+  RS256 default. An explicit algorithm is validated against the key before
+  signing; in particular, `Ed25519` and `Ed448` require their matching OKP
+  curves.
   """
 
   alias AttestoClient.Builder
@@ -56,8 +60,9 @@ defmodule AttestoClient.ClientAssertion do
 
   Fails fast on invalid input rather than signing it: an empty `:client_id` or
   `:audience`, a non-positive `:lifetime`, an empty `:jti`, or an unsupported
-  `:alg` (including `"none"`) return `{:error, reason}`. A key/algorithm mismatch
-  surfaces as `{:error, {:signing_failed, message}}`.
+  `:alg` (including `"none"`) returns `{:error, :unsupported_alg}`. A supported
+  algorithm that is incompatible with the key returns the existing
+  `{:error, {:signing_failed, message}}` tuple before signing.
 
   `jwk` is the client's private key (a `JOSE.JWK` or a JWK map).
 
@@ -69,7 +74,8 @@ defmodule AttestoClient.ClientAssertion do
 
   Optional:
 
-    * `:alg` - the JWS algorithm; defaults to the key's natural algorithm.
+    * `:alg` - the JWS algorithm; defaults to the key's natural algorithm. Set
+      `"PS256"` explicitly for an RSA client under FAPI.
     * `:kid` - the JOSE `kid` header; defaults to the key's own `kid` when the
       JWK carries one, otherwise omitted.
     * `:lifetime` - seconds until `exp`; defaults to `#{@default_lifetime_seconds}`.

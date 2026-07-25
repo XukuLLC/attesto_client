@@ -25,7 +25,7 @@ defmodule AttestoClient.RequestObject do
   The JOSE header `typ` defaults to `"oauth-authz-req+jwt"` (RFC 9101 §10.8 /
   FAPI 2.0 Message Signing §5.3.1 explicit typing); it is accepted by attesto's
   generic policy too, so it is safe for non-FAPI servers and may be overridden
-  with `:typ`. Signing and `:alg`/`:kid`/validation behave as in
+  with `:typ`. Signing and key-bound `:alg`/`:kid` validation behave as in
   `AttestoClient.ClientAssertion`.
   """
 

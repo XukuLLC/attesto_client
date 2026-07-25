@@ -368,7 +368,8 @@ defmodule AttestoClient.ResourceServer do
     now = now(opts)
 
     with {:ok, algs} <- Verifier.accepted_algs(accepted_algs: snapshot.accepted_algs),
-         {:ok, claims, header} <- Verifier.verify_signature(access_token, snapshot.keys, algs),
+         {:ok, claims, header, _verified_jwk} <-
+           Verifier.verify_signature(access_token, snapshot.keys, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, snapshot.issuer),
          :ok <- check_audience(claims, snapshot.audiences),

@@ -63,7 +63,7 @@ defmodule AttestoClient.SignedIntrospection do
          {:ok, audience} <- Verifier.require_string(opts, :audience, :missing_audience),
          {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
          {:ok, algs} <- Verifier.accepted_algs(opts),
-         {:ok, claims, header} <- Verifier.verify_signature(jwt, jwks, algs),
+         {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience(claims, audience),

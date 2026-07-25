@@ -63,7 +63,7 @@ defmodule AttestoClient.UserInfo do
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
          {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
          {:ok, algs} <- Verifier.accepted_algs(opts),
-         {:ok, claims, header} <- Verifier.verify_signature(jwt, jwks, algs),
+         {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience(claims, client_id),

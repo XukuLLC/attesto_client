@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.1.1"
+  @version "2.2.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -23,7 +23,8 @@ defmodule AttestoClient.MixProject do
       deps: deps(),
       elixirc_paths: elixirc_paths(Mix.env()),
       docs: docs(),
-      aliases: aliases()
+      aliases: aliases(),
+      dialyzer: [ignore_warnings: ".dialyzer_ignore.exs", plt_add_apps: [:mix]]
     ]
   end
 
@@ -45,7 +46,7 @@ defmodule AttestoClient.MixProject do
       # resolution and (for the response side) its verification, the mirror of
       # what attesto's server side issues.
       attesto_dep(),
-      {:jose, "~> 1.11.12"},
+      {:jose, ">= 1.11.12 and < 2.0.0"},
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
       {:req, ">= 0.6.1 and < 1.0.0"},
@@ -57,6 +58,7 @@ defmodule AttestoClient.MixProject do
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:quokka, "~> 2.12", only: [:dev, :test], runtime: false}
     ]
   end
@@ -69,7 +71,7 @@ defmodule AttestoClient.MixProject do
     if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, "~> 1.0"}
+      {:attesto, ">= 1.3.0 and < 2.0.0"}
     end
   end
 

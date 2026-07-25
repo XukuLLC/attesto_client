@@ -57,7 +57,10 @@ browser_binding = application_browser_session_binding
 
 `id_token_alg` must be the exact algorithm registered for the client. It is
 checked against provider metadata and then used as the sole accepted ID Token
-algorithm.
+algorithm. RFC 9864 `Ed25519` and `Ed448` identifiers are supported only with
+their matching issuer JWK curve; legacy `EdDSA` remains compatible with both.
+Detached `at_hash` and `c_hash` validation uses the verified key to distinguish
+Ed25519's SHA-512 profile from Ed448's SHAKE256 profile.
 
 The browser binding is mandatory protocol correlation: a callback created in
 one browser session cannot establish a login in another. AttestoClient treats

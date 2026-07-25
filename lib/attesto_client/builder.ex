@@ -57,24 +57,33 @@ defmodule AttestoClient.Builder do
   end
 
   # An explicit `:alg` is honoured only if supported; otherwise the key's natural
-  # algorithm is inferred. A key/alg mismatch surfaces later at sign/3. An
+  # algorithm is inferred. The algorithm is bound to the signing key before any
+  # claims are signed, including RFC 9864's exact Edwards identifiers. An
   # unsupported key type (e.g. a symmetric `oct` key) - for which inference
   # raises inside attesto - is caught here as {:error, :unsupported_key} so the
   # {:ok | :error} contract holds.
   @spec resolve_alg(JOSE.JWK.t(), keyword()) ::
-          {:ok, String.t()} | {:error, :unsupported_alg | :unsupported_key}
+          {:ok, String.t()}
+          | {:error, :unsupported_alg | :unsupported_key | {:signing_failed, String.t()}}
   def resolve_alg(jose_jwk, opts) do
     case Keyword.get(opts, :alg) do
       nil -> infer_alg(jose_jwk)
-      alg when alg in @allowed_algs -> {:ok, alg}
+      alg when alg in @allowed_algs -> validate_alg_for_key(jose_jwk, alg)
       _ -> {:error, :unsupported_alg}
     end
   end
 
   defp infer_alg(jose_jwk) do
-    {:ok, SigningAlg.infer(jose_jwk)}
+    alg = SigningAlg.infer(jose_jwk)
+    {:ok, SigningAlg.validate_for_key!(alg, jose_jwk)}
   rescue
     _error -> {:error, :unsupported_key}
+  end
+
+  defp validate_alg_for_key(jose_jwk, alg) do
+    {:ok, SigningAlg.validate_for_key!(alg, jose_jwk)}
+  rescue
+    error -> {:error, {:signing_failed, Exception.message(error)}}
   end
 
   # Add the `kid` header: an explicit `:kid` wins, else the key's own embedded
@@ -95,9 +104,10 @@ defmodule AttestoClient.Builder do
     end
   end
 
-  # Sign claims under the given protected header, returning the compact JWS. A
-  # key/algorithm mismatch (e.g. RS256 with an EC key) raises inside JOSE; it is
-  # caught and returned as {:signing_failed, _} so build/2 never raises on input.
+  # Sign claims under the given protected header, returning the compact JWS.
+  # Key/algorithm compatibility is checked before this point; backend failures
+  # are still caught and returned as {:signing_failed, _} so build/2 does not
+  # raise on input.
   @spec sign(JOSE.JWK.t(), map(), map()) ::
           {:ok, String.t()} | {:error, {:signing_failed, String.t()}}
   def sign(jose_jwk, header, claims) do

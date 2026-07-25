@@ -1,7 +1,6 @@
 defmodule AttestoClient.AuthorizationCodeTest do
   use ExUnit.Case, async: true
 
-  alias Attesto.SigningAlg
   alias AttestoClient.AuthorizationCode
   alias AttestoClient.AuthorizationTransaction.Store.ETS
   alias AttestoClient.PKCE
@@ -84,7 +83,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
   defp hash_claim(value) do
     :sha256
     |> :crypto.hash(value)
-    |> binary_part(0, SigningAlg.hash_half_bytes("RS256"))
+    |> binary_part(0, 16)
     |> Base.url_encode64(padding: false)
   end
 

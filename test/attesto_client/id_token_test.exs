@@ -1,7 +1,6 @@
 defmodule AttestoClient.IDTokenTest do
   use ExUnit.Case, async: true
 
-  alias Attesto.SigningAlg
   alias AttestoClient.IDToken
 
   @issuer "https://op.example.com"
@@ -49,10 +48,16 @@ defmodule AttestoClient.IDTokenTest do
   end
 
   defp hash_claim(value, alg \\ "RS256") do
-    alg
-    |> SigningAlg.hash_alg()
+    {digest, half_bytes} =
+      case alg do
+        alg when alg in ~w(RS256 PS256 ES256) -> {:sha256, 16}
+        "ES384" -> {:sha384, 24}
+        alg when alg in ~w(ES512 EdDSA Ed25519) -> {:sha512, 32}
+      end
+
+    digest
     |> :crypto.hash(value)
-    |> binary_part(0, SigningAlg.hash_half_bytes(alg))
+    |> binary_part(0, half_bytes)
     |> Base.url_encode64(padding: false)
   end
 
@@ -185,6 +190,11 @@ defmodule AttestoClient.IDTokenTest do
 
       assert {:ok, _claims} = verify(jwt, jwks: jwks, accepted_algs: ["PS256"])
     end
+
+    test "retains nil-as-default accepted-alg compatibility" do
+      {:ok, jwt} = Attesto.IDToken.mint(config(), @subject, @client_id, now: @now)
+      assert {:ok, _claims} = verify(jwt, accepted_algs: nil)
+    end
   end
 
   describe "verify/2 rejects" do
@@ -244,6 +254,9 @@ defmodule AttestoClient.IDTokenTest do
                verify(sign(base_claims()), access_token: "access-token", require_at_hash: true)
 
       assert {:ok, _claims} = verify(sign(base_claims()), access_token: "access-token")
+
+      assert {:error, :invalid_at_hash} =
+               verify(sign(base_claims(%{"at_hash" => nil})), access_token: "access-token")
 
       assert {:error, :missing_c_hash} = verify(sign(base_claims()), code: "code-123")
       assert {:error, :missing_s_hash} = verify(sign(base_claims()), state: "state-123")
@@ -325,6 +338,12 @@ defmodule AttestoClient.IDTokenTest do
     test "accepted with allow_unsigned: true (OIDC Core §3.1.3.7 code-flow case)" do
       assert {:ok, claims} = verify(unsigned(base_claims()), allow_unsigned: true)
       assert claims["sub"] == @subject
+
+      assert {:ok, _claims} =
+               verify(unsigned(base_claims()),
+                 allow_unsigned: true,
+                 access_token: "optional-without-at-hash"
+               )
     end
 
     test "all claim checks still run when unsigned" do

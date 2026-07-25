@@ -96,7 +96,7 @@ defmodule AttestoClient.RequestObjectTest do
       assert {:error, :invalid_lifetime} = build(lifetime: 0)
       assert {:error, :invalid_jti} = build(jti: "")
       assert {:error, :unsupported_alg} = build(alg: "none")
-      assert {:error, {:signing_failed, _}} = build(alg: "RS256")
+      assert {:error, {:signing_failed, _message}} = build(alg: "RS256")
 
       assert {:error, :unsupported_key} =
                RequestObject.build(JOSE.JWK.generate_key({:oct, 32}),
