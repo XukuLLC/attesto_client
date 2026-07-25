@@ -1,0 +1,107 @@
+name: Elixir CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.18.1"
+            otp: "27.2"
+          - elixir: "1.18.4"
+            otp: "28.0"
+          - elixir: "1.19.4"
+            otp: "28.3"
+          - elixir: "1.20.1"
+            otp: "29.0.2"
+            lint: true
+
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      # The cross-language parity tests verify Attesto-issued artifacts against
+      # independent implementations. The Python leg (JARM + request objects)
+      # shells out to PyJWT, and the Edwards leg drives Node's built-in crypto.
+      # Both self-skip when their runtime is absent, so install them here or CI
+      # would silently cover less than it appears to.
+      - name: Set up Python (PyJWT parity leg)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python parity dependencies
+        run: python -m pip install --upgrade pip pyjwt cryptography
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ hashFiles('**/mix.lock') }}-${{ hashFiles('**/mix.exs') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test --trace
+
+      - name: Check formatting
+        if: ${{ matrix.lint }}
+        run: mix format --check-formatted
+
+      - name: Run Credo
+        if: ${{ matrix.lint }}
+        run: mix credo --strict
+
+      - name: Restore PLT cache
+        if: ${{ matrix.lint }}
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-
+
+      - name: Run Dialyzer
+        if: ${{ matrix.lint }}
+        # dialyxir is `only: [:dev]`, so this analyses lib/ alone.
+        env:
+          MIX_ENV: dev
+        run: mix dialyzer
