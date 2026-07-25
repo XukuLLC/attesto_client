@@ -64,9 +64,10 @@ policy. DPoP proof generation for outgoing requests is
 - `AttestoClient.RequestObject` — signed authorization request objects (JAR,
   RFC 9101 / FAPI 2.0 Message Signing §5.3.1).
 - `AttestoClient.JARM` — verify signed authorization responses (JARM, FAPI 2.0
-  Message Signing §5.4).
+  Message Signing §5.4) with unique-key selection and key-aware FAPI policy.
 - `AttestoClient.IDToken` — verify OpenID Connect ID Tokens, including nonce,
-  `max_age`, `at_hash`, `c_hash`, and `s_hash`.
+  `max_age`, and key-aware `at_hash`, `c_hash`, and `s_hash` for RSA, EC,
+  Ed25519, and Ed448 signatures.
 - `AttestoClient.IdentityAssertion` — build Identity Assertion JWT
   Authorization Grant assertions (ID-JAG / EMA).
 - `AttestoClient.PKCE` — generate S256 PKCE verifier/challenge pairs.
@@ -117,11 +118,12 @@ key rotation, stale-key behavior, scope checks, and Plug wiring, see the
 
 Build-side artifacts carry **cross-language parity tests** where practical: they
 are checked against an independent, non-Elixir reference implementation (e.g.
-PyJWT), so correctness does not rest only on this library and `attesto` agreeing
-with each other. The mirror modules also carry in-family interop tests against
-the corresponding attesto server-side issuer or verifier. The Python parity
-tests skip cleanly when the reference toolchain is absent, so they never block a
-plain `mix test`.
+PyJWT or Node's native crypto implementation), so correctness does not rest only
+on this library and `attesto` agreeing with each other. This includes exact and
+legacy Ed25519/Ed448 signatures plus the curve-dependent OIDC hash construction.
+The mirror modules also carry in-family interop tests against the corresponding
+attesto server-side issuer or verifier. External-reference tests skip cleanly
+when their toolchain is absent, so they never block a plain `mix test`.
 
 For release confidence, run them explicitly against a Python with the reference
 libraries installed (the system Python is usually PEP-668 externally managed, so
@@ -140,10 +142,18 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.0`.
+a new major version. Pin to `~> 2.2`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later. Both this package and its required
-`attesto` dependency use Elixir's built-in `JSON` module, so lowering only this
-package's declared floor would not create a working older-Elixir installation.
+AttestoClient requires Elixir 1.18 or later, Attesto 1.3 or later, and JOSE
+1.11.12 or later within the JOSE 1.x line. The JOSE range keeps the patched
+security floor while allowing native OTP SHA-3 and Ed448 improvements in later
+compatible releases. Both this package and `attesto` use Elixir's built-in
+`JSON` module, so lowering only this package's declared floor would not create a
+working older-Elixir installation.
+
+Ed448 verification and OIDC hash claims additionally require JOSE to have a
+working Curve448 and SHAKE256 backend. That may come from supported native OTP
+crypto in a later JOSE 1.x release, an installed backend, or JOSE's cryptographic
+fallback. Operations fail closed when the required capability is unavailable.

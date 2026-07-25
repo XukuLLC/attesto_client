@@ -77,6 +77,32 @@ defmodule AttestoClient.ClientAssertionTest do
       assert kid == "struct-kid"
     end
 
+    test "RSA inference remains RS256 and FAPI callers can select PS256 explicitly" do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+
+      assert {:ok, inferred} =
+               ClientAssertion.build(key, client_id: @client_id, audience: @audience)
+
+      assert %{"alg" => "RS256"} = inferred |> JOSE.JWS.peek_protected() |> JSON.decode!()
+
+      assert {:ok, fapi} =
+               ClientAssertion.build(key,
+                 client_id: @client_id,
+                 audience: @audience,
+                 alg: "PS256"
+               )
+
+      assert %{"alg" => "PS256"} = fapi |> JOSE.JWS.peek_protected() |> JSON.decode!()
+
+      assert {:ok, _claims} =
+               Attesto.ClientAssertion.verify(
+                 fapi,
+                 @client_id,
+                 @audience,
+                 %{"keys" => [public_jwk(key, %{"alg" => "PS256"})]}
+               )
+    end
+
     test "the assertion_type/0 is the RFC 7523 jwt-bearer value" do
       assert ClientAssertion.assertion_type() ==
                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -115,10 +141,10 @@ defmodule AttestoClient.ClientAssertionTest do
       assert {:error, :unsupported_alg} = ClientAssertion.build(key, base ++ [alg: "bogus"])
     end
 
-    test "a key/algorithm mismatch fails as signing_failed rather than raising" do
+    test "a key/algorithm mismatch preserves the signing_failed error tuple" do
       key = es256_key()
 
-      assert {:error, {:signing_failed, _msg}} =
+      assert {:error, {:signing_failed, _message}} =
                ClientAssertion.build(key,
                  client_id: @client_id,
                  audience: @audience,

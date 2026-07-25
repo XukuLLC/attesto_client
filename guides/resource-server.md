@@ -43,6 +43,9 @@ trusted, already-validated metadata map or JWKS URI can be supplied with
 `:metadata` or `:jwks_uri`, but the JWKS request remains HTTPS-only.
 `accepted_algs` is mandatory and must be chosen from the algorithms the
 deployment permits; it is never derived from discovery or a token header.
+RFC 9864 `Ed25519` and `Ed448` may be selected explicitly and are accepted only
+with their matching OKP curve; legacy `EdDSA` remains available for either
+curve. Ed448 requires a working JOSE Curve448 backend.
 
 `warm/1` completes metadata and JWKS retrieval and refuses a key set that has
 no usable key for the configured algorithms. `ready?/1` reports whether a

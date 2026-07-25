@@ -24,7 +24,7 @@ defmodule AttestoClient.IDToken do
       supplied `:max_age` requires `auth_time` and enforces the age.
     * supplied `:access_token`, `:code`, and `:state` are checked against
       `at_hash`, `c_hash`, and `s_hash` respectively using the ID Token signing
-      algorithm's left-half hash construction.
+      algorithm and the verified issuer key's left-half hash construction.
 
   `:jwks` may be supplied directly. Otherwise the verifier can fetch through
   `AttestoClient.Discovery`: pass `:metadata`, `:jwks_uri`, or just `:issuer`
@@ -134,7 +134,7 @@ defmodule AttestoClient.IDToken do
 
     with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
-         {:ok, claims, header} <- verify_or_decode(id_token, opts, issuer),
+         {:ok, claims, header, verified_jwk} <- verify_or_decode(id_token, opts, issuer),
          :ok <- check_header_typ(header),
          :ok <- check_token_purpose(claims),
          :ok <- check_issuer(claims, issuer),
@@ -147,9 +147,16 @@ defmodule AttestoClient.IDToken do
          :ok <- check_nonce(claims, Keyword.get(opts, :nonce)),
          :ok <- check_max_age(claims, opts, now),
          :ok <-
-           check_detached_hash(claims, header, "access_token", "at_hash", :access_token, opts),
-         :ok <- check_detached_hash(claims, header, "code", "c_hash", :code, opts),
-         :ok <- check_detached_hash(claims, header, "state", "s_hash", :state, opts) do
+           check_detached_hash(
+             claims,
+             header,
+             verified_jwk,
+             "at_hash",
+             :access_token,
+             opts
+           ),
+         :ok <- check_detached_hash(claims, header, verified_jwk, "c_hash", :code, opts),
+         :ok <- check_detached_hash(claims, header, verified_jwk, "s_hash", :state, opts) do
       {:ok, claims}
     end
   end
@@ -164,7 +171,9 @@ defmodule AttestoClient.IDToken do
   # signature path, where it fails.
   defp verify_or_decode(id_token, opts, issuer) do
     if Keyword.get(opts, :allow_unsigned, false) == true and Verifier.unsigned?(id_token) do
-      Verifier.decode_unsigned(id_token)
+      with {:ok, claims, header} <- Verifier.decode_unsigned(id_token) do
+        {:ok, claims, header, nil}
+      end
     else
       with {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
            {:ok, algs} <- Verifier.accepted_algs(opts) do
@@ -311,31 +320,41 @@ defmodule AttestoClient.IDToken do
   defp fetch_auth_time(%{"auth_time" => _bad}, _now), do: {:error, :invalid_auth_time}
   defp fetch_auth_time(_claims, _now), do: {:error, :auth_time_required}
 
-  defp check_detached_hash(claims, header, _label, claim_name, opt_key, opts) do
+  defp check_detached_hash(claims, header, verified_jwk, claim_name, opt_key, opts) do
     case Keyword.get(opts, opt_key) do
       nil ->
         :ok
 
       value when is_binary(value) ->
-        compare_hash_claim(claims, header, claim_name, value, required_hash?(claim_name, opts))
+        compare_hash_claim(
+          claims,
+          header,
+          verified_jwk,
+          claim_name,
+          value,
+          required_hash?(claim_name, opts)
+        )
 
       _other ->
         hash_error(claim_name)
     end
   end
 
-  defp compare_hash_claim(claims, header, claim_name, value, required?) do
-    expected = hash_claim(value, Map.get(header, "alg"))
+  defp compare_hash_claim(claims, header, verified_jwk, claim_name, value, required?) do
+    case Map.fetch(claims, claim_name) do
+      {:ok, actual} when is_binary(actual) ->
+        expected = SigningAlg.oidc_hash(value, Map.get(header, "alg"), verified_jwk)
 
-    case Map.get(claims, claim_name) do
-      actual when is_binary(actual) ->
         if SecureCompare.equal?(actual, expected), do: :ok, else: hash_error(claim_name)
 
-      _missing when required? ->
+      :error when required? ->
         missing_hash_error(claim_name)
 
-      _missing ->
+      :error ->
         :ok
+
+      {:ok, _malformed} ->
+        hash_error(claim_name)
     end
   rescue
     _error -> hash_error(claim_name)
@@ -344,14 +363,6 @@ defmodule AttestoClient.IDToken do
   defp required_hash?("at_hash", opts), do: Keyword.get(opts, :require_at_hash, false) == true
   defp required_hash?("c_hash", opts), do: Keyword.get(opts, :require_c_hash, true) == true
   defp required_hash?("s_hash", _opts), do: true
-
-  defp hash_claim(value, alg) when is_binary(value) and is_binary(alg) do
-    alg
-    |> SigningAlg.hash_alg()
-    |> :crypto.hash(value)
-    |> binary_part(0, SigningAlg.hash_half_bytes(alg))
-    |> Base.url_encode64(padding: false)
-  end
 
   defp missing_hash_error("at_hash"), do: {:error, :missing_at_hash}
   defp missing_hash_error("c_hash"), do: {:error, :missing_c_hash}

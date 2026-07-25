@@ -14,8 +14,10 @@ defmodule AttestoClient.JARM do
 
     * **Signature** verifies against one of the authorization server's JWKS keys,
       restricted to an algorithm allow-list (`:accepted_algs`, default the FAPI
-      algorithms PS256/ES256/EdDSA - `none` is never accepted). When the JWT
-      header carries a `kid`, only the matching key is tried.
+      algorithms PS256/ES256/EdDSA/Ed25519 - `none` is never accepted). The
+      default also enforces the FAPI RSA-strength and Ed25519-only key policy.
+      When the JWT header carries a `kid`, exactly one suitable matching key
+      must exist.
     * `iss` equals the expected authorization server identifier (`:issuer`).
     * `aud` equals, or (an all-string array) contains, the client's `client_id`
       (`:client_id`); a mixed-type `aud` array is malformed.
@@ -29,6 +31,7 @@ defmodule AttestoClient.JARM do
   """
 
   alias Attesto.SigningAlg
+  alias AttestoClient.Verifier
 
   # Clock-skew tolerance for `iat`, matching attesto's token verification.
   @clock_skew_seconds 60
@@ -39,6 +42,7 @@ defmodule AttestoClient.JARM do
           {:issuer, String.t()}
           | {:client_id, String.t()}
           | {:accepted_algs, [String.t()]}
+          | {:enforce_fapi_alg_policy, boolean()}
           | {:now, integer()}
 
   @type error ::
@@ -46,9 +50,12 @@ defmodule AttestoClient.JARM do
           | :missing_issuer
           | :missing_client_id
           | :unsupported_alg
+          | :invalid_token
           | :invalid_signature
           | :ambiguous_key
           | :weak_key
+          | :unsupported_critical_header
+          | :invalid_policy
           | :invalid_issuer
           | :invalid_audience
           | :invalid_iat
@@ -62,17 +69,23 @@ defmodule AttestoClient.JARM do
 
   Required options: `:issuer` (the expected authorization server identifier) and
   `:client_id` (the expected audience). Optional: `:accepted_algs` (default the
-  FAPI algorithms) and `:now` (Unix seconds, for tests).
+  FAPI algorithms) and `:now` (Unix seconds, for tests). Supplying an explicit
+  `:accepted_algs` list selects a non-FAPI algorithm policy unless
+  `:enforce_fapi_alg_policy` is also `true`.
   """
   @spec verify(String.t(), jwks(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(response_jwt, jwks, opts) when is_binary(response_jwt) and is_list(opts) do
-    now = now(opts)
+    now = Verifier.now(opts)
 
-    with {:ok, keys} <- normalize_jwks(jwks),
-         {:ok, issuer} <- require_opt(opts, :issuer, :missing_issuer),
-         {:ok, client_id} <- require_opt(opts, :client_id, :missing_client_id),
+    with {:ok, keys} <- Verifier.normalize_jwks(jwks),
+         {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
+         {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
          {:ok, algs} <- accepted_algs(opts),
-         {:ok, claims} <- verify_signature(response_jwt, keys, algs),
+         {:ok, enforce_fapi_policy} <- enforce_fapi_policy(opts),
+         {:ok, claims, _header, _verified_jwk} <-
+           Verifier.verify_signature(response_jwt, keys, algs,
+             enforce_fapi_alg_policy: enforce_fapi_policy
+           ),
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience(claims, client_id),
          :ok <- check_issued_at(claims, now),
@@ -81,71 +94,25 @@ defmodule AttestoClient.JARM do
     end
   end
 
-  defp normalize_jwks(%{"keys" => keys}) when is_list(keys), do: normalize_jwks(keys)
+  defp enforce_fapi_policy(opts) do
+    default = not Keyword.has_key?(opts, :accepted_algs)
 
-  defp normalize_jwks(keys) when is_list(keys) do
-    if Enum.all?(keys, &is_map/1), do: {:ok, keys}, else: {:error, :invalid_jwks}
-  end
-
-  defp normalize_jwks(_other), do: {:error, :invalid_jwks}
-
-  defp require_opt(opts, key, error) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, error}
+    case Keyword.get(opts, :enforce_fapi_alg_policy, default) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:error, :invalid_policy}
     end
   end
 
-  # The FAPI signing algorithms by default (PS256/ES256/EdDSA). A caller-supplied
-  # list is validated against attesto's asymmetric allow-list at this boundary,
-  # so `accepted_algs: ["none"]` or an unknown value is a clear :unsupported_alg
-  # rather than relying on JOSE to fail closed downstream.
+  # Preserve the shared verifier's long-standing `nil`-means-default behavior
+  # for its other public consumers. At this FAPI boundary, however, only an
+  # actual non-empty list is an explicit non-FAPI policy; a present `nil` must
+  # not disable the curve/strength defaults.
   defp accepted_algs(opts) do
-    case Keyword.get(opts, :accepted_algs) do
-      nil ->
-        {:ok, SigningAlg.fapi_algs()}
-
-      algs when is_list(algs) and algs != [] ->
-        if Enum.all?(algs, &(&1 in SigningAlg.allowed())),
-          do: {:ok, algs},
-          else: {:error, :unsupported_alg}
-
-      _other ->
-        {:error, :unsupported_alg}
+    case Keyword.fetch(opts, :accepted_algs) do
+      {:ok, nil} -> {:error, :unsupported_alg}
+      _other -> Verifier.accepted_algs(opts, SigningAlg.fapi_algs())
     end
   end
-
-  # Verify the compact JWS against the JWKS, restricted to `algs` (a strict
-  # allow-list, so an alg-confusion or `none` token is rejected). When the header
-  # names a kid, only that key is tried. Any malformed input fails closed as an
-  # invalid signature rather than raising.
-  defp verify_signature(jwt, keys, algs) do
-    candidates = filter_by_kid(keys, header_kid(jwt))
-
-    Enum.find_value(candidates, {:error, :invalid_signature}, fn key_map ->
-      verify_with_key(key_map, algs, jwt)
-    end)
-  rescue
-    _error -> {:error, :invalid_signature}
-  end
-
-  defp verify_with_key(key_map, algs, jwt) do
-    case JOSE.JWT.verify_strict(JOSE.JWK.from_map(key_map), algs, jwt) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:ok, claims}
-      _other -> nil
-    end
-  rescue
-    _error -> nil
-  end
-
-  defp header_kid(jwt) do
-    jwt |> JOSE.JWS.peek_protected() |> JSON.decode!() |> Map.get("kid")
-  rescue
-    _error -> nil
-  end
-
-  defp filter_by_kid(keys, nil), do: keys
-  defp filter_by_kid(keys, kid), do: Enum.filter(keys, &(Map.get(&1, "kid") == kid))
 
   defp check_issuer(claims, issuer) do
     if Map.get(claims, "iss") == issuer, do: :ok, else: {:error, :invalid_issuer}
@@ -188,13 +155,6 @@ defmodule AttestoClient.JARM do
     case Map.get(claims, "exp") do
       exp when is_integer(exp) -> if exp > now, do: :ok, else: {:error, :expired}
       _other -> {:error, :missing_exp}
-    end
-  end
-
-  defp now(opts) do
-    case Keyword.get(opts, :now) do
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
     end
   end
 end

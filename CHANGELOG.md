@@ -4,7 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-07-25
+
+### Added
+
+- Support RFC 9864 `Ed25519` and `Ed448` identifiers across issuer-signed JWT
+  verification and client artifact builders while retaining legacy `EdDSA`.
+- Add independent Node crypto parity for Ed25519 and Ed448 signatures and OIDC
+  detached hash claims.
+
+### Security
+
+- Bind ID Token `at_hash`, `c_hash`, and `s_hash` calculation to the verified
+  issuer JWK. Legacy `EdDSA` now selects SHA-512 with a 32-byte left half for
+  Ed25519 and SHAKE256 with 114 bytes of output and a 57-byte left half for
+  Ed448.
+- Move JARM onto the shared hardened verifier: require a unique eligible key,
+  honor JWK `alg`, `use`, and `key_ops`, reject RSA keys below 2048 bits, bind
+  every algorithm to its key type and curve, and apply FAPI's Ed25519-only
+  Edwards policy by default. An explicit `accepted_algs` list remains a
+  deliberate non-FAPI override unless `enforce_fapi_alg_policy: true` is set.
+- Validate every explicit outbound signing algorithm against its private key
+  before signing, including exact Edwards curve binding.
+
+### Changed
+
+- Require Attesto 1.3 or later for key-aware OIDC hashing and trusted-key
+  algorithm validation.
+- Keep the JOSE security floor at 1.11.12 while widening the upper-compatible
+  range to all 1.x releases, so a future 1.x release with native OTP SHA-3 and
+  Ed448 detection is reachable without another AttestoClient release.
 
 ## [2.1.1] - 2026-07-17
 
