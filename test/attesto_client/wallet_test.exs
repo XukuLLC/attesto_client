@@ -232,6 +232,85 @@ defmodule AttestoClient.WalletTest do
     end
   end
 
+  describe "request_credential/3 - DPoP sender-constraining" do
+    # The token endpoint binds the access token to the DPoP key's jkt; the
+    # credential endpoint checks a fresh proof carrying the token's ath. One
+    # `:dpop` key threads through both legs.
+    defp dpop_capturing_plug(issuer_pem, test_pid) do
+      fn conn ->
+        dpop = Plug.Conn.get_req_header(conn, "dpop")
+
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            send(test_pid, {:token_dpop, dpop})
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "DPoP"})
+
+          {"POST", "/nonce"} ->
+            json(conn, 200, %{"c_nonce" => @c_nonce})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+            send(test_pid, {:credential_dpop, dpop})
+
+            {:ok, %{jwk: holder_jwk}} =
+              Attesto.CredentialProof.verify_jwt(request["proof"]["jwt"],
+                issuer: @issuer,
+                nonce: @c_nonce,
+                client_id: @client_id
+              )
+
+            credential =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{"given_name" => "Jane"},
+                cnf: %{"jwk" => holder_jwk}
+              )
+
+            json(conn, 200, Attesto.CredentialResponse.build(credential))
+        end
+      end
+    end
+
+    test "attaches a proof to both the token and credential requests, ath-bound" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      dpop_key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, %{credentials: [_held]}} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 nonce_endpoint: "#{@issuer}/nonce",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 dpop: dpop_key,
+                 req_options: [plug: dpop_capturing_plug(issuer_pem, self())]
+               )
+
+      expected_jkt = Attesto.DPoP.compute_jkt(dpop_key)
+
+      # Token leg: a proof for the token endpoint, no ath (no token yet).
+      assert_receive {:token_dpop, [token_proof]}
+
+      assert {:ok, %{jkt: ^expected_jkt, ath: nil, htm: "POST"}} =
+               Attesto.DPoP.verify_proof(token_proof,
+                 http_method: "POST",
+                 http_uri: "#{@issuer}/token"
+               )
+
+      # Credential leg: same key, bound to the access token's ath.
+      assert_receive {:credential_dpop, [credential_proof]}
+
+      assert {:ok, %{jkt: ^expected_jkt, ath: ath, htm: "POST"}} =
+               Attesto.DPoP.verify_proof(credential_proof,
+                 http_method: "POST",
+                 http_uri: "#{@issuer}/credential",
+                 access_token: @access_token
+               )
+
+      assert ath == Attesto.DPoP.compute_ath(@access_token)
+    end
+  end
+
   describe "request_credential/3 rejects invalid input (fail fast)" do
     test "an offer with no pre-authorized_code grant and no access_token" do
       offer = offer(%{"authorization_code" => %{"issuer_state" => "state-1"}})
