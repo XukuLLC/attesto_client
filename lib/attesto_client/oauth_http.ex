@@ -30,6 +30,45 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
+  @doc """
+  POST a JSON body authenticated with an OAuth Bearer access token, returning
+  the decoded JSON response.
+
+  For endpoints that authenticate the caller with a previously issued access
+  token rather than client credentials - the OID4VCI Credential Endpoint is
+  the current use - not `post_form/3`'s client authentication.
+  """
+  @spec post_json(String.t(), map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def post_json(endpoint, body, access_token, opts)
+      when is_map(body) and is_binary(access_token) and access_token != "" and is_list(opts) do
+    with :ok <- validate_endpoint(endpoint, opts),
+         {:ok, timeout_ms} <- timeout(opts) do
+      Deadline.run(
+        fn -> json_request(endpoint, body, access_token, req_options(opts), timeout_ms) end,
+        timeout_ms
+      )
+    end
+  end
+
+  @doc """
+  GET a JSON document, returning the decoded body.
+
+  Used for by-reference fetches initiated by the caller (e.g. an OID4VCI
+  `credential_offer_uri`) rather than a discovery document (see
+  `AttestoClient.Discovery` for that, which additionally enforces the
+  issuer-identifier matching RFC 8414 §3.3 requires).
+  """
+  @spec get_json(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def get_json(url, opts) when is_binary(url) and is_list(opts) do
+    with :ok <- validate_endpoint(url, opts),
+         {:ok, timeout_ms} <- timeout(opts) do
+      Deadline.run(
+        fn -> get_request(url, req_options(opts), timeout_ms) end,
+        timeout_ms
+      )
+    end
+  end
+
   defp validate_endpoint(endpoint, opts) do
     AttestoClient.Discovery.validate_endpoint(endpoint,
       req_options: Keyword.get(opts, :req_options, [])
@@ -131,6 +170,52 @@ defmodule AttestoClient.OAuthHTTP do
 
       {:error, _reason} ->
         {:error, :transport_error}
+    end
+  rescue
+    _error -> {:error, :transport_error}
+  end
+
+  defp json_request(endpoint, body, access_token, req_options, timeout_ms) do
+    options =
+      req_options ++
+        [
+          url: endpoint,
+          method: :post,
+          json: body,
+          auth: {:bearer, access_token},
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms
+        ]
+
+    case Req.request(Req.new(options)) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 and is_map(body) ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: %{} = body}} ->
+        {:error,
+         {:oauth_error, status,
+          Map.take(body, ["error", "error_description", "c_nonce", "c_nonce_expires_in"])}}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_status, status}}
+
+      {:error, _reason} ->
+        {:error, :transport_error}
+    end
+  rescue
+    _error -> {:error, :transport_error}
+  end
+
+  defp get_request(url, req_options, timeout_ms) do
+    options =
+      req_options ++
+        [url: url, method: :get, redirect: false, retry: false, receive_timeout: timeout_ms]
+
+    case Req.request(Req.new(options)) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
+      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+      {:error, _reason} -> {:error, :transport_error}
     end
   rescue
     _error -> {:error, :transport_error}

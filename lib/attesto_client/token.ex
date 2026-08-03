@@ -21,6 +21,43 @@ defmodule AttestoClient.Token do
   alias AttestoClient.Verifier
 
   @default_timeout_ms 10_000
+  @pre_authorized_code_grant_type "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+
+  @doc """
+  Exchange an OID4VCI pre-authorized code for an access token
+  (`urn:ietf:params:oauth:grant-type:pre-authorized_code`,
+  `draft-ietf-oauth-openid4vci` §6.1/§6.2) - the wallet-holder token step
+  ahead of `AttestoClient.Wallet.request_credential/3`.
+
+  Required option: `:token_endpoint`. `:client_id`, `:client_auth`, and
+  `:req_options` behave as for `refresh/4` - the pre-authorized_code grant
+  still authenticates the wallet the same way any other grant does. Pass
+  `:tx_code` when the offer's grant carried a `tx_code` object, i.e. the end
+  user must key in the transaction code the issuer displayed out of band.
+
+  Returns `{:ok, token_set}`; the ID Token, if any, is returned unverified
+  since OID4VCI defines no binding claims for it here.
+  """
+  @spec exchange_pre_authorized_code(String.t(), keyword()) ::
+          {:ok, TokenSet.t()} | {:error, term()}
+  def exchange_pre_authorized_code(pre_authorized_code, opts)
+      when is_binary(pre_authorized_code) and pre_authorized_code != "" and is_list(opts) do
+    with {:ok, endpoint} <- required_string(opts, :token_endpoint) do
+      form =
+        %{
+          "grant_type" => @pre_authorized_code_grant_type,
+          "pre-authorized_code" => pre_authorized_code
+        }
+        |> maybe_put("tx_code", Keyword.get(opts, :tx_code))
+
+      with {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts) do
+        TokenSet.from_response(response, nil)
+      end
+    end
+  end
+
+  def exchange_pre_authorized_code(_pre_authorized_code, _opts),
+    do: {:error, :invalid_pre_authorized_code}
 
   @doc """
   Refresh a token set through a single-flight coordinator.

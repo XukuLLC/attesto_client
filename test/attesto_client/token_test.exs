@@ -357,6 +357,53 @@ defmodule AttestoClient.TokenTest do
     assert Agent.get(counter, & &1) == 2
   end
 
+  test "exchanges an OID4VCI pre-authorized code for an access token" do
+    parent = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:request, URI.decode_query(body)})
+      json(conn, 200, %{"access_token" => "wallet-access-token", "token_type" => "Bearer"})
+    end
+
+    assert {:ok, %TokenSet{access_token: "wallet-access-token", token_type: "Bearer"}} =
+             Token.exchange_pre_authorized_code("pre-auth-code-123",
+               token_endpoint: @endpoint,
+               client_id: @client_id,
+               tx_code: "1234",
+               req_options: [plug: plug]
+             )
+
+    assert_receive {:request, form}
+    assert form["grant_type"] == "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+    assert form["pre-authorized_code"] == "pre-auth-code-123"
+    assert form["tx_code"] == "1234"
+    assert form["client_id"] == @client_id
+  end
+
+  test "the pre-authorized_code exchange omits tx_code when none is supplied" do
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      refute URI.decode_query(body) |> Map.has_key?("tx_code")
+      json(conn, 200, %{"access_token" => "at", "token_type" => "Bearer"})
+    end
+
+    assert {:ok, %TokenSet{}} =
+             Token.exchange_pre_authorized_code("pre-auth-code-123",
+               token_endpoint: @endpoint,
+               client_id: @client_id,
+               req_options: [plug: plug]
+             )
+  end
+
+  test "rejects an empty pre-authorized code" do
+    assert {:error, :invalid_pre_authorized_code} =
+             Token.exchange_pre_authorized_code("",
+               token_endpoint: @endpoint,
+               client_id: @client_id
+             )
+  end
+
   test "revocation has a bounded deadline" do
     slow = fn conn ->
       Process.sleep(200)

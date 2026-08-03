@@ -86,4 +86,82 @@ defmodule AttestoClient.OAuthHTTPTest do
     {:ok, json} = Base.url_decode64(segment, padding: false)
     JSON.decode!(json)
   end
+
+  describe "post_json/4" do
+    test "authenticates with a bearer token and returns the decoded JSON body" do
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        send(
+          parent,
+          {:request, Plug.Conn.get_req_header(conn, "authorization"), JSON.decode!(body)}
+        )
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{"a" => 1},
+                 "access-token",
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:request, ["Bearer access-token"], %{"a" => 1}}
+    end
+
+    test "surfaces an OAuth-shaped error body, including a retry c_nonce" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          400,
+          JSON.encode!(%{"error" => "invalid_proof", "c_nonce" => "fresh-nonce"})
+        )
+      end
+
+      assert {:error,
+              {:oauth_error, 400, %{"error" => "invalid_proof", "c_nonce" => "fresh-nonce"}}} =
+               OAuthHTTP.post_json("https://issuer.example.com/credential", %{}, "access-token",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects a non-https endpoint before making the request" do
+      assert {:error, :invalid_endpoint} =
+               OAuthHTTP.post_json("http://issuer.example.com/credential", %{}, "at", [])
+    end
+  end
+
+  describe "get_json/2" do
+    test "returns the decoded JSON body" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          JSON.encode!(%{"credential_issuer" => "https://issuer.example.com"})
+        )
+      end
+
+      assert {:ok, %{"credential_issuer" => "https://issuer.example.com"}} =
+               OAuthHTTP.get_json("https://issuer.example.com/offers/1",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "surfaces a non-200 status" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 404, "") end
+
+      assert {:error, {:http_status, 404}} =
+               OAuthHTTP.get_json("https://issuer.example.com/offers/missing",
+                 req_options: [plug: plug]
+               )
+    end
+  end
 end

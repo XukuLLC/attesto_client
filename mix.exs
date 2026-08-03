@@ -54,6 +54,12 @@ defmodule AttestoClient.MixProject do
       # Optional Plug integration for inbound resource-server verification.
       {:plug, "~> 1.16.6 or ~> 1.17.4 or ~> 1.18.5 or ~> 1.19.5 or >= 1.20.3 and < 2.0.0",
        optional: true},
+      # Optional: ISO 18013-5 mdoc / mso_mdoc credential verification
+      # (AttestoClient.Wallet with `format: "mso_mdoc"`), mirroring attesto's
+      # own optional :cbor dependency. Consumers of AttestoClient.Wallet that
+      # only issue/verify SD-JWT VC or jwt_vc_json credentials do not pull in
+      # CBOR.
+      {:cbor, "~> 1.0", optional: true},
 
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
