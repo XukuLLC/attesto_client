@@ -65,6 +65,7 @@ defmodule AttestoClient.Wallet do
           | {:verify_opts, keyword()}
           | {:proof_alg, String.t()}
           | {:proof_kid, String.t()}
+          | {:key_attestation, String.t()}
           | {:dpop, Proof.jwk()}
           | {:now, integer()}
           | {:req_options, keyword()}
@@ -98,6 +99,10 @@ defmodule AttestoClient.Wallet do
   token to its `jkt`) and at the Credential Endpoint (where the proof carries
   the `ath` binding to that token), and a `use_dpop_nonce` challenge is retried
   once - see `AttestoClient.DPoP`.
+
+  `:key_attestation` (a compact JWT from `AttestoClient.KeyAttestation.build/2`)
+  is carried in the holder proof's `key_attestation` header, vouching to the
+  issuer that the holder key is held in secure storage (a HAIP requirement).
   """
   @spec request_credential(CredentialOffer.t(), Proof.jwk(), [opt()]) ::
           {:ok, result()} | {:error, term()}
@@ -191,6 +196,7 @@ defmodule AttestoClient.Wallet do
       |> put_optional(:now, Keyword.get(opts, :now))
       |> put_optional(:alg, Keyword.get(opts, :proof_alg))
       |> put_optional(:kid, Keyword.get(opts, :proof_kid))
+      |> put_optional(:key_attestation, Keyword.get(opts, :key_attestation))
 
     Proof.build(holder_key, proof_opts)
   end

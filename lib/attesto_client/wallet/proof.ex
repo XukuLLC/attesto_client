@@ -32,6 +32,7 @@ defmodule AttestoClient.Wallet.Proof do
           {:credential_issuer, String.t()}
           | {:nonce, String.t()}
           | {:client_id, String.t()}
+          | {:key_attestation, String.t()}
           | {:alg, String.t()}
           | {:kid, String.t()}
           | {:now, integer()}
@@ -52,7 +53,9 @@ defmodule AttestoClient.Wallet.Proof do
   option: `:credential_issuer` (the proof's `aud`). Pass `:nonce` with the
   issuer's `c_nonce` when it supplied one, and `:client_id` for the
   authorization_code flow (becomes `iss`); `:alg`, `:kid`, and `:now` behave
-  as in `AttestoClient.RequestObject.build/2`.
+  as in `AttestoClient.RequestObject.build/2`. Pass `:key_attestation` (a
+  compact JWT from `AttestoClient.KeyAttestation.build/2`) to carry it in the
+  proof's `key_attestation` header, vouching that this key is securely stored.
   """
   @spec build(jwk(), [build_opt()]) :: {:ok, String.t()} | {:error, error()}
   def build(jwk, opts) when is_list(opts) do
@@ -68,6 +71,7 @@ defmodule AttestoClient.Wallet.Proof do
 
       header =
         %{"alg" => alg, "typ" => @proof_typ, "jwk" => public_jwk(jose_jwk)}
+        |> put_optional("key_attestation", Keyword.get(opts, :key_attestation))
         |> Builder.put_kid(jose_jwk, opts)
 
       Builder.sign(jose_jwk, header, claims)
