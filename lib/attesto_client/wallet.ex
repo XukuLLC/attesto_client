@@ -65,6 +65,7 @@ defmodule AttestoClient.Wallet do
           | {:verify_opts, keyword()}
           | {:proof_alg, String.t()}
           | {:proof_kid, String.t()}
+          | {:dpop, Proof.jwk()}
           | {:now, integer()}
           | {:req_options, keyword()}
           | {:timeout, pos_integer()}
@@ -91,6 +92,12 @@ defmodule AttestoClient.Wallet do
   building the proof. `:credential_configuration_id` selects which of the
   offer's configuration ids to request; it defaults to the offer's only id
   when there is exactly one.
+
+  `:dpop` (a `JOSE.JWK` or JWK map) sender-constrains the flow with RFC 9449
+  DPoP proofs. The one key is used at the token endpoint (binding the access
+  token to its `jkt`) and at the Credential Endpoint (where the proof carries
+  the `ath` binding to that token), and a `use_dpop_nonce` challenge is retried
+  once - see `AttestoClient.DPoP`.
   """
   @spec request_credential(CredentialOffer.t(), Proof.jwk(), [opt()]) ::
           {:ok, result()} | {:error, term()}

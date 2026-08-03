@@ -138,6 +138,134 @@ defmodule AttestoClient.OAuthHTTPTest do
     end
   end
 
+  describe "DPoP sender-constraining" do
+    defp dpop_claims(proof), do: proof |> JOSE.JWS.peek_payload() |> JSON.decode!()
+    defp dpop_header(proof), do: proof |> JOSE.JWS.peek_protected() |> JSON.decode!()
+
+    defp echo_dpop_plug(parent, status \\ 200) do
+      fn conn ->
+        [proof] = Plug.Conn.get_req_header(conn, "dpop")
+        send(parent, {:dpop, proof})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, JSON.encode!(%{"ok" => true}))
+      end
+    end
+
+    test "post_json binds the proof to the method, uri, and access token (ath)" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{},
+                 "access-token",
+                 dpop: key,
+                 req_options: [plug: echo_dpop_plug(parent)]
+               )
+
+      assert_receive {:dpop, proof}
+      assert dpop_header(proof)["typ"] == "dpop+jwt"
+      claims = dpop_claims(proof)
+      assert claims["htm"] == "POST"
+      assert claims["htu"] == "https://issuer.example.com/credential"
+      assert claims["ath"] == Attesto.DPoP.compute_ath("access-token")
+    end
+
+    test "post_form attaches a proof with no ath (no access token at the token endpoint)" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: "c",
+                 dpop: key,
+                 req_options: [plug: echo_dpop_plug(parent)]
+               )
+
+      assert_receive {:dpop, proof}
+      claims = dpop_claims(proof)
+      assert claims["htm"] == "POST"
+      assert claims["htu"] == "https://op.example.com/token"
+      refute Map.has_key?(claims, "ath")
+    end
+
+    test "retries a use_dpop_nonce challenge once, echoing the server DPoP-Nonce" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      plug = fn conn ->
+        n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+        [proof] = Plug.Conn.get_req_header(conn, "dpop")
+        send(parent, {:attempt, n, proof})
+
+        if n == 0 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "server-nonce-xyz")
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+        end
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: "c",
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:attempt, 0, first}
+      assert_receive {:attempt, 1, second}
+      refute_receive {:attempt, 2, _}
+
+      refute Map.has_key?(dpop_claims(first), "nonce")
+      assert dpop_claims(second)["nonce"] == "server-nonce-xyz"
+      # Each attempt carries a distinct proof (a fresh jti), never a replay.
+      refute dpop_claims(first)["jti"] == dpop_claims(second)["jti"]
+
+      Agent.stop(counter)
+    end
+
+    test "surfaces the error and stops after one retry when the challenge repeats" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      plug = fn conn ->
+        send(parent, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_header("dpop-nonce", "server-nonce-xyz")
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+      end
+
+      assert {:error, {:oauth_error, 400, %{"error" => "use_dpop_nonce"}}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{},
+                 "access-token",
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      # Exactly two attempts: the original and one nonce retry.
+      assert_receive :attempt
+      assert_receive :attempt
+      refute_receive :attempt
+    end
+  end
+
   describe "get_json/2" do
     test "returns the decoded JSON body" do
       plug = fn conn ->

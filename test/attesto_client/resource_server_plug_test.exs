@@ -163,7 +163,15 @@ defmodule AttestoClient.ResourceServerPlugTest do
     refute conn.halted,
            inspect({conn.status, conn.resp_body, get_resp_header(conn, "www-authenticate")})
 
-    assert_receive {:replay_check, "proof-123", ttl}
+    # Attesto.DPoP hands the callback the OPAQUE replay identity - the `jti`
+    # namespaced by the proof key (base64url(SHA-256(jkt <> ":" <> jti))) - not
+    # the raw `jti`, so a `jti` collision across two proof keys cannot evict the
+    # other's replay entry.
+    expected_replay_key =
+      :sha256 |> :crypto.hash(jkt <> ":" <> "proof-123") |> Base.url_encode64(padding: false)
+
+    assert_receive {:replay_check, ^expected_replay_key, ttl}
+    refute expected_replay_key == "proof-123"
     assert ttl > 0
   end
 

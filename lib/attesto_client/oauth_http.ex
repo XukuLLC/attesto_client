@@ -3,6 +3,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   alias AttestoClient.ClientAssertion
   alias AttestoClient.Deadline
+  alias AttestoClient.DPoP
 
   @default_timeout_ms 10_000
 
@@ -12,7 +13,7 @@ defmodule AttestoClient.OAuthHTTP do
          {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> request(endpoint, form, req_options, timeout_ms, :json) end,
+        fn -> request(endpoint, form, req_options, timeout_ms, :json, opts) end,
         timeout_ms
       )
     end
@@ -24,7 +25,7 @@ defmodule AttestoClient.OAuthHTTP do
          {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> request(endpoint, form, req_options, timeout_ms, :unit) end,
+        fn -> request(endpoint, form, req_options, timeout_ms, :unit, opts) end,
         timeout_ms
       )
     end
@@ -37,6 +38,10 @@ defmodule AttestoClient.OAuthHTTP do
   For endpoints that authenticate the caller with a previously issued access
   token rather than client credentials - the OID4VCI Credential Endpoint is
   the current use - not `post_form/3`'s client authentication.
+
+  Pass `:dpop` (a `JOSE.JWK` or JWK map) to sender-constrain the request with an
+  RFC 9449 DPoP proof; the proof carries the `ath` binding to `access_token` and
+  a `use_dpop_nonce` challenge is retried once with the server's `DPoP-Nonce`.
   """
   @spec post_json(String.t(), map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_json(endpoint, body, access_token, opts)
@@ -44,7 +49,7 @@ defmodule AttestoClient.OAuthHTTP do
     with :ok <- validate_endpoint(endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> json_request(endpoint, body, access_token, req_options(opts), timeout_ms) end,
+        fn -> json_request(endpoint, body, access_token, opts, timeout_ms) end,
         timeout_ms
       )
     end
@@ -181,8 +186,8 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
-  defp request(endpoint, form, req_options, timeout_ms, response_mode) do
-    options =
+  defp request(endpoint, form, req_options, timeout_ms, response_mode, opts) do
+    base =
       req_options ++
         [
           url: endpoint,
@@ -193,29 +198,24 @@ defmodule AttestoClient.OAuthHTTP do
           receive_timeout: timeout_ms
         ]
 
-    case Req.request(Req.new(options)) do
-      {:ok, %Req.Response{status: status}} when status in 200..299 and response_mode == :unit ->
-        :ok
-
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 and is_map(body) ->
-        {:ok, body}
-
-      {:ok, %Req.Response{status: status, body: %{} = body}} ->
-        {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
-
-      {:ok, %Req.Response{status: status}} ->
-        {:error, {:http_status, status}}
-
-      {:error, _reason} ->
-        {:error, :transport_error}
-    end
-  rescue
-    _error -> {:error, :transport_error}
+    # A DPoP-bound token request carries no `ath` (there is no access token yet).
+    run_with_dpop(dpop_context(opts, "POST", endpoint, nil), base, &classify_form(&1, response_mode))
   end
 
-  defp json_request(endpoint, body, access_token, req_options, timeout_ms) do
-    options =
-      req_options ++
+  defp classify_form(%Req.Response{status: status}, :unit) when status in 200..299, do: :ok
+
+  defp classify_form(%Req.Response{status: status, body: body}, _mode)
+       when status in 200..299 and is_map(body),
+       do: {:ok, body}
+
+  defp classify_form(%Req.Response{status: status, body: %{} = body}, _mode),
+    do: {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
+
+  defp classify_form(%Req.Response{status: status}, _mode), do: {:error, {:http_status, status}}
+
+  defp json_request(endpoint, body, access_token, opts, timeout_ms) do
+    base =
+      req_options(opts) ++
         [
           url: endpoint,
           method: :post,
@@ -226,21 +226,100 @@ defmodule AttestoClient.OAuthHTTP do
           receive_timeout: timeout_ms
         ]
 
-    case Req.request(Req.new(options)) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 and is_map(body) ->
-        {:ok, body}
+    run_with_dpop(dpop_context(opts, "POST", endpoint, access_token), base, &classify_json/1)
+  end
 
-      {:ok, %Req.Response{status: status, body: %{} = body}} ->
-        {:error,
-         {:oauth_error, status,
-          Map.take(body, ["error", "error_description", "c_nonce", "c_nonce_expires_in"])}}
+  defp classify_json(%Req.Response{status: status, body: body})
+       when status in 200..299 and is_map(body),
+       do: {:ok, body}
 
-      {:ok, %Req.Response{status: status}} ->
-        {:error, {:http_status, status}}
+  defp classify_json(%Req.Response{status: status, body: %{} = body}),
+    do:
+      {:error,
+       {:oauth_error, status,
+        Map.take(body, ["error", "error_description", "c_nonce", "c_nonce_expires_in"])}}
 
-      {:error, _reason} ->
-        {:error, :transport_error}
+  defp classify_json(%Req.Response{status: status}), do: {:error, {:http_status, status}}
+
+  # RFC 9449: when `:dpop` is set, attach a fresh proof header per attempt and
+  # retry once against a `use_dpop_nonce` challenge, echoing the server's
+  # `DPoP-Nonce`. Without `:dpop`, send the base request unchanged.
+  defp run_with_dpop(nil, base, classify), do: send_and_classify(base, [], classify)
+
+  defp run_with_dpop(ctx, base, classify), do: dpop_attempt(ctx, base, classify, nil, true)
+
+  defp dpop_attempt(ctx, base, classify, nonce, retry?) do
+    proof_opts =
+      [access_token: ctx.access_token, nonce: nonce]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+    case DPoP.proof(ctx.key, ctx.method, ctx.url, proof_opts) do
+      {:ok, proof} ->
+        case send_request(base, [{"dpop", proof}]) do
+          {:ok, resp} ->
+            if retry? and dpop_nonce_challenge?(resp) do
+              case dpop_nonce(resp) do
+                nil -> classify.(resp)
+                fresh -> dpop_attempt(ctx, base, classify, fresh, false)
+              end
+            else
+              classify.(resp)
+            end
+
+          {:error, _reason} ->
+            {:error, :transport_error}
+        end
+
+      {:error, reason} ->
+        {:error, {:dpop, reason}}
     end
+  end
+
+  defp dpop_context(opts, method, url, access_token) do
+    case Keyword.get(opts, :dpop) do
+      nil -> nil
+      key -> %{key: key, method: method, url: url, access_token: access_token}
+    end
+  end
+
+  # An AS challenges a DPoP token request with 400 `use_dpop_nonce`; a resource
+  # server with 401. Either way a `DPoP-Nonce` header names the nonce to echo.
+  defp dpop_nonce_challenge?(%Req.Response{status: status} = resp) when status in [400, 401] do
+    dpop_error(resp) == "use_dpop_nonce" and dpop_nonce(resp) != nil
+  end
+
+  defp dpop_nonce_challenge?(_resp), do: false
+
+  defp dpop_error(%Req.Response{body: %{"error" => error}}) when is_binary(error), do: error
+
+  defp dpop_error(%Req.Response{} = resp) do
+    # A resource server carries the error in WWW-Authenticate, not a JSON body.
+    case Req.Response.get_header(resp, "www-authenticate") do
+      [header | _] ->
+        if String.contains?(header, "use_dpop_nonce"), do: "use_dpop_nonce", else: nil
+
+      [] ->
+        nil
+    end
+  end
+
+  defp dpop_nonce(%Req.Response{} = resp) do
+    case Req.Response.get_header(resp, "dpop-nonce") do
+      [nonce | _] when is_binary(nonce) and nonce != "" -> nonce
+      _ -> nil
+    end
+  end
+
+  defp send_and_classify(base, headers, classify) do
+    case send_request(base, headers) do
+      {:ok, resp} -> classify.(resp)
+      {:error, _reason} -> {:error, :transport_error}
+    end
+  end
+
+  defp send_request(base, headers) do
+    options = if headers == [], do: base, else: Keyword.put(base, :headers, headers)
+    Req.request(Req.new(options))
   rescue
     _error -> {:error, :transport_error}
   end
