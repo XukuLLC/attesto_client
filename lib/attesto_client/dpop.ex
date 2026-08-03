@@ -101,6 +101,7 @@ defmodule AttestoClient.DPoP do
   # Reuse the verifier's `ath` computation so client and server agree on the
   # exact SHA-256/base64url encoding.
   defp ath(nil), do: nil
+
   defp ath(access_token) when is_binary(access_token) and access_token != "",
     do: Verify.compute_ath(access_token)
 

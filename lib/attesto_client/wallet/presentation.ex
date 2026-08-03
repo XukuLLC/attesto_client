@@ -191,7 +191,8 @@ defmodule AttestoClient.Wallet.Presentation do
     end
   end
 
-  defp presentation_binding_jwk(%{holder_binding: %{"jwk" => jwk}}) when is_map(jwk), do: {:ok, jwk}
+  defp presentation_binding_jwk(%{holder_binding: %{"jwk" => jwk}}) when is_map(jwk),
+    do: {:ok, jwk}
 
   defp presentation_binding_jwk(%{format: @mdoc_format, holder_binding: device_key})
        when is_map(device_key),

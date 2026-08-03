@@ -19,7 +19,9 @@ defmodule AttestoClient.DeadlineTest do
   end
 
   test "sanitizes operation failures" do
-    assert {:error, :operation_failed} = Deadline.run(fn -> raise "sensitive value" end, 100)
+    # A generous deadline: this asserts the raise is sanitized, not a timing
+    # bound, so the worker must never lose the scheduling race under load.
+    assert {:error, :operation_failed} = Deadline.run(fn -> raise "sensitive value" end, 5_000)
   end
 
   test "kills the operation when its caller dies" do
@@ -39,11 +41,11 @@ defmodule AttestoClient.DeadlineTest do
         )
       end)
 
-    assert_receive {:operation_started, operation}
+    assert_receive {:operation_started, operation}, 2_000
     operation_monitor = Process.monitor(operation)
     Process.exit(caller, :kill)
 
-    assert_receive {:DOWN, ^operation_monitor, :process, ^operation, _reason}
+    assert_receive {:DOWN, ^operation_monitor, :process, ^operation, _reason}, 2_000
     refute_receive :operation_completed
   end
 end

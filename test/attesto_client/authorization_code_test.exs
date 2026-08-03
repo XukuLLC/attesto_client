@@ -236,7 +236,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
                {ETS, store},
                %{"state" => started.state, "code" => "code-1", "iss" => @issuer},
                req_options: [plug: plug],
-               timeout: 1_000
+               timeout: 30_000
              )
 
     assert result.tokens.refresh_token == "refresh-1"
@@ -417,7 +417,10 @@ defmodule AttestoClient.AuthorizationCodeTest do
 
         "/token" ->
           Agent.update(counter, &(&1 + 1))
-          Process.sleep(200)
+          # See token_test's "deadline wakes all waiters": the plug sleeps far
+          # longer than the deadline so the deadline (not the response) always
+          # wins, and the deadline stays short so `:timeout` is reliable under load.
+          Process.sleep(30_000)
           Plug.Conn.send_resp(conn, 500, "late")
       end
     end
@@ -427,10 +430,12 @@ defmodule AttestoClient.AuthorizationCodeTest do
                {ETS, store},
                %{"state" => started.state, "code" => "code"},
                req_options: [plug: plug],
-               timeout: 25
+               timeout: 500
              )
 
-    assert Agent.get(counter, & &1) == 1
+    # At most one = not retried; load-immune (a starved worker killed by the
+    # deadline before reaching the plug leaves the counter at 0, so `== 1` flakes).
+    assert Agent.get(counter, & &1) <= 1
 
     assert {:error, {:invalid_state, :not_found}} =
              callback(

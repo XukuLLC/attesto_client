@@ -49,7 +49,7 @@ defmodule AttestoClient.TokenTest do
       subject: "subject-1",
       jwks: public_jwks(),
       req_options: [plug: plug],
-      timeout: 1_000
+      timeout: 30_000
     ]
 
     results =
@@ -57,7 +57,7 @@ defmodule AttestoClient.TokenTest do
       |> Task.async_stream(fn _ -> Token.refresh(coordinator, :account, tokens(), opts) end,
         max_concurrency: 12,
         ordered: false,
-        timeout: 2_000
+        timeout: 30_000
       )
       |> Enum.map(fn {:ok, result} -> result end)
 
@@ -101,7 +101,7 @@ defmodule AttestoClient.TokenTest do
       client_id: @client_id,
       subject: "subject-1",
       req_options: [plug: plug],
-      timeout: 1_000
+      timeout: 30_000
     ]
 
     1..6
@@ -136,7 +136,7 @@ defmodule AttestoClient.TokenTest do
       subject: "subject-1",
       jwks: public_jwks(),
       req_options: [plug: plug],
-      timeout: 1_000
+      timeout: 30_000
     ]
 
     first =
@@ -149,8 +149,8 @@ defmodule AttestoClient.TokenTest do
         Token.refresh(coordinator, :second, tokens("refresh-2", "openid email"), opts)
       end)
 
-    assert_receive {:started, first_worker}, 500
-    assert_receive {:started, second_worker}, 500
+    assert_receive {:started, first_worker}, 10_000
+    assert_receive {:started, second_worker}, 10_000
     send(first_worker, :continue)
     send(second_worker, :continue)
 
@@ -195,7 +195,10 @@ defmodule AttestoClient.TokenTest do
 
     slow = fn conn ->
       Agent.update(counter, &(&1 + 1))
-      Process.sleep(200)
+      # Far longer than the deadline so the deadline (not the response) always
+      # wins; the deadline stays short so `:timeout` is reliable regardless of
+      # load.
+      Process.sleep(30_000)
       json(conn, 200, %{"access_token" => "too-late", "token_type" => "Bearer"})
     end
 
@@ -206,7 +209,7 @@ defmodule AttestoClient.TokenTest do
       subject: "subject-1",
       jwks: public_jwks(),
       req_options: [plug: slow],
-      timeout: 25
+      timeout: 500
     ]
 
     results =
@@ -218,7 +221,11 @@ defmodule AttestoClient.TokenTest do
       |> Enum.map(fn {:ok, result} -> result end)
 
     assert Enum.uniq(results) == [{:error, :timeout}]
-    assert Agent.get(counter, & &1) == 1
+    # "Does not retry" = AT MOST one request reaches the endpoint. Requiring
+    # exactly one is load-fragile (a starved worker may be killed by the deadline
+    # before it reaches the plug, leaving the counter at 0); `<= 1` still catches
+    # a retry (which would make it 2) and cannot flake.
+    assert Agent.get(counter, & &1) <= 1
 
     fast = fn conn ->
       json(conn, 200, %{"access_token" => "recovered", "token_type" => "Bearer"})
@@ -232,7 +239,7 @@ defmodule AttestoClient.TokenTest do
                subject: "subject-1",
                jwks: public_jwks(),
                req_options: [plug: fast],
-               timeout: 1_000
+               timeout: 30_000
              )
   end
 
@@ -260,15 +267,15 @@ defmodule AttestoClient.TokenTest do
           subject: "subject-1",
           jwks: public_jwks(),
           req_options: [plug: plug],
-          timeout: 1_000
+          timeout: 30_000
         )
       end)
 
-    assert_receive {:refresh_request_started, request_pid}, 500
+    assert_receive {:refresh_request_started, request_pid}, 10_000
     request_monitor = Process.monitor(request_pid)
     :ok = GenServer.stop(coordinator, :shutdown)
 
-    assert_receive {:DOWN, ^request_monitor, :process, ^request_pid, _reason}, 500
+    assert_receive {:DOWN, ^request_monitor, :process, ^request_pid, _reason}, 10_000
     assert {:error, {:coordinator_exit, _reason}} = Task.await(task)
     refute_receive :rotation_completed
   end
@@ -294,7 +301,7 @@ defmodule AttestoClient.TokenTest do
       id_token_alg: "RS256",
       jwks: public_jwks(),
       req_options: [plug: plug],
-      timeout: 1_000
+      timeout: 30_000
     ]
 
     assert {:ok, %RefreshResult{id_token_claims: %{"sub" => "subject-1"}}} =

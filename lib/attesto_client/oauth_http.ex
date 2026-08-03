@@ -65,7 +65,9 @@ defmodule AttestoClient.OAuthHTTP do
     with :ok <- validate_endpoint(endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json_unit/1) end,
+        fn ->
+          json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json_unit/1)
+        end,
         timeout_ms
       )
     end
@@ -306,10 +308,18 @@ defmodule AttestoClient.OAuthHTTP do
   defp drop_client_auth_jti(opts) do
     case Keyword.get(opts, :client_auth) do
       {:private_key_jwt, jwk, assertion_opts} when is_list(assertion_opts) ->
-        Keyword.put(opts, :client_auth, {:private_key_jwt, jwk, Keyword.delete(assertion_opts, :jti)})
+        Keyword.put(
+          opts,
+          :client_auth,
+          {:private_key_jwt, jwk, Keyword.delete(assertion_opts, :jti)}
+        )
 
       {:client_attestation, attestation, key, ca_opts} when is_list(ca_opts) ->
-        Keyword.put(opts, :client_auth, {:client_attestation, attestation, key, Keyword.delete(ca_opts, :jti)})
+        Keyword.put(
+          opts,
+          :client_auth,
+          {:client_attestation, attestation, key, Keyword.delete(ca_opts, :jti)}
+        )
 
       _other ->
         opts
@@ -318,7 +328,8 @@ defmodule AttestoClient.OAuthHTTP do
 
   # RFC 9449 §7.1: a DPoP-sender-constrained access token is presented with the
   # `DPoP` authentication scheme, not `Bearer`. Without DPoP, use Bearer.
-  defp put_token_auth(base, access_token, nil), do: Keyword.put(base, :auth, {:bearer, access_token})
+  defp put_token_auth(base, access_token, nil),
+    do: Keyword.put(base, :auth, {:bearer, access_token})
 
   defp put_token_auth(base, access_token, _dpop_ctx) do
     # Strip any caller-supplied Authorization header before installing the
@@ -347,9 +358,7 @@ defmodule AttestoClient.OAuthHTTP do
   defp classify_json_unit(%Req.Response{status: status}) when status in 200..299, do: :ok
 
   defp classify_json_unit(%Req.Response{status: status, body: %{} = body}),
-    do:
-      {:error,
-       {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
+    do: {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
 
   defp classify_json_unit(%Req.Response{status: status}), do: {:error, {:http_status, status}}
 

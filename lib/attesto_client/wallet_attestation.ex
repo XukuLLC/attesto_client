@@ -134,7 +134,13 @@ defmodule AttestoClient.WalletAttestation do
          {:ok, now} <- validate_now(opts),
          {:ok, alg} <- Builder.resolve_alg(instance_jwk, opts) do
       claims =
-        %{"iss" => client_id, "aud" => audience, "jti" => jti, "iat" => now, "exp" => now + lifetime}
+        %{
+          "iss" => client_id,
+          "aud" => audience,
+          "jti" => jti,
+          "iat" => now,
+          "exp" => now + lifetime
+        }
         |> put_optional("challenge", Keyword.get(opts, :challenge))
 
       header = Builder.put_kid(%{"alg" => alg, "typ" => @pop_typ}, instance_jwk, opts)
