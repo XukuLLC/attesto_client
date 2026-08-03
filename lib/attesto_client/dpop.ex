@@ -63,7 +63,7 @@ defmodule AttestoClient.DPoP do
     with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
          {:ok, method} <- normalize_htm(htm),
          {:ok, uri} <- normalize_htu(htu),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
@@ -72,7 +72,7 @@ defmodule AttestoClient.DPoP do
         |> put_optional("nonce", Keyword.get(opts, :nonce))
 
       header =
-        %{"alg" => alg, "typ" => @proof_typ, "jwk" => public_jwk(jose_jwk)}
+        %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
         |> Builder.put_kid(jose_jwk, opts)
 
       Builder.sign(jose_jwk, header, claims)
@@ -107,19 +107,6 @@ defmodule AttestoClient.DPoP do
 
   defp ath(_invalid), do: nil
 
-  defp public_jwk(jose_jwk) do
-    {_type, map} = JOSE.JWK.to_public_map(jose_jwk)
-    map
-  end
-
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
-
-  defp validate_now(opts) do
-    case Keyword.fetch(opts, :now) do
-      :error -> {:ok, System.system_time(:second)}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_time}
-    end
-  end
 end

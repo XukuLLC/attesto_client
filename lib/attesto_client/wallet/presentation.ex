@@ -181,13 +181,10 @@ defmodule AttestoClient.Wallet.Presentation do
   # verifier, so a wrong-key selection cannot leak the credential's contents.
   defp check_holder_key(holder_key, held) do
     with {:ok, jwk} <- Builder.normalize_key(holder_key),
-         {:ok, bound_jwk} <- presentation_binding_jwk(held) do
-      {_type, holder_public} = JOSE.JWK.to_public_map(jwk)
-
-      with {:ok, holder_thumb} <- Thumbprint.of_jwk(holder_public),
-           {:ok, bound_thumb} <- Thumbprint.of_jwk(bound_jwk) do
-        if holder_thumb == bound_thumb, do: :ok, else: {:error, :holder_key_mismatch}
-      end
+         {:ok, bound_jwk} <- presentation_binding_jwk(held),
+         {:ok, holder_thumb} <- jwk |> Builder.public_jwk() |> Thumbprint.of_jwk(),
+         {:ok, bound_thumb} <- Thumbprint.of_jwk(bound_jwk) do
+      if holder_thumb == bound_thumb, do: :ok, else: {:error, :holder_key_mismatch}
     end
   end
 

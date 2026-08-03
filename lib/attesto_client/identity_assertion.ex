@@ -76,7 +76,7 @@ defmodule AttestoClient.IdentityAssertion do
          {:ok, subject} <- Builder.require_string(opts, :subject, :invalid_subject),
          {:ok, claims} <- validate_claims(opts),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, nbf} <- validate_nbf(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
@@ -113,14 +113,6 @@ defmodule AttestoClient.IdentityAssertion do
 
       _other ->
         {:error, :invalid_claims}
-    end
-  end
-
-  defp validate_now(opts) do
-    case Keyword.fetch(opts, :now) do
-      :error -> {:ok, System.system_time(:second)}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_time}
     end
   end
 

@@ -256,14 +256,18 @@ defmodule AttestoClient.Wallet do
         {:ok, jwt}
 
       fun when is_function(fun, 2) ->
-        case fun.(holder_publics, c_nonce) do
-          {:ok, jwt} when is_binary(jwt) and jwt != "" -> {:ok, jwt}
-          {:error, reason} -> {:error, {:key_attestation, reason}}
-          _invalid -> {:error, :invalid_key_attestation}
-        end
+        build_key_attestation(fun, holder_publics, c_nonce)
 
       _invalid ->
         {:error, :invalid_key_attestation}
+    end
+  end
+
+  defp build_key_attestation(fun, holder_publics, c_nonce) do
+    case fun.(holder_publics, c_nonce) do
+      {:ok, jwt} when is_binary(jwt) and jwt != "" -> {:ok, jwt}
+      {:error, reason} -> {:error, {:key_attestation, reason}}
+      _invalid -> {:error, :invalid_key_attestation}
     end
   end
 
@@ -388,20 +392,24 @@ defmodule AttestoClient.Wallet do
       # independent (the issuer need not echo proof order) yet still enforces a
       # one-to-one binding between proofs and credentials.
       credentials
-      |> Enum.reduce_while({:ok, [], MapSet.new()}, fn entry, {:ok, acc, used} ->
-        with {:ok, credential} <- credential_value(entry),
-             {:ok, held} <- verify_credential(format, credential, opts),
-             {:ok, thumb} <- held_binding_thumbprint(held),
-             :ok <- check_binding_membership(thumb, expected, used) do
-          {:cont, {:ok, [held | acc], MapSet.put(used, thumb)}}
-        else
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
+      |> Enum.reduce_while({:ok, [], MapSet.new()}, fn entry, acc ->
+        verify_credential_entry(entry, acc, format, opts, expected)
       end)
       |> case do
         {:ok, held, _used} -> {:ok, Enum.reverse(held)}
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  defp verify_credential_entry(entry, {:ok, acc, used}, format, opts, expected) do
+    with {:ok, credential} <- credential_value(entry),
+         {:ok, held} <- verify_credential(format, credential, opts),
+         {:ok, thumb} <- held_binding_thumbprint(held),
+         :ok <- check_binding_membership(thumb, expected, used) do
+      {:cont, {:ok, [held | acc], MapSet.put(used, thumb)}}
+    else
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 

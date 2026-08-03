@@ -104,6 +104,31 @@ defmodule AttestoClient.Builder do
     end
   end
 
+  # Like `now/1`, but a NumericDate: a present `:now` must be a non-negative
+  # integer (RFC 7519 §2), otherwise `{:error, :invalid_time}`. Used by the
+  # artifact builders that stamp `iat`/`exp`.
+  @spec validate_now(keyword()) :: {:ok, non_neg_integer()} | {:error, :invalid_time}
+  def validate_now(opts) do
+    case Keyword.fetch(opts, :now) do
+      :error -> {:ok, System.system_time(:second)}
+      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
+      {:ok, _invalid} -> {:error, :invalid_time}
+    end
+  end
+
+  # The public JWK map for embedding in a JOSE header (`jwk`) or `cnf`.
+  @spec public_jwk(JOSE.JWK.t()) :: map()
+  def public_jwk(jose_jwk) do
+    {_type, map} = JOSE.JWK.to_public_map(jose_jwk)
+    map
+  end
+
+  # Add an `x5c` header from a non-empty list of base64 DER certificates; a nil
+  # or empty value leaves the header untouched.
+  @spec put_x5c(map(), term()) :: map()
+  def put_x5c(header, [_ | _] = x5c), do: Map.put(header, "x5c", x5c)
+  def put_x5c(header, _absent), do: header
+
   # Sign claims under the given protected header, returning the compact JWS.
   # Key/algorithm compatibility is checked before this point; backend failures
   # are still caught and returned as {:signing_failed, _} so build/2 does not

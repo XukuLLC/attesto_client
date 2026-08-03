@@ -91,7 +91,7 @@ defmodule AttestoClient.WalletAttestation do
          {:ok, instance_public} <- instance_public_jwk(opts),
          {:ok, lifetime} <-
            Builder.validate_lifetime(opts, @default_attestation_lifetime_seconds),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, alg} <- Builder.resolve_alg(provider_jwk, opts) do
       claims = %{
         "sub" => client_id,
@@ -102,7 +102,7 @@ defmodule AttestoClient.WalletAttestation do
 
       header =
         %{"alg" => alg, "typ" => @attestation_typ}
-        |> put_x5c(Keyword.get(opts, :x5c))
+        |> Builder.put_x5c(Keyword.get(opts, :x5c))
         |> Builder.put_kid(provider_jwk, opts)
 
       Builder.sign(provider_jwk, header, claims)
@@ -131,7 +131,7 @@ defmodule AttestoClient.WalletAttestation do
          {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_pop_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, alg} <- Builder.resolve_alg(instance_jwk, opts) do
       claims =
         %{
@@ -164,17 +164,6 @@ defmodule AttestoClient.WalletAttestation do
     end
   end
 
-  defp put_x5c(header, [_ | _] = x5c), do: Map.put(header, "x5c", x5c)
-  defp put_x5c(header, _absent), do: header
-
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
-
-  defp validate_now(opts) do
-    case Keyword.fetch(opts, :now) do
-      :error -> {:ok, System.system_time(:second)}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_time}
-    end
-  end
 end

@@ -380,20 +380,25 @@ defmodule AttestoClient.OAuthHTTP do
   defp dpop_attempt(ctx, builder, classify, nonce, first?) do
     with {:ok, base} <- builder.(not first?),
          {:ok, proof} <- dpop_proof(ctx, nonce) do
-      case send_request(base, [{"dpop", proof}]) do
-        {:ok, resp} ->
-          if first? and dpop_nonce_challenge?(resp) do
-            case dpop_nonce(resp) do
-              nil -> classify.(resp)
-              fresh -> dpop_attempt(ctx, builder, classify, fresh, false)
-            end
-          else
-            classify.(resp)
-          end
+      send_dpop_attempt(base, proof, ctx, builder, classify, first?)
+    end
+  end
 
-        {:error, _reason} ->
-          {:error, :transport_error}
+  defp send_dpop_attempt(base, proof, ctx, builder, classify, first?) do
+    case send_request(base, [{"dpop", proof}]) do
+      {:ok, resp} -> handle_dpop_response(resp, ctx, builder, classify, first?)
+      {:error, _reason} -> {:error, :transport_error}
+    end
+  end
+
+  defp handle_dpop_response(resp, ctx, builder, classify, first?) do
+    if first? and dpop_nonce_challenge?(resp) do
+      case dpop_nonce(resp) do
+        nil -> classify.(resp)
+        fresh -> dpop_attempt(ctx, builder, classify, fresh, false)
       end
+    else
+      classify.(resp)
     end
   end
 

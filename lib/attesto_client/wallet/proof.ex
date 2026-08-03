@@ -62,7 +62,7 @@ defmodule AttestoClient.Wallet.Proof do
     with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
          {:ok, credential_issuer} <-
            Builder.require_string(opts, :credential_issuer, :invalid_credential_issuer),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
         %{"aud" => credential_issuer, "iat" => now}
@@ -70,7 +70,7 @@ defmodule AttestoClient.Wallet.Proof do
         |> put_optional("iss", Keyword.get(opts, :client_id))
 
       header =
-        %{"alg" => alg, "typ" => @proof_typ, "jwk" => public_jwk(jose_jwk)}
+        %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
         |> put_optional("key_attestation", Keyword.get(opts, :key_attestation))
         |> Builder.put_kid(jose_jwk, opts)
 
@@ -78,21 +78,6 @@ defmodule AttestoClient.Wallet.Proof do
     end
   end
 
-  defp public_jwk(jose_jwk) do
-    {_type, map} = JOSE.JWK.to_public_map(jose_jwk)
-    map
-  end
-
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
-
-  # NumericDate is a non-negative seconds count (RFC 7519 §2); `iat` must not
-  # be built from a negative `now`.
-  defp validate_now(opts) do
-    case Keyword.fetch(opts, :now) do
-      :error -> {:ok, System.system_time(:second)}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_time}
-    end
-  end
 end

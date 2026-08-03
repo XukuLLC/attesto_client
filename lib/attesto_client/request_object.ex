@@ -85,7 +85,7 @@ defmodule AttestoClient.RequestObject do
          {:ok, typ} <- validate_typ(opts),
          {:ok, lifetime} <-
            Builder.validate_lifetime(opts, @default_lifetime_seconds, @max_lifetime_seconds),
-         {:ok, now} <- validate_now(opts),
+         {:ok, now} <- Builder.validate_now(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
@@ -124,16 +124,6 @@ defmodule AttestoClient.RequestObject do
 
       _other ->
         {:error, :invalid_typ}
-    end
-  end
-
-  # NumericDate is a non-negative seconds count (RFC 7519 §2); a request object's
-  # iat/nbf/exp must not be built from a negative `now`.
-  defp validate_now(opts) do
-    case Keyword.fetch(opts, :now) do
-      :error -> {:ok, System.system_time(:second)}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _invalid} -> {:error, :invalid_time}
     end
   end
 end
