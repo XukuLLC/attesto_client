@@ -33,10 +33,11 @@ defmodule AttestoClient.Wallet do
   @mdoc_format "mso_mdoc"
 
   @type held_credential :: %{
-          format: String.t(),
-          credential: String.t(),
-          claims: map(),
-          holder_binding: map() | nil
+          required(:format) => String.t(),
+          required(:credential) => String.t(),
+          required(:claims) => map(),
+          required(:holder_binding) => map() | nil,
+          optional(:doc_type) => String.t()
         }
 
   @type pending_credential :: %{
@@ -262,14 +263,15 @@ defmodule AttestoClient.Wallet do
   end
 
   defp verify_credential(@mdoc_format, credential, opts) do
-    with {:ok, %{namespaces: namespaces, device_key: device_key}} <-
+    with {:ok, %{namespaces: namespaces, device_key: device_key, doc_type: doc_type}} <-
            Attesto.Mdoc.verify(credential, trusted(opts), verify_opts(opts)) do
       {:ok,
        %{
          format: @mdoc_format,
          credential: credential,
          claims: namespaces,
-         holder_binding: device_key
+         holder_binding: device_key,
+         doc_type: doc_type
        }}
     end
   end

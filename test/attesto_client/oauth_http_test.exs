@@ -164,4 +164,84 @@ defmodule AttestoClient.OAuthHTTPTest do
                )
     end
   end
+
+  describe "get_text/2" do
+    test "returns the raw response body" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/oauth-authz-req+jwt")
+        |> Plug.Conn.send_resp(200, "header.payload.signature")
+      end
+
+      assert {:ok, "header.payload.signature"} =
+               OAuthHTTP.get_text("https://verifier.example.com/requests/1",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "surfaces a non-200 status" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 404, "") end
+
+      assert {:error, {:http_status, 404}} =
+               OAuthHTTP.get_text("https://verifier.example.com/requests/missing",
+                 req_options: [plug: plug]
+               )
+    end
+  end
+
+  describe "post_form_open/3" do
+    test "POSTs unauthenticated and returns the decoded JSON body" do
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:request, URI.decode_query(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          JSON.encode!(%{"redirect_uri" => "https://wallet.example.com/done"})
+        )
+      end
+
+      assert {:ok, %{"redirect_uri" => "https://wallet.example.com/done"}} =
+               OAuthHTTP.post_form_open(
+                 "https://verifier.example.com/response",
+                 %{"vp_token" => "{}", "state" => "state-1"},
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:request, %{"vp_token" => "{}", "state" => "state-1"}}
+    end
+
+    test "treats a non-JSON success body as an empty map" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, "") end
+
+      assert {:ok, %{}} =
+               OAuthHTTP.post_form_open("https://verifier.example.com/response", %{},
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "surfaces an oauth-shaped error body and a bare non-2xx status" do
+      error_plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "invalid_request"}))
+      end
+
+      assert {:error, {:oauth_error, 400, %{"error" => "invalid_request"}}} =
+               OAuthHTTP.post_form_open("https://verifier.example.com/response", %{},
+                 req_options: [plug: error_plug]
+               )
+
+      plain_plug = fn conn -> Plug.Conn.send_resp(conn, 500, "") end
+
+      assert {:error, {:http_status, 500}} =
+               OAuthHTTP.post_form_open("https://verifier.example.com/response", %{},
+                 req_options: [plug: plain_plug]
+               )
+    end
+  end
 end

@@ -69,6 +69,44 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
+  @doc """
+  GET a raw text document, returning the response body unparsed.
+
+  Used for by-reference fetches whose body is not JSON - an OID4VP
+  `request_uri` serves a compact JWT (`application/oauth-authz-req+jwt`),
+  not a JSON object (see `AttestoClient.Wallet.PresentationRequest.fetch/3`).
+  """
+  @spec get_text(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def get_text(url, opts) when is_binary(url) and is_list(opts) do
+    with :ok <- validate_endpoint(url, opts),
+         {:ok, timeout_ms} <- timeout(opts) do
+      Deadline.run(
+        fn -> get_text_request(url, req_options(opts), timeout_ms) end,
+        timeout_ms
+      )
+    end
+  end
+
+  @doc """
+  POST a form body with no OAuth client authentication, returning the decoded
+  JSON body when present (an empty/non-JSON success body decodes to `%{}`).
+
+  Used for a submission the OAuth client-authentication model does not
+  cover - the OID4VP `direct_post` `response_uri`, which a wallet POSTs to
+  unauthenticated (see `AttestoClient.Wallet.Presentation.submit/3`) - unlike
+  `post_form/3`'s token-endpoint requests.
+  """
+  @spec post_form_open(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def post_form_open(endpoint, form, opts) when is_map(form) and is_list(opts) do
+    with :ok <- validate_endpoint(endpoint, opts),
+         {:ok, timeout_ms} <- timeout(opts) do
+      Deadline.run(
+        fn -> open_request(endpoint, form, req_options(opts), timeout_ms) end,
+        timeout_ms
+      )
+    end
+  end
+
   defp validate_endpoint(endpoint, opts) do
     AttestoClient.Discovery.validate_endpoint(endpoint,
       req_options: Keyword.get(opts, :req_options, [])
@@ -220,6 +258,52 @@ defmodule AttestoClient.OAuthHTTP do
   rescue
     _error -> {:error, :transport_error}
   end
+
+  defp get_text_request(url, req_options, timeout_ms) do
+    options =
+      req_options ++
+        [url: url, method: :get, redirect: false, retry: false, receive_timeout: timeout_ms]
+
+    case Req.request(Req.new(options)) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> {:ok, body}
+      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+      {:error, _reason} -> {:error, :transport_error}
+    end
+  rescue
+    _error -> {:error, :transport_error}
+  end
+
+  defp open_request(endpoint, form, req_options, timeout_ms) do
+    options =
+      req_options ++
+        [
+          url: endpoint,
+          method: :post,
+          form: form,
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms
+        ]
+
+    case Req.request(Req.new(options)) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, json_body(body)}
+
+      {:ok, %Req.Response{status: status, body: %{} = body}} ->
+        {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_status, status}}
+
+      {:error, _reason} ->
+        {:error, :transport_error}
+    end
+  rescue
+    _error -> {:error, :transport_error}
+  end
+
+  defp json_body(body) when is_map(body), do: body
+  defp json_body(_body), do: %{}
 
   defp req_options(opts), do: Keyword.get(opts, :req_options, [])
 
