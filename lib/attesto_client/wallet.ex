@@ -56,6 +56,8 @@ defmodule AttestoClient.Wallet do
           | {:credential_endpoint, String.t()}
           | {:token_endpoint, String.t()}
           | {:nonce_endpoint, String.t()}
+          | {:notification_endpoint, String.t()}
+          | {:notification_event, String.t()}
           | {:access_token, String.t()}
           | {:tx_code, String.t()}
           | {:client_id, String.t()}
@@ -103,17 +105,24 @@ defmodule AttestoClient.Wallet do
   `:key_attestation` (a compact JWT from `AttestoClient.KeyAttestation.build/2`)
   is carried in the holder proof's `key_attestation` header, vouching to the
   issuer that the holder key is held in secure storage (a HAIP requirement).
+
+  `:notification_endpoint`, when supplied, makes the wallet POST an OID4VCI §10
+  Notification acknowledging the credential once issuance succeeds and the
+  response carried a `notification_id`; `:notification_event` overrides the
+  default `"credential_accepted"`. The returned result always includes the
+  issuer's `notification_id` (or `nil`).
   """
-  @spec request_credential(CredentialOffer.t(), Proof.jwk(), [opt()]) ::
+  @spec request_credential(CredentialOffer.t(), Proof.jwk() | [Proof.jwk()], [opt()]) ::
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
-    with {:ok, format} <- required_format(opts),
+    with {:ok, holder_keys} <- holder_keys(holder_key),
+         {:ok, format} <- required_format(opts),
          {:ok, configuration_id} <- configuration_id(offer, opts),
          {:ok, access_token} <- access_token(offer, opts),
          {:ok, c_nonce} <- fetch_nonce(opts),
-         {:ok, proof} <- build_proof(offer, holder_key, c_nonce, opts),
-         {:ok, response} <- post_credential_request(configuration_id, proof, access_token, opts) do
-      finalize(response, format, c_nonce, opts)
+         {:ok, proofs} <- build_proofs(offer, holder_keys, c_nonce, opts),
+         {:ok, response} <- post_credential_request(configuration_id, proofs, access_token, opts) do
+      finalize(response, format, c_nonce, access_token, opts)
     end
   end
 
@@ -188,6 +197,27 @@ defmodule AttestoClient.Wallet do
     end
   end
 
+  # A single holder key issues one credential; a non-empty list requests batch
+  # issuance (OID4VCI §8.2) - one proof per key, one credential returned per
+  # proof, each bound to its own key.
+  defp holder_keys(keys) when is_list(keys) and keys != [], do: {:ok, keys}
+  defp holder_keys([]), do: {:error, :missing_holder_key}
+  defp holder_keys(key), do: {:ok, [key]}
+
+  defp build_proofs(offer, keys, c_nonce, opts) do
+    keys
+    |> Enum.reduce_while({:ok, []}, fn key, {:ok, acc} ->
+      case build_proof(offer, key, c_nonce, opts) do
+        {:ok, proof} -> {:cont, {:ok, [proof | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, proofs} -> {:ok, Enum.reverse(proofs)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp build_proof(offer, holder_key, c_nonce, opts) do
     proof_opts =
       [credential_issuer: offer.credential_issuer]
@@ -201,22 +231,23 @@ defmodule AttestoClient.Wallet do
     Proof.build(holder_key, proof_opts)
   end
 
-  defp post_credential_request(configuration_id, proof, access_token, opts) do
+  defp post_credential_request(configuration_id, proofs, access_token, opts) do
     with {:ok, endpoint} <-
            required_string(opts, :credential_endpoint, :missing_credential_endpoint) do
       # OID4VCI 1.0 final §8.2: a Credential Request carries `proofs`, an object
       # keyed by proof type whose value is an array of proofs (the singular
-      # `proof` of earlier drafts was removed).
+      # `proof` of earlier drafts was removed). A multi-proof array is a batch
+      # request - one credential is returned per proof.
       body = %{
         "credential_configuration_id" => configuration_id,
-        "proofs" => %{"jwt" => [proof]}
+        "proofs" => %{"jwt" => proofs}
       }
 
       OAuthHTTP.post_json(endpoint, body, access_token, opts)
     end
   end
 
-  defp finalize(%{"transaction_id" => transaction_id} = response, _format, c_nonce, _opts)
+  defp finalize(%{"transaction_id" => transaction_id} = response, _format, c_nonce, _access_token, _opts)
        when is_binary(transaction_id) and transaction_id != "" do
     pending = %{
       status: :pending,
@@ -227,14 +258,42 @@ defmodule AttestoClient.Wallet do
     {:ok, %{credentials: [pending], c_nonce: c_nonce}}
   end
 
-  defp finalize(%{"credentials" => credentials}, format, c_nonce, opts)
+  defp finalize(%{"credentials" => credentials} = response, format, c_nonce, access_token, opts)
        when is_list(credentials) and credentials != [] do
-    with {:ok, held} <- verify_credentials(credentials, format, opts) do
-      {:ok, %{credentials: held, c_nonce: c_nonce}}
+    with {:ok, held} <- verify_credentials(credentials, format, opts),
+         :ok <- maybe_notify(response, access_token, opts) do
+      {:ok,
+       %{
+         credentials: held,
+         c_nonce: c_nonce,
+         notification_id: Map.get(response, "notification_id")
+       }}
     end
   end
 
-  defp finalize(_response, _format, _c_nonce, _opts), do: {:error, :invalid_credential_response}
+  defp finalize(_response, _format, _c_nonce, _access_token, _opts),
+    do: {:error, :invalid_credential_response}
+
+  # OID4VCI §10: when the caller supplies a `:notification_endpoint` and the
+  # issuer returned a `notification_id`, POST a Notification acknowledging the
+  # credential. No endpoint or no id means nothing to notify.
+  defp maybe_notify(response, access_token, opts) do
+    endpoint = Keyword.get(opts, :notification_endpoint)
+    notification_id = Map.get(response, "notification_id")
+
+    if is_binary(endpoint) and endpoint != "" and is_binary(notification_id) and
+         notification_id != "" do
+      event = Keyword.get(opts, :notification_event, "credential_accepted")
+      body = %{"notification_id" => notification_id, "event" => event}
+
+      case OAuthHTTP.post_json_unit(endpoint, body, access_token, opts) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:notification, reason}}
+      end
+    else
+      :ok
+    end
+  end
 
   defp verify_credentials(credentials, format, opts) do
     credentials

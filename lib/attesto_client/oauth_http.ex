@@ -48,7 +48,24 @@ defmodule AttestoClient.OAuthHTTP do
     with :ok <- validate_endpoint(endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> json_request(endpoint, body, access_token, opts, timeout_ms) end,
+        fn -> json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json/1) end,
+        timeout_ms
+      )
+    end
+  end
+
+  @doc """
+  POST a JSON body authenticated with an access token, expecting a 2xx with no
+  meaningful body (`:ok` on success). Used for the OID4VCI Notification Endpoint,
+  which answers `204 No Content`. `:dpop` behaves as in `post_json/4`.
+  """
+  @spec post_json_unit(String.t(), map(), String.t(), keyword()) :: :ok | {:error, term()}
+  def post_json_unit(endpoint, body, access_token, opts)
+      when is_map(body) and is_binary(access_token) and access_token != "" and is_list(opts) do
+    with :ok <- validate_endpoint(endpoint, opts),
+         {:ok, timeout_ms} <- timeout(opts) do
+      Deadline.run(
+        fn -> json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json_unit/1) end,
         timeout_ms
       )
     end
@@ -257,7 +274,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp classify_form(%Req.Response{status: status}, _mode), do: {:error, {:http_status, status}}
 
-  defp json_request(endpoint, body, access_token, opts, timeout_ms) do
+  defp json_request(endpoint, body, access_token, opts, timeout_ms, classify) do
     dpop_ctx = dpop_context(opts, "POST", endpoint, access_token)
 
     builder = fn ->
@@ -275,7 +292,7 @@ defmodule AttestoClient.OAuthHTTP do
       {:ok, put_token_auth(base, access_token, dpop_ctx)}
     end
 
-    run_with_dpop(dpop_ctx, builder, &classify_json/1)
+    run_with_dpop(dpop_ctx, builder, classify)
   end
 
   # RFC 9449 §7.1: a DPoP-sender-constrained access token is presented with the
@@ -302,6 +319,15 @@ defmodule AttestoClient.OAuthHTTP do
         Map.take(body, ["error", "error_description", "c_nonce", "c_nonce_expires_in"])}}
 
   defp classify_json(%Req.Response{status: status}), do: {:error, {:http_status, status}}
+
+  defp classify_json_unit(%Req.Response{status: status}) when status in 200..299, do: :ok
+
+  defp classify_json_unit(%Req.Response{status: status, body: %{} = body}),
+    do:
+      {:error,
+       {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
+
+  defp classify_json_unit(%Req.Response{status: status}), do: {:error, {:http_status, status}}
 
   # RFC 9449: when `:dpop` is set, attach a fresh proof header per attempt and
   # retry once against a `use_dpop_nonce` challenge, echoing the server's

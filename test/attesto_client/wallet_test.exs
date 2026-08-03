@@ -312,6 +312,157 @@ defmodule AttestoClient.WalletTest do
     end
   end
 
+  describe "request_credential/3 - OID4VCI notification (§10)" do
+    test "POSTs a notification acknowledging the credential and returns its id" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      test_pid = self()
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+
+            {:ok, %{jwk: holder_jwk}} =
+              Attesto.CredentialProof.verify_jwt(hd(request["proofs"]["jwt"]), issuer: @issuer)
+
+            credential =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{},
+                cnf: %{"jwk" => holder_jwk}
+              )
+
+            body = credential |> Attesto.CredentialResponse.build() |> Map.put("notification_id", "n-42")
+            json(conn, 200, body)
+
+          {"POST", "/notification"} ->
+            {notification, conn} = read_json_body!(conn)
+            send(test_pid, {:notification, Plug.Conn.get_req_header(conn, "authorization"), notification})
+            Plug.Conn.send_resp(conn, 204, "")
+        end
+      end
+
+      assert {:ok, %{credentials: [_held], notification_id: "n-42"}} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 notification_endpoint: "#{@issuer}/notification",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:notification, ["Bearer #{@access_token}"], notification}
+      assert notification == %{"notification_id" => "n-42", "event" => "credential_accepted"}
+    end
+
+    test "does not notify when no notification_endpoint is configured" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      test_pid = self()
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+
+            {:ok, %{jwk: holder_jwk}} =
+              Attesto.CredentialProof.verify_jwt(hd(request["proofs"]["jwt"]), issuer: @issuer)
+
+            credential =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{},
+                cnf: %{"jwk" => holder_jwk}
+              )
+
+            body = credential |> Attesto.CredentialResponse.build() |> Map.put("notification_id", "n-1")
+            json(conn, 200, body)
+
+          {"POST", "/notification"} ->
+            send(test_pid, :unexpected_notification)
+            Plug.Conn.send_resp(conn, 204, "")
+        end
+      end
+
+      assert {:ok, %{notification_id: "n-1"}} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+
+      refute_receive :unexpected_notification
+    end
+  end
+
+  describe "request_credential/3 - batch issuance (§8.2)" do
+    test "sends one proof per holder key and verifies each returned credential" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      test_pid = self()
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+            proofs = request["proofs"]["jwt"]
+            send(test_pid, {:proof_count, length(proofs)})
+
+            credentials =
+              for proof <- proofs do
+                {:ok, %{jwk: holder_jwk}} =
+                  Attesto.CredentialProof.verify_jwt(proof, issuer: @issuer)
+
+                cred =
+                  Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                    claims: %{},
+                    cnf: %{"jwk" => holder_jwk}
+                  )
+
+                %{"credential" => cred}
+              end
+
+            json(conn, 200, %{"credentials" => credentials})
+        end
+      end
+
+      key_a = holder_key()
+      key_b = holder_key()
+
+      assert {:ok, %{credentials: held}} =
+               Wallet.request_credential(offer(), [key_a, key_b],
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:proof_count, 2}
+      assert length(held) == 2
+
+      # Each credential is bound to a distinct holder key.
+      bindings = Enum.map(held, & &1.holder_binding)
+      assert Enum.uniq(bindings) == bindings
+
+      {_type, pub_a} = JOSE.JWK.to_public_map(key_a)
+      {_type, pub_b} = JOSE.JWK.to_public_map(key_b)
+      assert %{"jwk" => pub_a} in bindings
+      assert %{"jwk" => pub_b} in bindings
+    end
+  end
+
   describe "request_credential/3 rejects invalid input (fail fast)" do
     test "an offer with no pre-authorized_code grant and no access_token" do
       offer = offer(%{"authorization_code" => %{"issuer_state" => "state-1"}})
