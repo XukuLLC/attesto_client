@@ -266,6 +266,97 @@ defmodule AttestoClient.OAuthHTTPTest do
     end
   end
 
+  describe "client_attestation client authentication" do
+    setup do
+      provider = JOSE.JWK.generate_key({:ec, "P-256"})
+      instance = JOSE.JWK.generate_key({:ec, "P-256"})
+      client_id = "wallet-instance-1"
+      audience = "https://op.example.com"
+
+      {:ok, attestation} =
+        AttestoClient.WalletAttestation.attestation(provider,
+          client_id: client_id,
+          instance_key: instance
+        )
+
+      %{
+        provider: provider,
+        instance: instance,
+        client_id: client_id,
+        audience: audience,
+        attestation: attestation
+      }
+    end
+
+    defp capture_headers_plug(parent) do
+      fn conn ->
+        send(
+          parent,
+          {:headers,
+           %{
+             "oauth-client-attestation" => Plug.Conn.get_req_header(conn, "oauth-client-attestation"),
+             "oauth-client-attestation-pop" =>
+               Plug.Conn.get_req_header(conn, "oauth-client-attestation-pop"),
+             "dpop" => Plug.Conn.get_req_header(conn, "dpop")
+           }}
+        )
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+      end
+    end
+
+    test "sets both attestation headers and a PoP that verifies against the attestation", ctx do
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: ctx.client_id,
+                 client_auth:
+                   {:client_attestation, ctx.attestation, ctx.instance, audience: ctx.audience},
+                 req_options: [plug: capture_headers_plug(self())]
+               )
+
+      assert_receive {:headers, headers}
+      assert [ctx.attestation] == headers["oauth-client-attestation"]
+      assert [pop] = headers["oauth-client-attestation-pop"]
+
+      {_, provider_public} = JOSE.JWK.to_public_map(ctx.provider)
+
+      assert {:ok, %{instance_key: %{jwk: jwk}}} =
+               Attesto.WalletAttestation.verify(ctx.attestation, pop,
+                 trusted_wallet_provider_jwks: provider_public,
+                 audience: ctx.audience,
+                 client_id: ctx.client_id
+               )
+
+      {_, instance_public} = JOSE.JWK.to_public_map(ctx.instance)
+      assert jwk == instance_public
+    end
+
+    test "composes with DPoP - both attestation headers and a DPoP proof are present", ctx do
+      dpop_key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: ctx.client_id,
+                 client_auth:
+                   {:client_attestation, ctx.attestation, ctx.instance, audience: ctx.audience},
+                 dpop: dpop_key,
+                 req_options: [plug: capture_headers_plug(self())]
+               )
+
+      assert_receive {:headers, headers}
+      assert [ctx.attestation] == headers["oauth-client-attestation"]
+      assert [_pop] = headers["oauth-client-attestation-pop"]
+      assert [proof] = headers["dpop"]
+      assert (proof |> JOSE.JWS.peek_protected() |> JSON.decode!())["typ"] == "dpop+jwt"
+    end
+  end
+
   describe "get_json/2" do
     test "returns the decoded JSON body" do
       plug = fn conn ->

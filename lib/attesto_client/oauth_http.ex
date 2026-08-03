@@ -4,6 +4,7 @@ defmodule AttestoClient.OAuthHTTP do
   alias AttestoClient.ClientAssertion
   alias AttestoClient.Deadline
   alias AttestoClient.DPoP
+  alias AttestoClient.WalletAttestation
 
   @default_timeout_ms 10_000
 
@@ -163,6 +164,40 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
+  # OAuth Attestation-Based Client Authentication (draft-ietf-oauth-attestation-
+  # based-client-auth): present the long-lived Client Attestation JWT plus a
+  # fresh per-request PoP in the `OAuth-Client-Attestation[-PoP]` headers. The
+  # PoP's `aud` should be the AS issuer; pass it as `:audience` in the auth
+  # opts (defaulting to the endpoint URL otherwise).
+  defp authenticate_as(
+         {:client_attestation, attestation, instance_key, ca_opts},
+         client_id,
+         form,
+         endpoint,
+         opts
+       )
+       when is_binary(client_id) and client_id != "" and is_binary(attestation) and
+              attestation != "" and is_list(ca_opts) do
+    pop_opts =
+      ca_opts
+      |> Keyword.put(:client_id, client_id)
+      |> Keyword.put_new(:audience, endpoint)
+
+    case WalletAttestation.pop(instance_key, pop_opts) do
+      {:ok, pop} ->
+        headers = [
+          {"oauth-client-attestation", attestation},
+          {"oauth-client-attestation-pop", pop}
+        ]
+
+        {:ok, Map.put(form, "client_id", client_id),
+         Keyword.update(req_options(opts), :headers, headers, &(&1 ++ headers))}
+
+      {:error, reason} ->
+        {:error, {:client_attestation, reason}}
+    end
+  end
+
   defp authenticate_as(_invalid, _client_id, _form, _endpoint, _opts),
     do: {:error, :invalid_client_auth}
 
@@ -317,8 +352,18 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
+  defp send_request(base, []), do: run_req(base)
+
   defp send_request(base, headers) do
-    options = if headers == [], do: base, else: Keyword.put(base, :headers, headers)
+    # Merge onto any headers the base already carries (e.g. client-attestation
+    # headers set during authentication) rather than replacing them, so DPoP and
+    # client attestation compose on the same request.
+    base
+    |> Keyword.update(:headers, headers, fn existing -> existing ++ headers end)
+    |> run_req()
+  end
+
+  defp run_req(options) do
     Req.request(Req.new(options))
   rescue
     _error -> {:error, :transport_error}
