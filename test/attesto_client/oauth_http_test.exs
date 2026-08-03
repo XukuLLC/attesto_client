@@ -246,7 +246,10 @@ defmodule AttestoClient.OAuthHTTPTest do
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         form = URI.decode_query(body)
-        jti = form["client_assertion"] |> JOSE.JWS.peek_payload() |> JSON.decode!() |> Map.get("jti")
+
+        jti =
+          form["client_assertion"] |> JOSE.JWS.peek_payload() |> JSON.decode!() |> Map.get("jti")
+
         n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
         send(parent, {:jti, n, jti})
 
@@ -338,7 +341,8 @@ defmodule AttestoClient.OAuthHTTPTest do
           parent,
           {:headers,
            %{
-             "oauth-client-attestation" => Plug.Conn.get_req_header(conn, "oauth-client-attestation"),
+             "oauth-client-attestation" =>
+               Plug.Conn.get_req_header(conn, "oauth-client-attestation"),
              "oauth-client-attestation-pop" =>
                Plug.Conn.get_req_header(conn, "oauth-client-attestation-pop"),
              "dpop" => Plug.Conn.get_req_header(conn, "dpop")

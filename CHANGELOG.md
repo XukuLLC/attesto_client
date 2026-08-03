@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-03
+
+### Added
+
+- Add the OID4VCI/OID4VP **wallet-holder** role. `AttestoClient.Wallet` drives
+  pre-authorized_code issuance end to end — credential offer, token exchange,
+  `c_nonce`, holder key proof, Credential Request, and verification of each
+  returned credential (SD-JWT VC, `jwt_vc_json`, or mdoc) — with support for
+  OID4VCI 1.0 final's plural `proofs`, batch issuance (a list of holder keys →
+  one credential per key), and the §10 Notification Endpoint.
+- Add `AttestoClient.DPoP` (RFC 9449 proof generation), threaded through the
+  token and credential requests via a `:dpop` option with a `use_dpop_nonce`
+  single retry; a DPoP-bound access token is presented with the `DPoP`
+  authentication scheme.
+- Add `AttestoClient.WalletAttestation` (OAuth Attestation-Based Client
+  Authentication — Client Attestation JWT + per-request PoP) and a
+  `{:client_attestation, ...}` client-auth method, and `AttestoClient.KeyAttestation`
+  (OID4VCI Key Attestation) carried in the holder proof's `key_attestation`
+  header. These are the client-side mirrors of the matching attesto verifiers.
+- Add OID4VP presentation (`AttestoClient.Wallet.Presentation` /
+  `PresentationRequest`): verify a signed Authorization Request, select held
+  credentials by DCQL, and build a `direct_post` `vp_token` (SD-JWT VC with a
+  holder Key Binding JWT, or an ISO 18013-5 mdoc DeviceResponse).
+
+### Security
+
+- Bind each issued credential to the holder key whose proof requested it
+  (thumbprint membership, one credential per proof), and fail closed with
+  `:missing_trusted` before any network call when no issuer trust anchor is
+  supplied.
+- Scope SD-JWT claim minimisation to top-level Disclosures (digest present in
+  the issuer payload's `_sd`), so a nested claim sharing a requested top-level
+  name is never disclosed; refuse `direct_post.jwt` in `submit/3`; check the
+  signing key against the credential's holder binding before disclosing any
+  contents; and validate the DCQL query shape so a signed-but-malformed request
+  cannot crash selection.
+- Refresh client-auth `jti`s on a DPoP-nonce retry (no replay), send a single
+  Authorization header, require an explicit audience for the client-attestation
+  PoP, and bound by-reference fetch bodies (with decompression disabled).
+
 ## [2.2.0] - 2026-07-25
 
 ### Added

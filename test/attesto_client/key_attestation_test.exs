@@ -43,7 +43,9 @@ defmodule AttestoClient.KeyAttestationTest do
 
     test "fails fast on missing or invalid attested keys" do
       assert {:error, :invalid_attested_keys} = KeyAttestation.build(es256_key(), [])
-      assert {:error, :invalid_attested_keys} = KeyAttestation.build(es256_key(), attested_keys: [])
+
+      assert {:error, :invalid_attested_keys} =
+               KeyAttestation.build(es256_key(), attested_keys: [])
 
       assert {:error, :invalid_attested_keys} =
                KeyAttestation.build(es256_key(), attested_keys: [%{"kty" => "bogus"}])
@@ -81,7 +83,11 @@ defmodule AttestoClient.KeyAttestationTest do
       now = 1_700_000_000
 
       assert {:ok, attestation} =
-               KeyAttestation.build(provider, attested_keys: [holder], nonce: "c-nonce-1", now: now)
+               KeyAttestation.build(provider,
+                 attested_keys: [holder],
+                 nonce: "c-nonce-1",
+                 now: now
+               )
 
       assert {:ok, proof} =
                Proof.build(holder,
@@ -116,7 +122,11 @@ defmodule AttestoClient.KeyAttestationTest do
 
       # Attestation vouches for `other`, but the proof is signed by `holder`.
       assert {:ok, attestation} =
-               KeyAttestation.build(provider, attested_keys: [other], nonce: "c-nonce-1", now: now)
+               KeyAttestation.build(provider,
+                 attested_keys: [other],
+                 nonce: "c-nonce-1",
+                 now: now
+               )
 
       assert {:ok, proof} =
                Proof.build(holder,

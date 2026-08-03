@@ -168,7 +168,11 @@ defmodule AttestoClient.WalletAttestationTest do
                )
 
       assert {:ok, pop} =
-               WalletAttestation.pop(instance, client_id: @client_id, audience: @audience, now: now)
+               WalletAttestation.pop(instance,
+                 client_id: @client_id,
+                 audience: @audience,
+                 now: now
+               )
 
       assert {:error, _} =
                Attesto.WalletAttestation.verify(attestation, pop,

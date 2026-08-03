@@ -339,12 +339,21 @@ defmodule AttestoClient.WalletTest do
                 cnf: %{"jwk" => holder_jwk}
               )
 
-            body = credential |> Attesto.CredentialResponse.build() |> Map.put("notification_id", "n-42")
+            body =
+              credential
+              |> Attesto.CredentialResponse.build()
+              |> Map.put("notification_id", "n-42")
+
             json(conn, 200, body)
 
           {"POST", "/notification"} ->
             {notification, conn} = read_json_body!(conn)
-            send(test_pid, {:notification, Plug.Conn.get_req_header(conn, "authorization"), notification})
+
+            send(
+              test_pid,
+              {:notification, Plug.Conn.get_req_header(conn, "authorization"), notification}
+            )
+
             Plug.Conn.send_resp(conn, 204, "")
         end
       end
@@ -385,7 +394,11 @@ defmodule AttestoClient.WalletTest do
                 cnf: %{"jwk" => holder_jwk}
               )
 
-            body = credential |> Attesto.CredentialResponse.build() |> Map.put("notification_id", "n-1")
+            body =
+              credential
+              |> Attesto.CredentialResponse.build()
+              |> Map.put("notification_id", "n-1")
+
             json(conn, 200, body)
 
           {"POST", "/notification"} ->
@@ -540,7 +553,11 @@ defmodule AttestoClient.WalletTest do
 
     test "fails closed with no trust anchor, before any network call" do
       test_pid = self()
-      plug = fn conn -> send(test_pid, :unexpected_request); json(conn, 200, %{}) end
+
+      plug = fn conn ->
+        send(test_pid, :unexpected_request)
+        json(conn, 200, %{})
+      end
 
       assert {:error, :missing_trusted} =
                Wallet.request_credential(offer(), holder_key(),
@@ -560,7 +577,11 @@ defmodule AttestoClient.WalletTest do
 
       builder = fn holder_publics, c_nonce ->
         send(test_pid, {:attestation_built, length(holder_publics), c_nonce})
-        AttestoClient.KeyAttestation.build(provider, attested_keys: holder_publics, nonce: c_nonce)
+
+        AttestoClient.KeyAttestation.build(provider,
+          attested_keys: holder_publics,
+          nonce: c_nonce
+        )
       end
 
       assert {:ok, %{credentials: [_held]}} =
@@ -593,7 +614,12 @@ defmodule AttestoClient.WalletTest do
     end
 
     test "an unsupported or missing format" do
-      opts = [access_token: "t", credential_endpoint: "#{@issuer}/credential", trusted: @trusted_placeholder]
+      opts = [
+        access_token: "t",
+        credential_endpoint: "#{@issuer}/credential",
+        trusted: @trusted_placeholder
+      ]
+
       assert {:error, :missing_format} = Wallet.request_credential(offer(), holder_key(), opts)
 
       assert {:error, :missing_format} =
