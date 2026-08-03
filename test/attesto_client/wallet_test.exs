@@ -73,7 +73,7 @@ defmodule AttestoClient.WalletTest do
             {:credential_request, Plug.Conn.get_req_header(conn, "authorization"), request}
           )
 
-          proof_jwt = request["proof"]["jwt"]
+          proof_jwt = hd(request["proofs"]["jwt"])
 
           {:ok, %{jwk: holder_jwk}} =
             Attesto.CredentialProof.verify_jwt(proof_jwt,
@@ -127,7 +127,8 @@ defmodule AttestoClient.WalletTest do
 
       assert_receive {:credential_request, ["Bearer #{@access_token}"], request}
       assert request["credential_configuration_id"] == @configuration_id
-      assert request["proof"]["proof_type"] == "jwt"
+      assert [proof_jwt] = request["proofs"]["jwt"]
+      assert is_binary(proof_jwt)
     end
 
     test "reuses a supplied access_token instead of exchanging the code" do
@@ -140,7 +141,7 @@ defmodule AttestoClient.WalletTest do
           {"POST", "/credential"} ->
             {request, conn} = read_json_body!(conn)
             send(test_pid, {:credential_request, Plug.Conn.get_req_header(conn, "authorization")})
-            proof_jwt = request["proof"]["jwt"]
+            proof_jwt = hd(request["proofs"]["jwt"])
 
             {:ok, %{jwk: holder_jwk}} =
               Attesto.CredentialProof.verify_jwt(proof_jwt, issuer: @issuer)
@@ -253,7 +254,7 @@ defmodule AttestoClient.WalletTest do
             send(test_pid, {:credential_dpop, dpop})
 
             {:ok, %{jwk: holder_jwk}} =
-              Attesto.CredentialProof.verify_jwt(request["proof"]["jwt"],
+              Attesto.CredentialProof.verify_jwt(hd(request["proofs"]["jwt"]),
                 issuer: @issuer,
                 nonce: @c_nonce,
                 client_id: @client_id
@@ -379,7 +380,7 @@ defmodule AttestoClient.WalletTest do
         case {conn.method, conn.request_path} do
           {"POST", "/credential"} ->
             {request, conn} = read_json_body!(conn)
-            proof_jwt = request["proof"]["jwt"]
+            proof_jwt = hd(request["proofs"]["jwt"])
 
             {:ok, %{jwk: holder_jwk}} =
               Attesto.CredentialProof.verify_jwt(proof_jwt, issuer: @issuer)

@@ -237,6 +237,50 @@ defmodule AttestoClient.OAuthHTTPTest do
       Agent.stop(counter)
     end
 
+    test "a use_dpop_nonce retry re-authenticates with a fresh client_assertion" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      client_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        form = URI.decode_query(body)
+        jti = form["client_assertion"] |> JOSE.JWS.peek_payload() |> JSON.decode!() |> Map.get("jti")
+        n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+        send(parent, {:jti, n, jti})
+
+        if n == 0 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "n-1")
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+        end
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: "c",
+                 client_auth: {:private_key_jwt, client_key},
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:jti, 0, jti0}
+      assert_receive {:jti, 1, jti1}
+      assert is_binary(jti0) and is_binary(jti1)
+      # The retried assertion must not replay the first attempt's jti.
+      refute jti0 == jti1
+
+      Agent.stop(counter)
+    end
+
     test "surfaces the error and stops after one retry when the challenge repeats" do
       parent = self()
       key = JOSE.JWK.generate_key({:ec, "P-256"})

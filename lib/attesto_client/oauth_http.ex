@@ -11,10 +11,9 @@ defmodule AttestoClient.OAuthHTTP do
   @spec post_form(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form(endpoint, form, opts) when is_map(form) and is_list(opts) do
     with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> request(endpoint, form, req_options, timeout_ms, :json, opts) end,
+        fn -> request(endpoint, form, timeout_ms, :json, opts) end,
         timeout_ms
       )
     end
@@ -23,10 +22,9 @@ defmodule AttestoClient.OAuthHTTP do
   @spec post_form_unit(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def post_form_unit(endpoint, form, opts) when is_map(form) and is_list(opts) do
     with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, form, req_options} <- authenticate(form, endpoint, opts),
          {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> request(endpoint, form, req_options, timeout_ms, :unit, opts) end,
+        fn -> request(endpoint, form, timeout_ms, :unit, opts) end,
         timeout_ms
       )
     end
@@ -221,20 +219,31 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
-  defp request(endpoint, form, req_options, timeout_ms, response_mode, opts) do
-    base =
-      req_options ++
-        [
-          url: endpoint,
-          method: :post,
-          form: form,
-          redirect: false,
-          retry: false,
-          receive_timeout: timeout_ms
-        ]
+  defp request(endpoint, form, timeout_ms, response_mode, opts) do
+    # Re-authenticate per attempt: a DPoP `use_dpop_nonce` retry must carry a
+    # FRESH client_assertion / client-attestation PoP (unique `jti`), not a
+    # replay of the first attempt's - the server rejects reused assertion jtis.
+    builder = fn ->
+      with {:ok, form2, req_options} <- authenticate(form, endpoint, opts) do
+        {:ok,
+         req_options ++
+           [
+             url: endpoint,
+             method: :post,
+             form: form2,
+             redirect: false,
+             retry: false,
+             receive_timeout: timeout_ms
+           ]}
+      end
+    end
 
     # A DPoP-bound token request carries no `ath` (there is no access token yet).
-    run_with_dpop(dpop_context(opts, "POST", endpoint, nil), base, &classify_form(&1, response_mode))
+    run_with_dpop(
+      dpop_context(opts, "POST", endpoint, nil),
+      builder,
+      &classify_form(&1, response_mode)
+    )
   end
 
   defp classify_form(%Req.Response{status: status}, :unit) when status in 200..299, do: :ok
@@ -249,19 +258,37 @@ defmodule AttestoClient.OAuthHTTP do
   defp classify_form(%Req.Response{status: status}, _mode), do: {:error, {:http_status, status}}
 
   defp json_request(endpoint, body, access_token, opts, timeout_ms) do
-    base =
-      req_options(opts) ++
-        [
-          url: endpoint,
-          method: :post,
-          json: body,
-          auth: {:bearer, access_token},
-          redirect: false,
-          retry: false,
-          receive_timeout: timeout_ms
-        ]
+    dpop_ctx = dpop_context(opts, "POST", endpoint, access_token)
 
-    run_with_dpop(dpop_context(opts, "POST", endpoint, access_token), base, &classify_json/1)
+    builder = fn ->
+      base =
+        req_options(opts) ++
+          [
+            url: endpoint,
+            method: :post,
+            json: body,
+            redirect: false,
+            retry: false,
+            receive_timeout: timeout_ms
+          ]
+
+      {:ok, put_token_auth(base, access_token, dpop_ctx)}
+    end
+
+    run_with_dpop(dpop_ctx, builder, &classify_json/1)
+  end
+
+  # RFC 9449 §7.1: a DPoP-sender-constrained access token is presented with the
+  # `DPoP` authentication scheme, not `Bearer`. Without DPoP, use Bearer.
+  defp put_token_auth(base, access_token, nil), do: Keyword.put(base, :auth, {:bearer, access_token})
+
+  defp put_token_auth(base, access_token, _dpop_ctx) do
+    Keyword.update(
+      base,
+      :headers,
+      [{"authorization", "DPoP " <> access_token}],
+      &[{"authorization", "DPoP " <> access_token} | &1]
+    )
   end
 
   defp classify_json(%Req.Response{status: status, body: body})
@@ -278,35 +305,45 @@ defmodule AttestoClient.OAuthHTTP do
 
   # RFC 9449: when `:dpop` is set, attach a fresh proof header per attempt and
   # retry once against a `use_dpop_nonce` challenge, echoing the server's
-  # `DPoP-Nonce`. Without `:dpop`, send the base request unchanged.
-  defp run_with_dpop(nil, base, classify), do: send_and_classify(base, [], classify)
+  # `DPoP-Nonce`. `builder` is re-run per attempt so each retry also gets fresh
+  # client-auth artifacts (a new client_assertion / client-attestation PoP),
+  # never a replay. Without `:dpop`, build and send once.
+  defp run_with_dpop(nil, builder, classify) do
+    with {:ok, base} <- builder.() do
+      send_and_classify(base, [], classify)
+    end
+  end
 
-  defp run_with_dpop(ctx, base, classify), do: dpop_attempt(ctx, base, classify, nil, true)
+  defp run_with_dpop(ctx, builder, classify), do: dpop_attempt(ctx, builder, classify, nil, true)
 
-  defp dpop_attempt(ctx, base, classify, nonce, retry?) do
+  defp dpop_attempt(ctx, builder, classify, nonce, retry?) do
+    with {:ok, base} <- builder.(),
+         {:ok, proof} <- dpop_proof(ctx, nonce) do
+      case send_request(base, [{"dpop", proof}]) do
+        {:ok, resp} ->
+          if retry? and dpop_nonce_challenge?(resp) do
+            case dpop_nonce(resp) do
+              nil -> classify.(resp)
+              fresh -> dpop_attempt(ctx, builder, classify, fresh, false)
+            end
+          else
+            classify.(resp)
+          end
+
+        {:error, _reason} ->
+          {:error, :transport_error}
+      end
+    end
+  end
+
+  defp dpop_proof(ctx, nonce) do
     proof_opts =
       [access_token: ctx.access_token, nonce: nonce]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     case DPoP.proof(ctx.key, ctx.method, ctx.url, proof_opts) do
-      {:ok, proof} ->
-        case send_request(base, [{"dpop", proof}]) do
-          {:ok, resp} ->
-            if retry? and dpop_nonce_challenge?(resp) do
-              case dpop_nonce(resp) do
-                nil -> classify.(resp)
-                fresh -> dpop_attempt(ctx, base, classify, fresh, false)
-              end
-            else
-              classify.(resp)
-            end
-
-          {:error, _reason} ->
-            {:error, :transport_error}
-        end
-
-      {:error, reason} ->
-        {:error, {:dpop, reason}}
+      {:ok, proof} -> {:ok, proof}
+      {:error, reason} -> {:error, {:dpop, reason}}
     end
   end
 

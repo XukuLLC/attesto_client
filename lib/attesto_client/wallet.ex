@@ -204,9 +204,12 @@ defmodule AttestoClient.Wallet do
   defp post_credential_request(configuration_id, proof, access_token, opts) do
     with {:ok, endpoint} <-
            required_string(opts, :credential_endpoint, :missing_credential_endpoint) do
+      # OID4VCI 1.0 final §8.2: a Credential Request carries `proofs`, an object
+      # keyed by proof type whose value is an array of proofs (the singular
+      # `proof` of earlier drafts was removed).
       body = %{
         "credential_configuration_id" => configuration_id,
-        "proof" => %{"proof_type" => "jwt", "jwt" => proof}
+        "proofs" => %{"jwt" => [proof]}
       }
 
       OAuthHTTP.post_json(endpoint, body, access_token, opts)
