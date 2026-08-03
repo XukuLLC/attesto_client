@@ -10,6 +10,11 @@ defmodule AttestoClient.WalletTest do
   @pre_authorized_code "pre-auth-code-123"
   @access_token "access-token-abc"
   @c_nonce "server-nonce-1"
+  # A non-empty trust anchor for fail-fast tests that assert a non-trust error;
+  # `request_credential/3` now rejects missing/empty `:trusted` up front.
+  @trusted_placeholder JOSE.JWK.generate_key({:ec, "P-256"})
+                       |> JOSE.JWK.to_public_map()
+                       |> elem(1)
 
   defp holder_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
 
@@ -463,6 +468,118 @@ defmodule AttestoClient.WalletTest do
     end
   end
 
+  describe "request_credential/3 - holder-binding and trust integrity" do
+    test "rejects a credential bound to a key the wallet does not control" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      # A hostile issuer binds the credential to an unrelated key, not the
+      # wallet's holder key that proved possession.
+      attacker_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {_t, attacker_pub} = JOSE.JWK.to_public_map(attacker_key)
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            credential =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{},
+                cnf: %{"jwk" => attacker_pub}
+              )
+
+            json(conn, 200, Attesto.CredentialResponse.build(credential))
+        end
+      end
+
+      assert {:error, :holder_binding_mismatch} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects a batch response whose credential count differs from the proofs" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+            # Two proofs sent, but the issuer returns only one credential.
+            [proof | _] = request["proofs"]["jwt"]
+            {:ok, %{jwk: holder_jwk}} = Attesto.CredentialProof.verify_jwt(proof, issuer: @issuer)
+
+            cred =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{},
+                cnf: %{"jwk" => holder_jwk}
+              )
+
+            json(conn, 200, %{"credentials" => [%{"credential" => cred}]})
+        end
+      end
+
+      assert {:error, :credential_count_mismatch} =
+               Wallet.request_credential(offer(), [holder_key(), holder_key()],
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "fails closed with no trust anchor, before any network call" do
+      test_pid = self()
+      plug = fn conn -> send(test_pid, :unexpected_request); json(conn, 200, %{}) end
+
+      assert {:error, :missing_trusted} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 format: "vc+sd-jwt",
+                 req_options: [plug: plug]
+               )
+
+      refute_receive :unexpected_request
+    end
+
+    test "mints a nonce-bound key attestation via a builder callback after fetch" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      provider = JOSE.JWK.generate_key({:ec, "P-256"})
+      test_pid = self()
+
+      builder = fn holder_publics, c_nonce ->
+        send(test_pid, {:attestation_built, length(holder_publics), c_nonce})
+        AttestoClient.KeyAttestation.build(provider, attested_keys: holder_publics, nonce: c_nonce)
+      end
+
+      assert {:ok, %{credentials: [_held]}} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 nonce_endpoint: "#{@issuer}/nonce",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 key_attestation: builder,
+                 req_options: [plug: sd_jwt_vc_plug(issuer_pem, self())]
+               )
+
+      # The builder ran with the wallet's holder key and the fetched c_nonce.
+      assert_receive {:attestation_built, 1, @c_nonce}
+    end
+  end
+
   describe "request_credential/3 rejects invalid input (fail fast)" do
     test "an offer with no pre-authorized_code grant and no access_token" do
       offer = offer(%{"authorization_code" => %{"issuer_state" => "state-1"}})
@@ -471,12 +588,12 @@ defmodule AttestoClient.WalletTest do
                Wallet.request_credential(offer, holder_key(),
                  credential_endpoint: "#{@issuer}/credential",
                  format: "vc+sd-jwt",
-                 trusted: %{}
+                 trusted: @trusted_placeholder
                )
     end
 
     test "an unsupported or missing format" do
-      opts = [access_token: "t", credential_endpoint: "#{@issuer}/credential", trusted: %{}]
+      opts = [access_token: "t", credential_endpoint: "#{@issuer}/credential", trusted: @trusted_placeholder]
       assert {:error, :missing_format} = Wallet.request_credential(offer(), holder_key(), opts)
 
       assert {:error, :missing_format} =
@@ -500,7 +617,7 @@ defmodule AttestoClient.WalletTest do
                  access_token: "t",
                  credential_endpoint: "#{@issuer}/credential",
                  format: "vc+sd-jwt",
-                 trusted: %{}
+                 trusted: @trusted_placeholder
                )
     end
 

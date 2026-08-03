@@ -48,6 +48,7 @@ defmodule AttestoClient.Wallet.Presentation do
   """
 
   alias Attesto.JWS
+  alias Attesto.Thumbprint
   alias AttestoClient.Builder
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.Wallet.Presentation.Mdoc
@@ -150,11 +151,16 @@ defmodule AttestoClient.Wallet.Presentation do
   @spec submit(PresentationRequest.t(), map(), [opt()]) :: {:ok, map()} | {:error, term()}
   def submit(%PresentationRequest{} = request, vp_token, opts \\ [])
       when is_map(vp_token) and is_list(opts) do
-    form =
-      %{"vp_token" => JSON.encode!(vp_token)}
-      |> put_optional("state", request.state)
+    # Fail closed on `direct_post.jwt` here too, not only in `build_vp_token/3`:
+    # this is a public entry point, and an unencrypted `direct_post` submission
+    # of a response the request asked to be encrypted would leak it in plaintext.
+    with :ok <- check_direct_post(request) do
+      form =
+        %{"vp_token" => JSON.encode!(vp_token)}
+        |> put_optional("state", request.state)
 
-    OAuthHTTP.post_form_open(request.response_uri, form, opts)
+      OAuthHTTP.post_form_open(request.response_uri, form, opts)
+    end
   end
 
   # ── building ─────────────────────────────────────────────────────────────
@@ -163,10 +169,35 @@ defmodule AttestoClient.Wallet.Presentation do
   defp check_direct_post(_request), do: {:error, :unsupported_response_mode}
 
   defp build_one(id, held, request, opts) do
-    with {:ok, holder_key} <- holder_key_for(id, opts) do
+    with {:ok, holder_key} <- holder_key_for(id, opts),
+         :ok <- check_holder_key(holder_key, held) do
       dispatch_build(held, request, holder_key, claim_filter(request, id), opts)
     end
   end
+
+  # The signing key must be the one the selected credential is bound to. Checking
+  # locally - by RFC 7638 thumbprint against the credential's `cnf.jwk` / mdoc
+  # device key - fails BEFORE any issuer JWT or Disclosure is disclosed to the
+  # verifier, so a wrong-key selection cannot leak the credential's contents.
+  defp check_holder_key(holder_key, held) do
+    with {:ok, jwk} <- Builder.normalize_key(holder_key),
+         {:ok, bound_jwk} <- presentation_binding_jwk(held) do
+      {_type, holder_public} = JOSE.JWK.to_public_map(jwk)
+
+      with {:ok, holder_thumb} <- Thumbprint.of_jwk(holder_public),
+           {:ok, bound_thumb} <- Thumbprint.of_jwk(bound_jwk) do
+        if holder_thumb == bound_thumb, do: :ok, else: {:error, :holder_key_mismatch}
+      end
+    end
+  end
+
+  defp presentation_binding_jwk(%{holder_binding: %{"jwk" => jwk}}) when is_map(jwk), do: {:ok, jwk}
+
+  defp presentation_binding_jwk(%{format: @mdoc_format, holder_binding: device_key})
+       when is_map(device_key),
+       do: {:ok, device_key}
+
+  defp presentation_binding_jwk(_held), do: {:error, :missing_holder_binding}
 
   defp holder_key_for(id, opts) do
     case Keyword.get(opts, :holder_keys) do
@@ -254,11 +285,46 @@ defmodule AttestoClient.Wallet.Presentation do
 
   defp filter_split_disclosures(issuer_jwt, rest, names) do
     if List.last(rest) == "" do
-      disclosures = Enum.drop(rest, -1)
-      kept = Enum.filter(disclosures, &disclosure_name_in?(&1, names))
-      {:ok, Enum.join([issuer_jwt | kept] ++ [""], "~")}
+      with {:ok, claims} <- issuer_payload(issuer_jwt),
+           {:ok, hash_alg} <- sd_hash_alg(claims) do
+        # Only object-property Disclosures whose digest appears in the issuer
+        # payload's TOP-LEVEL `_sd` are top-level claims. Matching by leaf name
+        # alone would also keep a nested Disclosure (e.g. `medical.name`) that
+        # happens to share a requested top-level name, leaking it to the verifier.
+        root_sd = MapSet.new(List.wrap(Map.get(claims, "_sd", [])))
+        disclosures = Enum.drop(rest, -1)
+        kept = Enum.filter(disclosures, &keep_disclosure?(&1, names, root_sd, hash_alg))
+        {:ok, Enum.join([issuer_jwt | kept] ++ [""], "~")}
+      end
     else
       {:error, :invalid_credential}
+    end
+  end
+
+  defp keep_disclosure?(disclosure, names, root_sd, hash_alg) do
+    digest = hash_alg |> :crypto.hash(disclosure) |> JWS.encode64()
+    MapSet.member?(root_sd, digest) and disclosure_name_in?(disclosure, names)
+  end
+
+  defp issuer_payload(issuer_jwt) do
+    with [_header, payload | _] <- String.split(issuer_jwt, "."),
+         {:ok, bytes} <- Base.url_decode64(payload, padding: false),
+         {:ok, claims} when is_map(claims) <- JSON.decode(bytes) do
+      {:ok, claims}
+    else
+      _other -> {:error, :invalid_credential}
+    end
+  end
+
+  # draft-ietf-oauth-selective-disclosure-jwt §4.1.1: `_sd_alg` names the hash;
+  # its absence defaults to sha-256. An unknown value fails closed rather than
+  # silently disabling top-level scoping (which would reintroduce the leak).
+  defp sd_hash_alg(claims) do
+    case Map.get(claims, "_sd_alg", "sha-256") do
+      "sha-256" -> {:ok, :sha256}
+      "sha-384" -> {:ok, :sha384}
+      "sha-512" -> {:ok, :sha512}
+      _other -> {:error, :unsupported_sd_alg}
     end
   end
 

@@ -23,6 +23,8 @@ defmodule AttestoClient.Wallet do
   the same way as the rest of this library (`req_options: [plug: ...]`).
   """
 
+  alias Attesto.Thumbprint
+  alias AttestoClient.Builder
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.Token
   alias AttestoClient.Wallet.CredentialOffer
@@ -67,7 +69,8 @@ defmodule AttestoClient.Wallet do
           | {:verify_opts, keyword()}
           | {:proof_alg, String.t()}
           | {:proof_kid, String.t()}
-          | {:key_attestation, String.t()}
+          | {:key_attestation,
+             String.t() | ([map()], String.t() | nil -> {:ok, String.t()} | {:error, term()})}
           | {:dpop, Proof.jwk()}
           | {:now, integer()}
           | {:req_options, keyword()}
@@ -116,13 +119,16 @@ defmodule AttestoClient.Wallet do
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
     with {:ok, holder_keys} <- holder_keys(holder_key),
+         {:ok, holder_publics} <- holder_public_keys(holder_keys),
+         :ok <- validate_trusted(opts),
          {:ok, format} <- required_format(opts),
          {:ok, configuration_id} <- configuration_id(offer, opts),
          {:ok, access_token} <- access_token(offer, opts),
          {:ok, c_nonce} <- fetch_nonce(opts),
-         {:ok, proofs} <- build_proofs(offer, holder_keys, c_nonce, opts),
+         {:ok, key_attestation} <- resolve_key_attestation(opts, holder_publics, c_nonce),
+         {:ok, proofs} <- build_proofs(offer, holder_keys, c_nonce, key_attestation, opts),
          {:ok, response} <- post_credential_request(configuration_id, proofs, access_token, opts) do
-      finalize(response, format, c_nonce, access_token, opts)
+      finalize(response, format, c_nonce, access_token, holder_publics, opts)
     end
   end
 
@@ -204,10 +210,67 @@ defmodule AttestoClient.Wallet do
   defp holder_keys([]), do: {:error, :missing_holder_key}
   defp holder_keys(key), do: {:ok, [key]}
 
-  defp build_proofs(offer, keys, c_nonce, opts) do
+  # The ordered public halves of the holder keys - used both to attest them
+  # (key attestation) and to check that each issued credential is bound to the
+  # key whose proof of possession requested it.
+  defp holder_public_keys(keys) do
     keys
     |> Enum.reduce_while({:ok, []}, fn key, {:ok, acc} ->
-      case build_proof(offer, key, c_nonce, opts) do
+      case Builder.normalize_key(key) do
+        {:ok, jwk} ->
+          {_type, public} = JOSE.JWK.to_public_map(jwk)
+          {:cont, {:ok, [public | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, publics} -> {:ok, Enum.reverse(publics)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Fail closed before any network side effect if the caller supplied no issuer
+  # trust anchor: without it the issued credential's signature cannot be
+  # verified (and `Attesto.SdJwtVc.verify/3` would raise on `nil`).
+  defp validate_trusted(opts) do
+    case Keyword.get(opts, :trusted) do
+      %{} = trusted when map_size(trusted) > 0 -> :ok
+      [_ | _] -> :ok
+      trusted when is_binary(trusted) and trusted != "" -> :ok
+      _ -> {:error, :missing_trusted}
+    end
+  end
+
+  # `:key_attestation` may be a pre-built compact JWT, or a 2-arity builder
+  # `(holder_public_jwks, c_nonce) -> {:ok, jwt} | {:error, reason}` so the
+  # attestation can be minted AFTER the issuer's `c_nonce` is fetched (a HAIP
+  # issuer that rotates nonces requires the attestation to echo the current one).
+  defp resolve_key_attestation(opts, holder_publics, c_nonce) do
+    case Keyword.get(opts, :key_attestation) do
+      nil ->
+        {:ok, nil}
+
+      jwt when is_binary(jwt) and jwt != "" ->
+        {:ok, jwt}
+
+      fun when is_function(fun, 2) ->
+        case fun.(holder_publics, c_nonce) do
+          {:ok, jwt} when is_binary(jwt) and jwt != "" -> {:ok, jwt}
+          {:error, reason} -> {:error, {:key_attestation, reason}}
+          _invalid -> {:error, :invalid_key_attestation}
+        end
+
+      _invalid ->
+        {:error, :invalid_key_attestation}
+    end
+  end
+
+  defp build_proofs(offer, keys, c_nonce, key_attestation, opts) do
+    keys
+    |> Enum.reduce_while({:ok, []}, fn key, {:ok, acc} ->
+      case build_proof(offer, key, c_nonce, key_attestation, opts) do
         {:ok, proof} -> {:cont, {:ok, [proof | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -218,7 +281,7 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp build_proof(offer, holder_key, c_nonce, opts) do
+  defp build_proof(offer, holder_key, c_nonce, key_attestation, opts) do
     proof_opts =
       [credential_issuer: offer.credential_issuer]
       |> put_optional(:nonce, c_nonce)
@@ -226,7 +289,7 @@ defmodule AttestoClient.Wallet do
       |> put_optional(:now, Keyword.get(opts, :now))
       |> put_optional(:alg, Keyword.get(opts, :proof_alg))
       |> put_optional(:kid, Keyword.get(opts, :proof_kid))
-      |> put_optional(:key_attestation, Keyword.get(opts, :key_attestation))
+      |> put_optional(:key_attestation, key_attestation)
 
     Proof.build(holder_key, proof_opts)
   end
@@ -247,7 +310,14 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp finalize(%{"transaction_id" => transaction_id} = response, _format, c_nonce, _access_token, _opts)
+  defp finalize(
+         %{"transaction_id" => transaction_id} = response,
+         _format,
+         c_nonce,
+         _access_token,
+         _holder_publics,
+         _opts
+       )
        when is_binary(transaction_id) and transaction_id != "" do
     pending = %{
       status: :pending,
@@ -258,9 +328,16 @@ defmodule AttestoClient.Wallet do
     {:ok, %{credentials: [pending], c_nonce: c_nonce}}
   end
 
-  defp finalize(%{"credentials" => credentials} = response, format, c_nonce, access_token, opts)
+  defp finalize(
+         %{"credentials" => credentials} = response,
+         format,
+         c_nonce,
+         access_token,
+         holder_publics,
+         opts
+       )
        when is_list(credentials) and credentials != [] do
-    with {:ok, held} <- verify_credentials(credentials, format, opts),
+    with {:ok, held} <- verify_credentials(credentials, format, holder_publics, opts),
          :ok <- maybe_notify(response, access_token, opts) do
       {:ok,
        %{
@@ -271,7 +348,7 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp finalize(_response, _format, _c_nonce, _access_token, _opts),
+  defp finalize(_response, _format, _c_nonce, _access_token, _holder_publics, _opts),
     do: {:error, :invalid_credential_response}
 
   # OID4VCI §10: when the caller supplies a `:notification_endpoint` and the
@@ -295,26 +372,68 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp verify_credentials(credentials, format, opts) do
-    credentials
-    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
-      case credential_value(entry) do
-        {:ok, credential} -> reduce_verify(credential, format, opts, acc)
-        {:error, reason} -> {:halt, {:error, reason}}
+  # The issuer MUST return exactly one credential per submitted proof, each
+  # bound to that proof's holder key (OID4VCI §8.2). Enforcing the count and the
+  # per-credential holder binding stops a hostile issuer from returning fewer or
+  # extra credentials, or credentials bound to a key the wallet does not control
+  # (which the wallet could then neither present nor be sure it holds).
+  defp verify_credentials(credentials, _format, holder_publics, _opts)
+       when length(credentials) != length(holder_publics),
+       do: {:error, :credential_count_mismatch}
+
+  defp verify_credentials(credentials, format, holder_publics, opts) do
+    with {:ok, expected} <- expected_thumbprints(holder_publics) do
+      # Each returned credential must be bound to a DISTINCT holder key the
+      # wallet proved possession of. Membership + distinctness is order-
+      # independent (the issuer need not echo proof order) yet still enforces a
+      # one-to-one binding between proofs and credentials.
+      credentials
+      |> Enum.reduce_while({:ok, [], MapSet.new()}, fn entry, {:ok, acc, used} ->
+        with {:ok, credential} <- credential_value(entry),
+             {:ok, held} <- verify_credential(format, credential, opts),
+             {:ok, thumb} <- held_binding_thumbprint(held),
+             :ok <- check_binding_membership(thumb, expected, used) do
+          {:cont, {:ok, [held | acc], MapSet.put(used, thumb)}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, held, _used} -> {:ok, Enum.reverse(held)}
+        {:error, reason} -> {:error, reason}
       end
-    end)
-    |> case do
-      {:ok, held} -> {:ok, Enum.reverse(held)}
-      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp reduce_verify(credential, format, opts, acc) do
-    case verify_credential(format, credential, opts) do
-      {:ok, held} -> {:cont, {:ok, [held | acc]}}
-      {:error, reason} -> {:halt, {:error, reason}}
+  defp expected_thumbprints(holder_publics) do
+    holder_publics
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn public, {:ok, set} ->
+      case Thumbprint.of_jwk(public) do
+        {:ok, thumb} -> {:cont, {:ok, MapSet.put(set, thumb)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # The credential's holder binding (SD-JWT/JWT `cnf.jwk`, or the mdoc device
+  # key) as an RFC 7638 thumbprint.
+  defp held_binding_thumbprint(held) do
+    with {:ok, bound_jwk} <- binding_jwk(held), do: Thumbprint.of_jwk(bound_jwk)
+  end
+
+  defp check_binding_membership(thumb, expected, used) do
+    cond do
+      not MapSet.member?(expected, thumb) -> {:error, :holder_binding_mismatch}
+      MapSet.member?(used, thumb) -> {:error, :holder_binding_mismatch}
+      true -> :ok
     end
   end
+
+  defp binding_jwk(%{holder_binding: %{"jwk" => jwk}}) when is_map(jwk), do: {:ok, jwk}
+  defp binding_jwk(%{format: @mdoc_format, holder_binding: device_key}) when is_map(device_key),
+    do: {:ok, device_key}
+
+  defp binding_jwk(_held), do: {:error, :missing_holder_binding}
 
   defp credential_value(%{"credential" => credential})
        when is_binary(credential) and credential != "",

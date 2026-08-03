@@ -182,21 +182,21 @@ defmodule AttestoClient.OAuthHTTP do
   # OAuth Attestation-Based Client Authentication (draft-ietf-oauth-attestation-
   # based-client-auth): present the long-lived Client Attestation JWT plus a
   # fresh per-request PoP in the `OAuth-Client-Attestation[-PoP]` headers. The
-  # PoP's `aud` should be the AS issuer; pass it as `:audience` in the auth
-  # opts (defaulting to the endpoint URL otherwise).
+  # PoP's `aud` MUST be the server's own identifier (the AS issuer / RS resource
+  # identifier), not the concrete endpoint URL, so the caller must pass an
+  # explicit `:audience` in the auth opts; omitting it fails closed via
+  # `WalletAttestation.pop/2` (`:invalid_audience`) rather than binding to the
+  # wrong audience.
   defp authenticate_as(
          {:client_attestation, attestation, instance_key, ca_opts},
          client_id,
          form,
-         endpoint,
+         _endpoint,
          opts
        )
        when is_binary(client_id) and client_id != "" and is_binary(attestation) and
               attestation != "" and is_list(ca_opts) do
-    pop_opts =
-      ca_opts
-      |> Keyword.put(:client_id, client_id)
-      |> Keyword.put_new(:audience, endpoint)
+    pop_opts = Keyword.put(ca_opts, :client_id, client_id)
 
     case WalletAttestation.pop(instance_key, pop_opts) do
       {:ok, pop} ->
@@ -240,8 +240,12 @@ defmodule AttestoClient.OAuthHTTP do
     # Re-authenticate per attempt: a DPoP `use_dpop_nonce` retry must carry a
     # FRESH client_assertion / client-attestation PoP (unique `jti`), not a
     # replay of the first attempt's - the server rejects reused assertion jtis.
-    builder = fn ->
-      with {:ok, form2, req_options} <- authenticate(form, endpoint, opts) do
+    builder = fn retry? ->
+      # On a nonce retry, force fresh client-auth `jti`s even if the caller
+      # pinned one, so the retried assertion/PoP cannot be a replay of the first.
+      attempt_opts = if retry?, do: drop_client_auth_jti(opts), else: opts
+
+      with {:ok, form2, req_options} <- authenticate(form, endpoint, attempt_opts) do
         {:ok,
          req_options ++
            [
@@ -292,7 +296,24 @@ defmodule AttestoClient.OAuthHTTP do
       {:ok, put_token_auth(base, access_token, dpop_ctx)}
     end
 
-    run_with_dpop(dpop_ctx, builder, classify)
+    # The credential/resource request has no client_assertion, so the retry only
+    # needs a fresh DPoP proof (minted per attempt below); the base is identical.
+    run_with_dpop(dpop_ctx, fn _retry? -> builder.() end, classify)
+  end
+
+  # Drop a caller-pinned client-auth `jti` so re-authentication mints a fresh
+  # one; without this a pinned `jti` would replay across a nonce retry.
+  defp drop_client_auth_jti(opts) do
+    case Keyword.get(opts, :client_auth) do
+      {:private_key_jwt, jwk, assertion_opts} when is_list(assertion_opts) ->
+        Keyword.put(opts, :client_auth, {:private_key_jwt, jwk, Keyword.delete(assertion_opts, :jti)})
+
+      {:client_attestation, attestation, key, ca_opts} when is_list(ca_opts) ->
+        Keyword.put(opts, :client_auth, {:client_attestation, attestation, key, Keyword.delete(ca_opts, :jti)})
+
+      _other ->
+        opts
+    end
   end
 
   # RFC 9449 §7.1: a DPoP-sender-constrained access token is presented with the
@@ -300,12 +321,15 @@ defmodule AttestoClient.OAuthHTTP do
   defp put_token_auth(base, access_token, nil), do: Keyword.put(base, :auth, {:bearer, access_token})
 
   defp put_token_auth(base, access_token, _dpop_ctx) do
-    Keyword.update(
-      base,
-      :headers,
-      [{"authorization", "DPoP " <> access_token}],
-      &[{"authorization", "DPoP " <> access_token} | &1]
-    )
+    # Strip any caller-supplied Authorization header before installing the
+    # protocol-owned one, so the request never carries two Authorization values
+    # (which a server may reject or resolve to the wrong credential).
+    headers =
+      base
+      |> Keyword.get(:headers, [])
+      |> Enum.reject(fn {name, _value} -> String.downcase(to_string(name)) == "authorization" end)
+
+    Keyword.put(base, :headers, [{"authorization", "DPoP " <> access_token} | headers])
   end
 
   defp classify_json(%Req.Response{status: status, body: body})
@@ -335,19 +359,21 @@ defmodule AttestoClient.OAuthHTTP do
   # client-auth artifacts (a new client_assertion / client-attestation PoP),
   # never a replay. Without `:dpop`, build and send once.
   defp run_with_dpop(nil, builder, classify) do
-    with {:ok, base} <- builder.() do
+    with {:ok, base} <- builder.(false) do
       send_and_classify(base, [], classify)
     end
   end
 
   defp run_with_dpop(ctx, builder, classify), do: dpop_attempt(ctx, builder, classify, nil, true)
 
-  defp dpop_attempt(ctx, builder, classify, nonce, retry?) do
-    with {:ok, base} <- builder.(),
+  # `first?` is true for the initial attempt and false for the single retry; the
+  # builder is told `retry? = not first?` so it can refresh client-auth `jti`s.
+  defp dpop_attempt(ctx, builder, classify, nonce, first?) do
+    with {:ok, base} <- builder.(not first?),
          {:ok, proof} <- dpop_proof(ctx, nonce) do
       case send_request(base, [{"dpop", proof}]) do
         {:ok, resp} ->
-          if retry? and dpop_nonce_challenge?(resp) do
+          if first? and dpop_nonce_challenge?(resp) do
             case dpop_nonce(resp) do
               nil -> classify.(resp)
               fresh -> dpop_attempt(ctx, builder, classify, fresh, false)
@@ -432,29 +458,64 @@ defmodule AttestoClient.OAuthHTTP do
     _error -> {:error, :transport_error}
   end
 
-  defp get_request(url, req_options, timeout_ms) do
-    options =
-      req_options ++
-        [url: url, method: :get, redirect: false, retry: false, receive_timeout: timeout_ms]
+  # Cap by-reference fetches (a caller-supplied `credential_offer_uri` /
+  # `request_uri`, i.e. attacker-influenceable): a hostile endpoint could
+  # otherwise stream an unbounded body to exhaust memory. `raw: true` also skips
+  # response decompression, so a small compressed body cannot inflate past the
+  # cap either.
+  @max_response_bytes 2_000_000
 
-    case Req.request(Req.new(options)) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> {:ok, body}
-      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
-      {:error, _reason} -> {:error, :transport_error}
+  defp get_request(url, req_options, timeout_ms) do
+    case bounded_get(url, req_options, timeout_ms) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
+        case JSON.decode(body) do
+          {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+          _other -> {:error, :invalid_json}
+        end
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_status, status}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
-  rescue
-    _error -> {:error, :transport_error}
   end
 
   defp get_text_request(url, req_options, timeout_ms) do
-    options =
-      req_options ++
-        [url: url, method: :get, redirect: false, retry: false, receive_timeout: timeout_ms]
-
-    case Req.request(Req.new(options)) do
+    case bounded_get(url, req_options, timeout_ms) do
       {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> {:ok, body}
       {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
-      {:error, _reason} -> {:error, :transport_error}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp bounded_get(url, req_options, timeout_ms) do
+    collector = fn {:data, chunk}, {req, resp} ->
+      body = (resp.body || "") <> chunk
+      acc = {req, %{resp | body: body}}
+      if byte_size(body) > @max_response_bytes, do: {:halt, acc}, else: {:cont, acc}
+    end
+
+    options =
+      req_options ++
+        [
+          url: url,
+          method: :get,
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms,
+          raw: true,
+          into: collector
+        ]
+
+    case Req.request(Req.new(options)) do
+      {:ok, %Req.Response{body: body} = resp} ->
+        if is_binary(body) and byte_size(body) > @max_response_bytes,
+          do: {:error, :response_too_large},
+          else: {:ok, resp}
+
+      {:error, _reason} ->
+        {:error, :transport_error}
     end
   rescue
     _error -> {:error, :transport_error}

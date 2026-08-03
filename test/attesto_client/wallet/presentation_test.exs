@@ -169,6 +169,87 @@ defmodule AttestoClient.Wallet.PresentationTest do
     end
   end
 
+  describe "security regressions" do
+    defp disclosure(salt, name, value),
+      do: [salt, name, value] |> JSON.encode!() |> Base.url_encode64(padding: false)
+
+    defp digest(disclosure),
+      do: :sha256 |> :crypto.hash(disclosure) |> Base.url_encode64(padding: false)
+
+    defp b64(map), do: map |> JSON.encode!() |> Base.url_encode64(padding: false)
+
+    test "claim minimisation keeps only TOP-LEVEL disclosures, not a colliding nested one" do
+      {holder_jwk, holder_public} = ec_keypair()
+
+      # Two Disclosures with the SAME leaf name "name": one is a top-level claim
+      # (its digest is in the issuer payload's `_sd`), the other is nested (its
+      # digest is not). A request for the top-level `["name"]` must not leak the
+      # nested one.
+      top = disclosure("salt-top", "name", "TopValue")
+      nested = disclosure("salt-nested", "name", "NestedSecret")
+
+      payload =
+        b64(%{
+          "iss" => "https://issuer.example.com",
+          "vct" => "identity",
+          "cnf" => %{"jwk" => holder_public},
+          "_sd" => [digest(top)],
+          "iat" => @now
+        })
+
+      issuer_jwt = b64(%{"alg" => "ES256", "typ" => "dc+sd-jwt"}) <> "." <> payload <> ".sig"
+      credential = "#{issuer_jwt}~#{top}~#{nested}~"
+
+      held = %{
+        format: "dc+sd-jwt",
+        credential: credential,
+        claims: %{"vct" => "identity"},
+        holder_binding: %{"jwk" => holder_public}
+      }
+
+      req =
+        request(%{
+          dcql_query: %{
+            "credentials" => [
+              %{"id" => "identity", "format" => "dc+sd-jwt", "claims" => [%{"path" => ["name"]}]}
+            ]
+          }
+        })
+
+      assert {:ok, %{"identity" => presentation}} =
+               Presentation.build_vp_token(%{"identity" => held}, req,
+                 holder_keys: %{"identity" => holder_jwk},
+                 now: @now
+               )
+
+      assert String.contains?(presentation, top)
+      refute String.contains?(presentation, nested)
+    end
+
+    test "submit/3 refuses direct_post.jwt even with a caller-built vp_token" do
+      req = request(%{response_mode: "direct_post.jwt"})
+
+      assert {:error, :unsupported_response_mode} =
+               Presentation.submit(req, %{"identity" => "eyJ..."}, [])
+    end
+
+    test "build refuses to sign with a holder key the credential is not bound to" do
+      issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+      {_holder_jwk, holder_public} = ec_keypair()
+      {wrong_key, _wrong_public} = ec_keypair()
+
+      held = issue_held_sd_jwt(issuer_pem, holder_public)
+      req = request()
+
+      assert {:error, {"identity", :holder_key_mismatch}} =
+               Presentation.build_vp_token(%{"identity" => held}, req,
+                 holder_keys: %{"identity" => wrong_key},
+                 now: @now
+               )
+    end
+  end
+
   describe "select/2" do
     test "matches by format, vct_values, and requested claim presence" do
       issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})

@@ -379,6 +379,17 @@ defmodule AttestoClient.OAuthHTTPTest do
       assert jwk == instance_public
     end
 
+    test "fails closed when no PoP audience is supplied (no endpoint fallback)", ctx do
+      assert {:error, {:client_attestation, :invalid_audience}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: ctx.client_id,
+                 client_auth: {:client_attestation, ctx.attestation, ctx.instance, []},
+                 req_options: [plug: capture_headers_plug(self())]
+               )
+    end
+
     test "composes with DPoP - both attestation headers and a DPoP proof are present", ctx do
       dpop_key = JOSE.JWK.generate_key({:ec, "P-256"})
 
@@ -447,6 +458,23 @@ defmodule AttestoClient.OAuthHTTPTest do
 
       assert {:error, {:http_status, 404}} =
                OAuthHTTP.get_text("https://verifier.example.com/requests/missing",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "bounds an oversized body from a hostile by-reference endpoint" do
+      # A request_uri / credential_offer_uri is caller-influenceable; an
+      # unbounded body must not be buffered whole.
+      huge = String.duplicate("A", 3_000_000)
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, huge) end
+
+      assert {:error, :response_too_large} =
+               OAuthHTTP.get_text("https://verifier.example.com/requests/huge",
+                 req_options: [plug: plug]
+               )
+
+      assert {:error, :response_too_large} =
+               OAuthHTTP.get_json("https://issuer.example.com/offers/huge",
                  req_options: [plug: plug]
                )
     end

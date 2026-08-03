@@ -148,6 +148,34 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
       assert {:error, :invalid_dcql_query} =
                PresentationRequest.verify(jwt_without_dcql, rp_public, verify_opts())
     end
+
+    test "rejects a structurally malformed dcql_query without crashing later selection" do
+      {rp_key, rp_public} = verifier_keypair()
+
+      malformed = [
+        # a non-map credential-query element would crash `Presentation.select/2`
+        %{"credentials" => [0]},
+        # empty credential list
+        %{"credentials" => []},
+        # a query missing id / format
+        %{"credentials" => [%{"format" => "dc+sd-jwt"}]},
+        # duplicate ids
+        %{
+          "credentials" => [
+            %{"id" => "a", "format" => "dc+sd-jwt"},
+            %{"id" => "a", "format" => "dc+sd-jwt"}
+          ]
+        }
+      ]
+
+      for dcql <- malformed do
+        jwt = build_request_jwt(rp_key, %{"dcql_query" => dcql})
+
+        assert {:error, :invalid_dcql_query} =
+                 PresentationRequest.verify(jwt, rp_public, verify_opts()),
+               "expected #{inspect(dcql)} to be rejected"
+      end
+    end
   end
 
   describe "fetch/3" do

@@ -84,7 +84,7 @@ defmodule AttestoClient.Wallet.PresentationRequest do
          {:ok, nonce} <- required_string(claims, "nonce", :invalid_nonce),
          {:ok, response_uri} <- required_string(claims, "response_uri", :invalid_response_uri),
          {:ok, response_mode} <- response_mode(claims),
-         {:ok, dcql_query} <- required_map(claims, "dcql_query", :invalid_dcql_query),
+         {:ok, dcql_query} <- valid_dcql_query(claims),
          {:ok, state} <- optional_string(claims, "state", :invalid_state) do
       {:ok,
        %__MODULE__{
@@ -115,11 +115,32 @@ defmodule AttestoClient.Wallet.PresentationRequest do
     end
   end
 
-  defp required_map(claims, key, error) do
-    case Map.get(claims, key) do
-      value when is_map(value) -> {:ok, value}
-      _invalid -> {:error, error}
+  # Validate the DCQL query shape here so a signed-but-malformed request from a
+  # trusted-but-buggy (or compromised) verifier cannot crash later selection
+  # (`Presentation.select/2` indexes each query with `Map.get/2`). Requires a
+  # non-empty `credentials` list of maps, each with a non-empty string `id`
+  # (unique across the list) and `format`.
+  defp valid_dcql_query(claims) do
+    case Map.get(claims, "dcql_query") do
+      %{"credentials" => credentials} = query when is_list(credentials) and credentials != [] ->
+        if Enum.all?(credentials, &valid_credential_query?/1) and unique_ids?(credentials),
+          do: {:ok, query},
+          else: {:error, :invalid_dcql_query}
+
+      _invalid ->
+        {:error, :invalid_dcql_query}
     end
+  end
+
+  defp valid_credential_query?(%{"id" => id, "format" => format})
+       when is_binary(id) and id != "" and is_binary(format) and format != "",
+       do: true
+
+  defp valid_credential_query?(_query), do: false
+
+  defp unique_ids?(credentials) do
+    ids = Enum.map(credentials, &Map.get(&1, "id"))
+    length(ids) == length(Enum.uniq(ids))
   end
 
   defp optional_string(claims, key, error) do
