@@ -36,6 +36,8 @@ protocol mechanics without delegating application policy:
   expiring transaction store.
 - Single-flight concurrent refresh-token rotation with bounded deadlines.
 - Revoke tokens and create RP-Initiated Logout requests.
+- Run the OID4VCI/OID4VP **wallet-holder** flow: receive a credential offer,
+  request and verify credentials, and build presentations (EU wallet / HAIP).
 
 `AttestoClient` is the client-side counterpart to
 [`attesto`](https://hex.pm/packages/attesto). `attesto` verifies client artifacts
@@ -54,8 +56,9 @@ included ETS store retains only short-lived protocol correlation data, and its
 refresh coordinator retains no token set after a flight completes. The host
 chooses its durable/distributed store, atomically persists rotation results,
 maps verified identities to authorization, and applies session-retention
-policy. DPoP proof generation for outgoing requests is
-[`req_dpop`](https://hex.pm/packages/req_dpop)'s job.
+policy. `AttestoClient.DPoP` generates the RFC 9449 proofs for its own token
+and credential requests; [`req_dpop`](https://hex.pm/packages/req_dpop) remains
+the tool for DPoP-binding arbitrary outgoing requests.
 
 ## What it provides
 
@@ -89,6 +92,27 @@ policy. DPoP proof generation for outgoing requests is
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,
   single-flight refresh rotation and RFC 7009 revocation.
 - `AttestoClient.Logout` — RP-Initiated Logout request construction.
+
+### Wallet-holder (OID4VCI / OID4VP)
+
+The client-side of the EU-wallet stack — the holder role that receives and
+presents verifiable credentials, mirroring `attesto`'s issuer/verifier core.
+
+- `AttestoClient.Wallet` — the OID4VCI issuance flow end to end: exchange a
+  credential offer's pre-authorized code, prove the holder key, request the
+  credential, and verify each returned SD-JWT VC, `jwt_vc_json`, or mdoc. Supports
+  batch issuance and the OID4VCI §10 Notification Endpoint.
+- `AttestoClient.DPoP` — RFC 9449 DPoP proofs, sender-constraining the token and
+  credential requests (with a `use_dpop_nonce` retry).
+- `AttestoClient.WalletAttestation` / `AttestoClient.KeyAttestation` — OAuth
+  attestation-based client authentication (Client Attestation + PoP) and OID4VCI
+  key attestation, the HAIP-recommended wallet credentials.
+- `AttestoClient.Wallet.Proof` / `AttestoClient.Wallet.CredentialOffer` — the
+  holder key proof and credential-offer parsing.
+- `AttestoClient.Wallet.Presentation` / `AttestoClient.Wallet.PresentationRequest`
+  — OID4VP: verify a signed Authorization Request and build a `direct_post`
+  `vp_token` (SD-JWT VC with a holder Key Binding JWT, or an ISO 18013-5 mdoc
+  DeviceResponse), with claim minimisation.
 
 ## Example
 
@@ -142,11 +166,11 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.2`.
+a new major version. Pin to `~> 2.3`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto 1.3 or later, and JOSE
+AttestoClient requires Elixir 1.18 or later, Attesto 1.7 or later, and JOSE
 1.11.12 or later within the JOSE 1.x line. The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
 compatible releases. Both this package and `attesto` use Elixir's built-in
