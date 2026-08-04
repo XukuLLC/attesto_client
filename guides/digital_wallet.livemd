@@ -1,0 +1,231 @@
+# 🪪 A digital identity wallet, end to end, in Elixir
+
+```elixir
+Mix.install([
+  {:attesto, "~> 1.8"},
+  {:attesto_client, "~> 2.3"},
+  {:kino, "~> 0.14"},
+  {:eqrcode, "~> 0.2"}
+])
+```
+
+## What we're building
+
+Three parties, one credential — the shape of the EU Digital Identity Wallet:
+
+```mermaid
+sequenceDiagram
+  participant I as 🏛️ Issuer
+  participant W as 🪪 Wallet
+  participant V as 🔎 Verifier
+  I->>W: Issue a Person ID credential (SD-JWT VC), bound to the wallet's key
+  V->>W: "Prove only what I ask" — fresh nonce + DCQL query
+  W->>V: Present just those claims + a holder signature over the nonce
+  V->>V: Check issuer signature · holder binding · nonce · disclosed claims
+```
+
+The issuer signs a credential once, bound to the wallet's key. The verifier asks
+for *specific* claims. The wallet reveals only those — everything else never
+leaves the device. That's **selective disclosure**.
+
+Everything below runs on the published [`attesto`](https://hex.pm/packages/attesto)
+(issuer/verifier core) and [`attesto_client`](https://hex.pm/packages/attesto_client)
+(the wallet) libraries — no servers, no mocks.
+
+## Keys
+
+```elixir
+# The issuer's signing key. Its public half is the trust anchor a verifier pins.
+issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+{_kty, issuer_public} = JOSE.JWK.to_public_map(issuer_jwk)
+
+# The wallet's holder key — never leaves the wallet. The credential is bound to it,
+# and the wallet signs each presentation with it.
+holder_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+{_kty, holder_public} = JOSE.JWK.to_public_map(holder_jwk)
+
+:keys_ready
+```
+
+## 1. 🏛️ The issuer mints a credential
+
+A Person Identification Data (PID) credential, bound to the wallet's key:
+
+```elixir
+credential =
+  Attesto.SdJwtVc.issue(
+    [iss: "https://issuer.example.gov", vct: "urn:eudi:pid:1", pem: issuer_pem],
+    claims: %{
+      "given_name" => "Ada",
+      "family_name" => "Lovelace",
+      "birthdate" => "1815-12-10",
+      "nationality" => "GB",
+      "age_over_18" => true,
+      "age_over_21" => true
+    },
+    cnf: %{"jwk" => holder_public}
+  )
+
+Kino.Text.new(credential)
+```
+
+That string is a **SD-JWT VC**: an issuer-signed JWT, then one `~`-separated
+_disclosure_ per claim. Each disclosure can be revealed or withheld
+independently — the signature covers all of them either way.
+
+## 2. 🪪 The wallet receives and holds it
+
+On receipt, the wallet verifies the issuer signature before trusting anything:
+
+```elixir
+{:ok, received} = Attesto.SdJwtVc.verify(credential, issuer_public)
+
+held = %{
+  format: "dc+sd-jwt",
+  credential: credential,
+  claims: received.claims,
+  holder_binding: %{"jwk" => holder_public}
+}
+
+received.claims
+|> Map.drop(["cnf", "iss"])
+|> Enum.map(fn {k, v} -> %{"claim" => k, "value" => inspect(v)} end)
+|> Kino.DataTable.new(name: "In the wallet")
+```
+
+In a real flow the wallet would pick this up from an
+`openid-credential-offer://` link — the kind you'd scan to onboard a credential.
+Here's that QR:
+
+```elixir
+offer =
+  %{
+    "credential_issuer" => "https://issuer.example.gov",
+    "credential_configuration_ids" => ["eu.europa.ec.eudi.pid.1"],
+    "grants" => %{
+      "urn:ietf:params:oauth:grant-type:pre-authorized_code" => %{
+        "pre-authorized_code" => "demo-code-123"
+      }
+    }
+  }
+  |> JSON.encode!()
+
+("openid-credential-offer://?credential_offer=" <> URI.encode(offer))
+|> EQRCode.encode()
+|> EQRCode.svg(width: 240)
+|> Kino.HTML.new()
+```
+
+## 3. 🔎 The verifier asks — you choose what it may see
+
+Tick the claims the verifier is allowed to learn, then hit **Present**. Watch
+what reaches the verifier — and what stays locked in the wallet.
+
+Try presenting only `age_over_21`: a bar confirms you're old enough and learns
+**neither your name nor your birthdate**.
+
+```elixir
+request = %AttestoClient.Wallet.PresentationRequest{
+  client_id: "https://bar.example",
+  nonce: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false),
+  response_uri: "https://bar.example/present",
+  response_mode: "direct_post",
+  dcql_query: %{"credentials" => []}
+}
+
+pid_fields = ~w(given_name family_name birthdate nationality age_over_18 age_over_21)
+
+form =
+  Kino.Control.form(
+    for(f <- pid_fields, do: {String.to_atom(f), Kino.Input.checkbox(f, default: f == "age_over_21")}),
+    submit: "🪪 Present to verifier"
+  )
+
+frame = Kino.Frame.new()
+
+Kino.listen(form, fn %{data: data} ->
+  requested = for {field, true} <- data, do: Atom.to_string(field)
+
+  out =
+    if requested == [] do
+      Kino.Markdown.new("_Tick at least one claim for the verifier to request._")
+    else
+      # The verifier's request names only the claims it needs (DCQL).
+      req = %{
+        request
+        | dcql_query: %{
+            "credentials" => [
+              %{
+                "id" => "pid",
+                "format" => "dc+sd-jwt",
+                "meta" => %{"vct_values" => ["urn:eudi:pid:1"]},
+                "claims" => Enum.map(requested, &%{"path" => [&1]})
+              }
+            ]
+          }
+      }
+
+      # The wallet builds a presentation: only the requested disclosures, plus a
+      # Key Binding JWT signed over the verifier's nonce (so it can't be replayed).
+      {:ok, vp_token} =
+        AttestoClient.Wallet.Presentation.build_vp_token(%{"pid" => held}, req,
+          holder_keys: %{"pid" => holder_jwk}
+        )
+
+      # The verifier verifies issuer signature, holder binding, and nonce.
+      {:ok, results} =
+        Attesto.VpToken.verify(vp_token,
+          nonce: req.nonce,
+          audience: req.client_id,
+          expected_query_ids: ["pid"],
+          issuer_jwks: issuer_public
+        )
+
+      # Take just the PID data fields (ignore JWT metadata like iat/iss/vct).
+      seen = Map.take(results["pid"].claims, pid_fields)
+      hidden = pid_fields -- Map.keys(seen)
+
+      seen_rows =
+        seen
+        |> Enum.map(fn {k, v} -> "| `#{k}` | #{inspect(v)} |" end)
+        |> Enum.join("\n")
+
+      Kino.Markdown.new("""
+      ### ✅ Presentation accepted
+      Issuer signature valid · bound to the holder's key · nonce matched.
+
+      **What the verifier learned**
+
+      | claim | value |
+      |---|---|
+      #{seen_rows}
+
+      **🔒 Never left the wallet:** #{if hidden == [], do: "_(nothing — all disclosed)_", else: Enum.map_join(hidden, ", ", &"`#{&1}`")}
+      """)
+    end
+
+  Kino.Frame.render(frame, out)
+end)
+
+Kino.Layout.grid([form, frame], boxed: true, gap: 16)
+```
+
+## What just happened
+
+* The **issuer** signed the credential once, binding it to the wallet's key.
+* The **verifier** sent a fresh nonce and a DCQL query naming only the claims it needed.
+* The **wallet** returned a presentation with *only* those disclosures, plus a
+  Key Binding JWT proving possession of the bound key — signed over the nonce,
+  so a captured presentation can't be reused elsewhere.
+* The **verifier** checked the issuer signature, the holder binding, and the
+  nonce, and saw nothing beyond what it asked for.
+
+That privacy model — prove a fact without handing over the document — is the
+whole point of the EU Digital Identity Wallet, and here it's a few dozen lines
+of Elixir.
+
+The same libraries also do ISO **mdoc** (mobile driving licence), DPoP
+sender-constrained issuance, batch issuance, key/wallet attestation, and the
+full OID4VCI issuer + OID4VP verifier HTTP surface via
+[`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix).
