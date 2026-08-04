@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.3.0"
+  @version "2.3.1"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -97,10 +97,23 @@ defmodule AttestoClient.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
+      # AttestoClient.Builder and AttestoClient.OAuthHTTP are internal
+      # (@moduledoc false) collaborators intentionally named in prose to explain
+      # how the flows share proof-building and mockable HTTP. Don't autolink to
+      # them (they're hidden), which also clears the ex_doc hidden-reference
+      # warnings.
+      skip_code_autolink_to: [
+        "AttestoClient.Builder",
+        "AttestoClient.OAuthHTTP",
+        "AttestoClient.OAuthHTTP.get_json/2",
+        "AttestoClient.OAuthHTTP.get_text/2",
+        "AttestoClient.OAuthHTTP.post_form_open/3"
+      ],
       extras: [
         "README.md",
         "guides/authorization-code.md",
         "guides/resource-server.md",
+        "guides/digital_wallet.livemd",
         "CHANGELOG.md",
         "LICENSE"
       ],

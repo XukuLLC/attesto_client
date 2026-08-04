@@ -1,7 +1,7 @@
 defmodule AttestoClient.DPoP do
   @moduledoc """
   Build DPoP proof JWTs (RFC 9449 §4), the client-side mirror of
-  `Attesto.DPoP.verify/3`.
+  `Attesto.DPoP.verify_proof/2`.
 
   A proof is a JWT, typed `dpop+jwt`, whose header carries the client's *public*
   key (as `jwk`) and whose payload binds the proof to a single HTTP request:

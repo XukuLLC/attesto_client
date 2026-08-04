@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-08-03
+
+### Added
+
+- Add an end-to-end **digital wallet Livebook** (`guides/digital_wallet.livemd`),
+  now rendered in the docs. Issue an SD-JWT VC PID credential, hold it, and
+  present it to a verifier with an interactive selective-disclosure form —
+  request only `age_over_21` and watch name and birthdate stay in the wallet.
+  Runs entirely on the published `attesto` + `attesto_client` libraries.
+
 ## [2.3.0] - 2026-08-03
 
 ### Added
