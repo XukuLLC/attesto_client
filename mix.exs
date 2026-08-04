@@ -77,7 +77,7 @@ defmodule AttestoClient.MixProject do
     if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, ">= 1.7.0 and < 2.0.0"}
+      {:attesto, ">= 1.8.0 and < 2.0.0"}
     end
   end
 
