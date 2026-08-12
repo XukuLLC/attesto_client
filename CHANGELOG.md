@@ -19,8 +19,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reject unsafe RSA modulus/exponent parameters from a remote JWKS before JOSE
   constructs bignums or attempts signature verification, preventing scheduler-
   pinning verification work.
-- Require `attesto >= 1.12.2`, carrying the matching raw-key bounds and current
-  parser, wallet, and status-list hardening into every client installation.
+- Require `attesto >= 1.13.0`, carrying the matching raw-key bounds and current
+  parser, wallet, status-list, and ID-JAG hardening into every client installation.
+- Make the ID-JAG builder enforce the server's signed-claim constraints before
+  signing: a 256-byte `jti` cap, valid `scope` and `resource`, exactly one
+  supported `cnf.jkt` member, and rejection of unsupported
+  `authorization_details`.
 
 ## [2.3.1] - 2026-08-03
 

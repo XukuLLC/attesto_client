@@ -143,6 +143,29 @@ defmodule AttestoClient.IdentityAssertionTest do
       assert {:error, :invalid_time} = IdentityAssertion.build(key, base_opts(now: -1))
       assert {:error, :invalid_time} = IdentityAssertion.build(key, base_opts(nbf: -1))
       assert {:error, :invalid_jti} = IdentityAssertion.build(key, base_opts(jti: ""))
+
+      assert {:error, :invalid_jti} =
+               IdentityAssertion.build(key, base_opts(jti: String.duplicate("j", 257)))
+
+      for claims <- [
+            %{"scope" => ""},
+            %{"scope" => "   "},
+            %{"scope" => ["read"]},
+            %{"scope" => "read\nwrite"},
+            %{"resource" => "relative"},
+            %{"cnf" => %{"jkt" => "not-a-thumbprint"}},
+            %{
+              "cnf" => %{
+                "jkt" => Attesto.Thumbprint.of("supported"),
+                "x5t#S256" => Attesto.Thumbprint.of("unsupported")
+              }
+            },
+            %{"authorization_details" => [%{"type" => "payment"}]}
+          ] do
+        assert {:error, :invalid_claims} =
+                 IdentityAssertion.build(key, base_opts(claims: claims))
+      end
+
       assert {:error, :unsupported_alg} = IdentityAssertion.build(key, base_opts(alg: "none"))
 
       assert {:error, :unsupported_key} =

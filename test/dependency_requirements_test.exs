@@ -4,9 +4,9 @@ defmodule AttestoClient.DependencyRequirementsTest do
   test "Attesto retains the complete current security floor" do
     case dependency!(:attesto) do
       {:attesto, requirement} when is_binary(requirement) ->
-        assert Version.match?("1.12.2", requirement)
+        assert Version.match?("1.13.0", requirement)
         assert Version.match?("1.99.0", requirement)
-        refute Version.match?("1.12.1", requirement)
+        refute Version.match?("1.12.2", requirement)
         refute Version.match?("2.0.0", requirement)
 
       {:attesto, opts} when is_list(opts) ->

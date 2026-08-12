@@ -23,6 +23,7 @@ defmodule AttestoClient.IdentityAssertion do
   registered claims above.
   """
 
+  alias Attesto.{ResourceIndicator, Scope, Thumbprint}
   alias AttestoClient.Builder
 
   @typ "oauth-id-jag+jwt"
@@ -78,7 +79,7 @@ defmodule AttestoClient.IdentityAssertion do
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, now} <- Builder.validate_now(opts),
          {:ok, nbf} <- validate_nbf(opts),
-         {:ok, jti} <- Builder.validate_jti(opts),
+         {:ok, jti} <- validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       registered =
         %{
@@ -108,11 +109,57 @@ defmodule AttestoClient.IdentityAssertion do
             {:error, :reserved_claim_conflict}
 
           true ->
-            {:ok, claims}
+            validate_optional_claims(claims)
         end
 
       _other ->
         {:error, :invalid_claims}
+    end
+  end
+
+  defp validate_optional_claims(%{"authorization_details" => _details}),
+    do: {:error, :invalid_claims}
+
+  defp validate_optional_claims(claims) do
+    with :ok <- validate_scope(Map.fetch(claims, "scope")),
+         :ok <- validate_resource(Map.fetch(claims, "resource")),
+         :ok <- validate_cnf(Map.fetch(claims, "cnf")) do
+      {:ok, claims}
+    else
+      _ -> {:error, :invalid_claims}
+    end
+  end
+
+  defp validate_scope(:error), do: :ok
+
+  defp validate_scope({:ok, scope}) when is_binary(scope) do
+    if scope |> Scope.parse() |> Scope.valid_list?(allow_empty?: false), do: :ok, else: :error
+  end
+
+  defp validate_scope({:ok, _scope}), do: :error
+
+  defp validate_resource(:error), do: :ok
+
+  defp validate_resource({:ok, resource}) do
+    case ResourceIndicator.validate(resource) do
+      {:ok, [_ | _]} -> :ok
+      _ -> :error
+    end
+  end
+
+  defp validate_cnf(:error), do: :ok
+
+  defp validate_cnf({:ok, %{"jkt" => jkt} = cnf}) when map_size(cnf) == 1 do
+    if Thumbprint.valid?(jkt), do: :ok, else: :error
+  end
+
+  defp validate_cnf({:ok, _cnf}), do: :error
+
+  defp validate_jti(opts) do
+    case Builder.validate_jti(opts) do
+      {:ok, jti} when byte_size(jti) <= 256 -> {:ok, jti}
+      {:ok, _jti} -> {:error, :invalid_jti}
+      error -> error
     end
   end
 
