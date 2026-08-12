@@ -590,7 +590,11 @@ defmodule AttestoClient.ResourceServer do
   defp jwks_uri_from_metadata(_metadata, _issuer), do: {:error, :invalid_metadata}
 
   defp discovery_opts(state) do
-    [well_known: state.well_known, req_options: state.req_options]
+    [
+      well_known: state.well_known,
+      req_options: state.req_options,
+      max_response_bytes: state.max_response_bytes
+    ]
   end
 
   defp check_key_bound(keys, max) when keys != [] and length(keys) <= max, do: :ok

@@ -38,9 +38,15 @@ defmodule AttestoClient.Discovery do
 
   @oidc_segment "/.well-known/openid-configuration"
   @oauth_segment "/.well-known/oauth-authorization-server"
+  @default_max_response_bytes 512 * 1024
 
   @type well_known :: :openid_configuration | :oauth_authorization_server
-  @type opt :: {:well_known, well_known()} | {:req_options, keyword()}
+  @type opt ::
+          {:well_known, well_known()}
+          | {:req_options, keyword()}
+          | {:max_response_bytes, pos_integer()}
+          | {:resolver,
+             (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
 
   @type error ::
           :invalid_issuer
@@ -200,7 +206,7 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    with :ok <- guard_host(url, opts) do
+    with {:ok, target} <- screen_endpoint(url, opts) do
       # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
       # any caller `:req_options`). Otherwise the https/host validation, which
       # only covers the INITIAL URL, would be bypassed by a 3xx `Location` to an
@@ -211,12 +217,19 @@ defmodule AttestoClient.Discovery do
         |> Keyword.get(:req_options, [])
         |> Keyword.put_new(:receive_timeout, 10_000)
 
-      req = Req.new(req_options ++ [url: url, redirect: false])
+      max_bytes = max_response_bytes(opts)
+      req = request(target, req_options, max_bytes)
 
       case Req.request(req) do
         {:ok, %Req.Response{private: %{attesto_client_response_too_large: true}}} ->
           {:error, :response_too_large}
 
+        {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
+          decode_json(body)
+
+        # Req test plugs may hand back an already-decoded body even with the
+        # network-only raw/streaming options below. No socket was opened in that
+        # case, so accepting the map preserves the in-process test seam.
         {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
           {:ok, body}
 
@@ -234,23 +247,105 @@ defmodule AttestoClient.Discovery do
     error -> {:error, {:transport, Exception.message(error)}}
   end
 
-  # SSRF guard: reject a URL whose host resolves to a loopback, private,
-  # link-local, or unique-local address (RFC 1918 / RFC 4193 / 169.254.0.0/16 /
-  # 127.0.0.0/8 / ::1 / fe80::/10 / fc00::/7), so an attacker-influenced issuer
-  # or jwks_uri cannot point the fetch at an internal service or the cloud
-  # metadata endpoint. A host that does not resolve is left to the transport
-  # (it cannot reach an internal target). NOTE: this is a pre-flight check; it
-  # does not by itself defeat DNS rebinding (a connect-time peer-IP check would
-  # be required for that), but combined with `redirect: false` it closes the
-  # practical SSRF vectors.
-  defp guard_host(url, opts) do
-    if req_test_transport?(opts) do
-      :ok
-    else
-      case URI.parse(url).host do
-        host when is_binary(host) and host != "" -> check_host_addrs(host)
-        _ -> {:error, :blocked_host}
+  defp request(target, req_options, max_bytes) do
+    headers =
+      req_options
+      |> Keyword.get(:headers, [])
+      |> Enum.reject(fn {name, _value} -> String.downcase(to_string(name)) == "host" end)
+      |> List.insert_at(0, {"host", target.authority})
+
+    connect_options =
+      req_options
+      |> Keyword.get(:connect_options, [])
+      |> Keyword.put(:hostname, target.host)
+
+    req_options
+    |> Keyword.merge(
+      url: target.url,
+      headers: headers,
+      connect_options: connect_options,
+      redirect: false,
+      retry: false,
+      compressed: false,
+      raw: true,
+      into: bounded_response_into(max_bytes)
+    )
+    |> Req.new()
+  end
+
+  defp bounded_response_into(max_bytes) do
+    fn {:data, data}, {request, response} ->
+      body = if is_binary(response.body), do: response.body, else: ""
+
+      if byte_size(body) + byte_size(data) > max_bytes do
+        response = %{
+          response
+          | body: "",
+            private: Map.put(response.private, :attesto_client_response_too_large, true)
+        }
+
+        {:halt, {request, response}}
+      else
+        {:cont, {request, %{response | body: body <> data}}}
       end
+    end
+  end
+
+  defp decode_json(body) do
+    case JSON.decode(body) do
+      {:ok, %{} = decoded} -> {:ok, decoded}
+      _other -> {:error, :invalid_metadata}
+    end
+  end
+
+  defp max_response_bytes(opts) do
+    case Keyword.get(opts, :max_response_bytes, @default_max_response_bytes) do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> @default_max_response_bytes
+    end
+  end
+
+  # SSRF guard: resolve every A/AAAA answer, reject the whole set if any target
+  # is special-use, then rewrite the URL to one checked address. Mint's
+  # `connect_options[:hostname]` keeps TLS SNI and certificate verification on
+  # the original host while the socket dials that IP. This closes the DNS-
+  # rebinding window between validation and connect.
+  defp guard_host(url, opts) do
+    case screen_endpoint(url, opts) do
+      {:ok, _target} -> :ok
+      {:error, :blocked_host} = error -> error
+    end
+  end
+
+  @doc false
+  @spec screen_endpoint(String.t(), keyword()) ::
+          {:ok, %{url: String.t(), host: String.t(), authority: String.t()}}
+          | {:error, :blocked_host}
+  def screen_endpoint(url, opts \\ [])
+
+  def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
+    case URI.new(url) do
+      {:ok, %URI{scheme: "https", host: host, userinfo: nil, fragment: nil} = uri}
+      when is_binary(host) and host != "" ->
+        screen_uri(uri, opts)
+
+      _other ->
+        {:error, :blocked_host}
+    end
+  end
+
+  def screen_endpoint(_url, _opts), do: {:error, :blocked_host}
+
+  defp screen_uri(%URI{host: host} = uri, opts) do
+    if req_test_transport?(opts), do: {:ok, target(uri, host)}, else: screen_resolved(uri, opts)
+  end
+
+  defp screen_resolved(%URI{host: host} = uri, opts) do
+    with {:ok, addresses} <- resolve_addrs(host, opts),
+         false <- Enum.any?(addresses, &blocked_ip?/1) do
+      {:ok, target(uri, hd(addresses))}
+    else
+      _other -> {:error, :blocked_host}
     end
   end
 
@@ -268,33 +363,43 @@ defmodule AttestoClient.Discovery do
     plug not in [nil, false]
   end
 
-  defp check_host_addrs(host) do
-    case resolve_addrs(host) do
-      {:ok, addrs} -> if Enum.any?(addrs, &blocked_ip?/1), do: {:error, :blocked_host}, else: :ok
-      :unresolved -> :ok
-    end
-  end
-
-  defp resolve_addrs(host) do
+  defp resolve_addrs(host, opts) do
     charlist = String.to_charlist(host)
-
-    v4 =
-      case :inet.getaddrs(charlist, :inet) do
-        {:ok, addrs} -> addrs
-        _ -> []
-      end
-
-    v6 =
-      case :inet.getaddrs(charlist, :inet6) do
-        {:ok, addrs} -> addrs
-        _ -> []
-      end
+    resolver = Keyword.get(opts, :resolver, &:inet.getaddrs/2)
+    v4 = lookup(resolver, charlist, :inet)
+    v6 = lookup(resolver, charlist, :inet6)
 
     case v4 ++ v6 do
-      [] -> :unresolved
+      [] -> {:error, :unresolvable}
       addrs -> {:ok, addrs}
     end
   end
+
+  defp lookup(resolver, host, family) do
+    case resolver.(host, family) do
+      {:ok, addresses} when is_list(addresses) -> addresses
+      _other -> []
+    end
+  end
+
+  defp target(uri, host) when is_binary(host) do
+    %{url: URI.to_string(uri), host: host, authority: authority(uri)}
+  end
+
+  defp target(uri, ip) do
+    host = ip |> :inet.ntoa() |> List.to_string()
+    %{url: URI.to_string(%{uri | host: host}), host: uri.host, authority: authority(uri)}
+  end
+
+  defp authority(%URI{host: host, port: port, scheme: scheme}) do
+    host = if String.contains?(host, ":"), do: "[" <> host <> "]", else: host
+
+    if default_port?(scheme, port), do: host, else: host <> ":" <> Integer.to_string(port)
+  end
+
+  defp default_port?("https", 443), do: true
+  defp default_port?("http", 80), do: true
+  defp default_port?(_scheme, _port), do: false
 
   # IPv4 ranges that must never be the target of a server-side fetch. The
   # globally reachable anycast exceptions inside 192.0.0.0/24 remain usable.
@@ -336,6 +441,20 @@ defmodule AttestoClient.Discovery do
 
   # RFC 8215's local-use NAT64 prefix is not globally reachable.
   defp blocked_ip?({0x64, 0xFF9B, 1, _, _, _, _, _}), do: true
+
+  # 6to4 embeds an IPv4 destination in words 2-3.
+  defp blocked_ip?({0x2002, g, h, _, _, _, _, _}),
+    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
+
+  # IANA IPv6 special-purpose ranges: discard-only, Teredo, benchmarking,
+  # ORCHIDv2, documentation, SRv6 SIDs, and multicast.
+  defp blocked_ip?({0x0100, 0, 0, 0, _, _, _, _}), do: true
+  defp blocked_ip?({0x2001, 0, _, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x2001, 0x0002, 0, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word in 0x0020..0x002F, do: true
+  defp blocked_ip?({0x3FFF, _, _, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x5F00, _, _, _, _, _, _, _}), do: true
+  defp blocked_ip?({first, _, _, _, _, _, _, _}) when first in 0xFF00..0xFFFF, do: true
 
   # Other IPv6: fe80::/10 link-local, fec0::/10 deprecated site-local, or
   # fc00::/7 unique-local (bit math in the body — band/2 is not guard-safe as a

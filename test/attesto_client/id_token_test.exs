@@ -322,6 +322,23 @@ defmodule AttestoClient.IDTokenTest do
                  }
                )
     end
+
+    test "rejects a huge RSA exponent before JOSE bignum verification" do
+      jwt = sign(base_claims())
+      key = public_jwk(Keystore.signing_pem(), %{"alg" => "RS256"})
+
+      huge_exponent =
+        :binary.copy(<<0xFF>>, 100_000)
+        |> Base.url_encode64(padding: false)
+
+      hostile_key = Map.put(key, "e", huge_exponent)
+
+      {microseconds, result} =
+        :timer.tc(fn -> verify(jwt, jwks: %{"keys" => [hostile_key]}) end)
+
+      assert result == {:error, :invalid_signature}
+      assert microseconds < 500_000
+    end
   end
 
   describe "verify/2 unsigned (alg none)" do

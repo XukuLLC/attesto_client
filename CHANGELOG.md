@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-11
+
+### Security
+
+- Pin discovery and JWKS connections to an address that was screened against
+  special-use networks, while retaining TLS SNI, certificate verification, and
+  the HTTP Host authority on the original hostname. This closes the DNS-
+  rebinding interval between the prior pre-flight lookup and the socket connect.
+  A host that resolves to no address is now rejected (`:blocked_host`) rather
+  than handed to the transport — the screening path is fail-closed.
+- Bound discovery and JWKS response bodies before JSON decoding and disable
+  transparent response decompression on those trust-root fetches.
+- Reject unsafe RSA modulus/exponent parameters from a remote JWKS before JOSE
+  constructs bignums or attempts signature verification, preventing scheduler-
+  pinning verification work.
+- Require `attesto >= 1.12.2`, carrying the matching raw-key bounds and current
+  parser, wallet, and status-list hardening into every client installation.
+
 ## [2.3.1] - 2026-08-03
 
 ### Added

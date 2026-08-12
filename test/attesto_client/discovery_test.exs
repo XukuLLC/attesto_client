@@ -99,6 +99,13 @@ defmodule AttestoClient.DiscoveryTest do
     test "surfaces a non-200 status" do
       assert {:error, {:http_status, 404}} = fetch(@issuer, json_plug(404, %{"error" => "nope"}))
     end
+
+    test "bounds a discovery body before JSON decoding" do
+      oversized = %{"issuer" => @issuer, "padding" => String.duplicate("x", 256)}
+
+      assert {:error, :response_too_large} =
+               fetch(@issuer, json_plug(200, oversized), max_response_bytes: 64)
+    end
   end
 
   describe "fetch_jwks/2" do
@@ -176,7 +183,14 @@ defmodule AttestoClient.DiscoveryTest do
             "[::127.0.0.1]",
             "[64:ff9b::7f00:1]",
             "[64:ff9b:1::1]",
-            "[fec0::1]"
+            "[fec0::1]",
+            "[2002:7f00:1::]",
+            "[2001::1]",
+            "[2001:2::1]",
+            "[2001:20::1]",
+            "[3fff::1]",
+            "[5f00::1]",
+            "[ff00::1]"
           ] do
         assert {:error, :blocked_host} =
                  Discovery.validate_endpoint("https://#{host}/token"),
@@ -186,6 +200,32 @@ defmodule AttestoClient.DiscoveryTest do
       # The globally reachable NAT64 prefix remains usable when its embedded
       # IPv4 destination is public.
       assert :ok = Discovery.validate_endpoint("https://[64:ff9b::808:808]/token")
+    end
+
+    test "pins the request URL to a screened address while retaining the original authority" do
+      resolver = fn
+        _host, :inet -> {:ok, [{93, 184, 216, 34}]}
+        _host, :inet6 -> {:error, :nxdomain}
+      end
+
+      assert {:ok, target} =
+               Discovery.screen_endpoint("https://op.example.com:8443/jwks",
+                 resolver: resolver
+               )
+
+      assert target.url == "https://93.184.216.34:8443/jwks"
+      assert target.host == "op.example.com"
+      assert target.authority == "op.example.com:8443"
+    end
+
+    test "rejects a mixed DNS answer instead of pinning only its public member" do
+      resolver = fn
+        _host, :inet -> {:ok, [{93, 184, 216, 34}, {169, 254, 169, 254}]}
+        _host, :inet6 -> {:error, :nxdomain}
+      end
+
+      assert {:error, :blocked_host} =
+               Discovery.screen_endpoint("https://op.example.com/jwks", resolver: resolver)
     end
 
     test "Req plug tests bypass DNS because no network transport is used" do

@@ -272,6 +272,14 @@ defmodule AttestoClient.Verifier do
   end
 
   defp candidate(key_map, accepted_algs) do
+    # Bound RSA `n` and `e` on their raw base64url strings before JOSE turns
+    # them into bignums. A remote JWKS (or a token-selected key within it) is
+    # attacker-influenceable; decoding and verifying with a multi-hundred-KB
+    # exponent can pin a scheduler for seconds per request.
+    if !SigningAlg.rsa_params_ok?(key_map) do
+      raise ArgumentError, "RSA verification key parameters are out of safe bounds"
+    end
+
     jwk = JOSE.JWK.from_map(key_map)
 
     algs =
