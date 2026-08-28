@@ -175,7 +175,7 @@ defmodule AttestoClient.Verifier do
 
   defp discovery_opts(opts) do
     opts
-    |> Keyword.take([:well_known, :req_options])
+    |> Keyword.take([:well_known, :req_options, :resolver, :max_response_bytes, :timeout])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 

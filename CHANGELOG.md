@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-08-27
+
+### Security
+
+- Carry the screened IP address through every OAuth, wallet, discovery, and
+  JWKS request while retaining the external hostname for TLS verification,
+  SNI, HTTP authority, DPoP `htu`, and client-assertion audiences. DPoP nonce
+  retries reuse the same screened address. This closes the remaining DNS-
+  rebinding interval in the shared OAuth HTTP path.
+- Isolate protected requests from Req application defaults and caller options
+  that can replace routing, credentials, protocol bodies, redirects, TLS peer
+  identity, or the screened origin. Unsafe proxies and incompatible Finch
+  pools now fail closed; URL-keyed Req caching is disabled because different
+  HTTPS authorities can share a pinned IP and path.
+- Keep metadata and JWKS retrieval unauthenticated, force discovery requests to
+  use GET, remove hop-by-hop request headers, and include DNS resolution and
+  request preparation within the caller's overall deadline. OAuth POST response
+  bodies are now bounded before decoding as well as by-reference GET bodies.
+- Refresh the IPv6 special-purpose address policy from IANA's registry,
+  rejecting the dummy, deprecated protocol-assignment, and documentation
+  ranges and all reserved space outside conventional global unicast, while
+  retaining ordinary globally reachable allocations.
+
+### Upgrade notes
+
+- Protected network requests now reject caller-owned proxies, Finch pools,
+  adapters, and Unix sockets because they can bypass the screened destination
+  or its TLS identity. Applications that previously supplied one of those
+  routing overrides will receive `{:error, :unsafe_transport_options}` and
+  should move controlled egress routing outside the request process.
+
 ## [2.4.0] - 2026-08-11
 
 ### Security

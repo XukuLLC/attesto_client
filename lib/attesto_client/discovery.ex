@@ -33,18 +33,28 @@ defmodule AttestoClient.Discovery do
   ## HTTP
 
   Requests go through [`Req`](https://hex.pm/packages/req). Pass `:req_options`
-  to configure it - notably `plug:` for `Req.Test` in tests.
+  for safe transport configuration - notably `plug:` for `Req.Test` in tests.
+  The library owns the destination, method, authority, redirects, request body,
+  cache policy, and TLS peer identity; conflicting options are removed or fail
+  closed. Discovery and JWKS requests never carry caller credentials. Their
+  overall deadline includes DNS screening and request preparation, not only the
+  socket receive phase.
   """
 
   @oidc_segment "/.well-known/openid-configuration"
   @oauth_segment "/.well-known/oauth-authorization-server"
   @default_max_response_bytes 512 * 1024
+  @default_timeout_ms 10_000
+
+  alias AttestoClient.Deadline
+  alias AttestoClient.PinnedRequest
 
   @type well_known :: :openid_configuration | :oauth_authorization_server
   @type opt ::
           {:well_known, well_known()}
           | {:req_options, keyword()}
           | {:max_response_bytes, pos_integer()}
+          | {:timeout, pos_integer()}
           | {:resolver,
              (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
 
@@ -56,6 +66,10 @@ defmodule AttestoClient.Discovery do
           | :invalid_metadata
           | :response_too_large
           | :blocked_host
+          | :unsafe_transport_options
+          | :invalid_timeout
+          | :invalid_resolver
+          | :timeout
           | {:http_status, pos_integer()}
           | {:transport, term()}
 
@@ -65,7 +79,10 @@ defmodule AttestoClient.Discovery do
 
   `issuer` must be an `https` URL with no query or fragment. Options:
   `:well_known` (`:openid_configuration` (default) or
-  `:oauth_authorization_server`) and `:req_options` (forwarded to `Req`).
+  `:oauth_authorization_server`) and `:req_options` (safely merged into the Req
+  transport configuration as described above). `:timeout` is the overall
+  discovery deadline in milliseconds, including DNS resolution and request
+  preparation (default: 10 seconds).
   """
   @spec fetch(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch(issuer, opts \\ []) when is_list(opts) do
@@ -90,15 +107,20 @@ defmodule AttestoClient.Discovery do
   end
 
   @doc """
-  Validate an authorization-server endpoint before making a server-side
-  request. The endpoint must use HTTPS, must not contain userinfo or a fragment,
+  Preflight an authorization-server endpoint against the URL and address
+  policy. The endpoint must use HTTPS, must not contain userinfo or a fragment,
   and must not resolve to a private, loopback, or link-local address.
+
+  This check does not bind a later, separate socket connection to the address
+  it inspected, so it is not by itself a complete SSRF defense. Prefer this
+  library's request APIs, which carry the screened address through to the
+  transport while retaining the original hostname for TLS and HTTP authority.
 
   Applications normally use this indirectly through the authorization-code,
   refresh, and revocation APIs.
   """
   @spec validate_endpoint(term(), keyword()) ::
-          :ok | {:error, :invalid_endpoint | :blocked_host}
+          :ok | {:error, :invalid_endpoint | :blocked_host | :invalid_resolver}
   def validate_endpoint(endpoint, opts \\ [])
 
   def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
@@ -206,17 +228,25 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    with {:ok, target} <- screen_endpoint(url, opts) do
+    with {:ok, timeout_ms} <- request_timeout(opts) do
+      Deadline.run(fn -> perform_get_json(url, opts, timeout_ms) end, timeout_ms)
+    end
+  end
+
+  defp perform_get_json(url, opts, timeout_ms) do
+    req_options =
+      opts
+      |> Keyword.get(:req_options, [])
+      |> Keyword.put_new(:receive_timeout, timeout_ms)
+
+    with {:ok, target} <- screen_endpoint(url, opts),
+         {:ok, req_options} <-
+           PinnedRequest.prepare(target, req_options, ["authorization", "cookie"], [:auth]) do
       # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
       # any caller `:req_options`). Otherwise the https/host validation, which
       # only covers the INITIAL URL, would be bypassed by a 3xx `Location` to an
       # internal address (e.g. the cloud metadata service). A 3xx therefore
       # surfaces as `{:http_status, 3xx}` rather than being chased.
-      req_options =
-        opts
-        |> Keyword.get(:req_options, [])
-        |> Keyword.put_new(:receive_timeout, 10_000)
-
       max_bytes = max_response_bytes(opts)
       req = request(target, req_options, max_bytes)
 
@@ -247,30 +277,25 @@ defmodule AttestoClient.Discovery do
     error -> {:error, {:transport, Exception.message(error)}}
   end
 
+  defp request_timeout(opts) do
+    case Keyword.get(opts, :timeout, @default_timeout_ms) do
+      timeout when is_integer(timeout) and timeout > 0 -> {:ok, timeout}
+      _invalid -> {:error, :invalid_timeout}
+    end
+  end
+
   defp request(target, req_options, max_bytes) do
-    headers =
-      req_options
-      |> Keyword.get(:headers, [])
-      |> Enum.reject(fn {name, _value} -> String.downcase(to_string(name)) == "host" end)
-      |> List.insert_at(0, {"host", target.authority})
-
-    connect_options =
-      req_options
-      |> Keyword.get(:connect_options, [])
-      |> Keyword.put(:hostname, target.host)
-
     req_options
     |> Keyword.merge(
       url: target.url,
-      headers: headers,
-      connect_options: connect_options,
+      method: :get,
       redirect: false,
       retry: false,
       compressed: false,
       raw: true,
       into: bounded_response_into(max_bytes)
     )
-    |> Req.new()
+    |> PinnedRequest.new()
   end
 
   defp bounded_response_into(max_bytes) do
@@ -313,14 +338,14 @@ defmodule AttestoClient.Discovery do
   defp guard_host(url, opts) do
     case screen_endpoint(url, opts) do
       {:ok, _target} -> :ok
-      {:error, :blocked_host} = error -> error
+      {:error, _reason} = error -> error
     end
   end
 
   @doc false
   @spec screen_endpoint(String.t(), keyword()) ::
           {:ok, %{url: String.t(), host: String.t(), authority: String.t()}}
-          | {:error, :blocked_host}
+          | {:error, :blocked_host | :invalid_resolver}
   def screen_endpoint(url, opts \\ [])
 
   def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
@@ -341,10 +366,12 @@ defmodule AttestoClient.Discovery do
   end
 
   defp screen_resolved(%URI{host: host} = uri, opts) do
-    with {:ok, addresses} <- resolve_addrs(host, opts),
+    with {:ok, resolver} <- resolver(opts),
+         {:ok, addresses} <- resolve_addrs(host, resolver),
          false <- Enum.any?(addresses, &blocked_ip?/1) do
       {:ok, target(uri, hd(addresses))}
     else
+      {:error, :invalid_resolver} = error -> error
       _other -> {:error, :blocked_host}
     end
   end
@@ -363,15 +390,23 @@ defmodule AttestoClient.Discovery do
     plug not in [nil, false]
   end
 
-  defp resolve_addrs(host, opts) do
+  defp resolve_addrs(host, resolver) do
     charlist = String.to_charlist(host)
-    resolver = Keyword.get(opts, :resolver, &:inet.getaddrs/2)
     v4 = lookup(resolver, charlist, :inet)
     v6 = lookup(resolver, charlist, :inet6)
 
     case v4 ++ v6 do
       [] -> {:error, :unresolvable}
       addrs -> {:ok, addrs}
+    end
+  end
+
+  defp resolver(opts) do
+    case Keyword.fetch(opts, :resolver) do
+      :error -> {:ok, &:inet.getaddrs/2}
+      {:ok, nil} -> {:ok, &:inet.getaddrs/2}
+      {:ok, resolver} when is_function(resolver, 2) -> {:ok, resolver}
+      {:ok, _invalid} -> {:error, :invalid_resolver}
     end
   end
 
@@ -419,6 +454,9 @@ defmodule AttestoClient.Discovery do
   defp blocked_ip?({203, 0, 113, _}), do: true
   defp blocked_ip?({a, _, _, _}) when a in 224..255, do: true
 
+  defp blocked_ip?({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
+    do: false
+
   # IPv6 unspecified and loopback addresses.
   defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
   defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
@@ -446,24 +484,30 @@ defmodule AttestoClient.Discovery do
   defp blocked_ip?({0x2002, g, h, _, _, _, _, _}),
     do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
 
-  # IANA IPv6 special-purpose ranges: discard-only, Teredo, benchmarking,
-  # ORCHIDv2, documentation, SRv6 SIDs, and multicast.
+  # IANA IPv6 special-purpose ranges. The broad 2001::/23 protocol-assignment
+  # block is non-global except for the more-specific allocations admitted
+  # immediately below.
   defp blocked_ip?({0x0100, 0, 0, 0, _, _, _, _}), do: true
-  defp blocked_ip?({0x2001, 0, _, _, _, _, _, _}), do: true
-  defp blocked_ip?({0x2001, 0x0002, 0, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x0100, 0, 0, 1, _, _, _, _}), do: true
+  defp blocked_ip?({0x2001, 1, 0, 0, 0, 0, 0, last}) when last in 1..3, do: false
+  defp blocked_ip?({0x2001, 3, _, _, _, _, _, _}), do: false
+  defp blocked_ip?({0x2001, 4, 0x0112, _, _, _, _, _}), do: false
+  # ORCHIDv2 and DETs are globally reachable identifier prefixes, not ordinary
+  # service locators. Keep server-side HTTP fetches off both ranges.
   defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word in 0x0020..0x002F, do: true
-  defp blocked_ip?({0x3FFF, _, _, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word in 0x0030..0x003F, do: true
+  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word <= 0x01FF, do: true
+  defp blocked_ip?({0x2001, 0x0DB8, _, _, _, _, _, _}), do: true
+  defp blocked_ip?({0x3FFF, second, _, _, _, _, _, _}) when second <= 0x0FFF, do: true
   defp blocked_ip?({0x5F00, _, _, _, _, _, _, _}), do: true
   defp blocked_ip?({first, _, _, _, _, _, _, _}) when first in 0xFF00..0xFFFF, do: true
 
-  # Other IPv6: fe80::/10 link-local, fec0::/10 deprecated site-local, or
-  # fc00::/7 unique-local (bit math in the body — band/2 is not guard-safe as a
-  # qualified call).
-  defp blocked_ip?({a, _, _, _, _, _, _, _}) when is_integer(a),
-    do:
-      Bitwise.band(a, 0xFFC0) == 0xFE80 or
-        Bitwise.band(a, 0xFFC0) == 0xFEC0 or
-        Bitwise.band(a, 0xFE00) == 0xFC00
+  # Conventional global unicast occupies 2000::/3. Explicit special-purpose
+  # exclusions above still win. Everything outside it is reserved or scoped,
+  # unless an earlier translation clause safely reduced it to a public IPv4
+  # destination.
+  defp blocked_ip?({first, _, _, _, _, _, _, _}) when first in 0x2000..0x3FFF, do: false
+  defp blocked_ip?({_, _, _, _, _, _, _, _}), do: true
 
-  defp blocked_ip?(_addr), do: false
+  defp blocked_ip?(_addr), do: true
 end

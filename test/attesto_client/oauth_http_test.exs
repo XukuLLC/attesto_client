@@ -1,6 +1,7 @@
 defmodule AttestoClient.OAuthHTTPTest do
   use ExUnit.Case, async: true
 
+  alias AttestoClient.Discovery
   alias AttestoClient.OAuthHTTP
 
   @endpoint "https://op.example.com/token"
@@ -135,6 +136,44 @@ defmodule AttestoClient.OAuthHTTPTest do
     test "rejects a non-https endpoint before making the request" do
       assert {:error, :invalid_endpoint} =
                OAuthHTTP.post_json("http://issuer.example.com/credential", %{}, "at", [])
+    end
+
+    test "rejects an invalid resolver instead of silently using system DNS" do
+      assert {:error, :invalid_resolver} =
+               OAuthHTTP.get_json("https://issuer.example.com/document",
+                 resolver: fn _host -> {:ok, []} end
+               )
+    end
+
+    test "the request deadline includes DNS screening" do
+      parent = self()
+
+      slow_resolver = fn _host, _family ->
+        send(parent, :dns_screening_started)
+        Process.sleep(3_000)
+        {:ok, [{93, 184, 216, 34}]}
+      end
+
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               OAuthHTTP.get_json("https://slow-dns.example/document",
+                 resolver: slow_resolver,
+                 timeout: 20
+               )
+
+      assert_receive :dns_screening_started
+      assert System.monotonic_time(:millisecond) - started_at < 1_500
+    end
+
+    test "an invalid timeout fails before DNS resolution" do
+      parent = self()
+      resolver = fn _, _ -> send(parent, :invalid_timeout_resolved) end
+
+      assert {:error, :invalid_timeout} =
+               OAuthHTTP.get_json("https://op.example/document", resolver: resolver, timeout: 0)
+
+      refute_receive :invalid_timeout_resolved
     end
   end
 
@@ -538,5 +577,293 @@ defmodule AttestoClient.OAuthHTTPTest do
                  req_options: [plug: plain_plug]
                )
     end
+  end
+
+  describe "SSRF-safe pinned requests" do
+    @pinned_endpoint "https://service.example.test:8443/oauth/path?existing=1"
+    @pinned_url "https://93.184.216.34:8443/oauth/path?existing=1"
+    @pinned_dpop_htu "https://service.example.test:8443/oauth/path"
+
+    test "every HTTP method family preserves protocol-owned request data" do
+      basic = "Basic " <> Base.encode64("client-id:client-secret")
+
+      calls = [
+        {"form POST", basic,
+         fn opts ->
+           OAuthHTTP.post_form(
+             @pinned_endpoint,
+             %{"grant_type" => "authorization_code"},
+             [client_id: "client-id", client_auth: {:client_secret_basic, "client-secret"}] ++
+               opts
+           )
+         end, Req.Response.new(status: 200, body: %{"ok" => true}), {:ok, %{"ok" => true}}},
+        {"unit form POST", basic,
+         fn opts ->
+           OAuthHTTP.post_form_unit(
+             @pinned_endpoint,
+             %{"token" => "token"},
+             [client_id: "client-id", client_auth: {:client_secret_basic, "client-secret"}] ++
+               opts
+           )
+         end, Req.Response.new(status: 204), :ok},
+        {"JSON POST", "Bearer access-token",
+         &OAuthHTTP.post_json(@pinned_endpoint, %{"proof" => "proof"}, "access-token", &1),
+         Req.Response.new(status: 200, body: %{"ok" => true}), {:ok, %{"ok" => true}}},
+        {"unit JSON POST", "Bearer access-token",
+         &OAuthHTTP.post_json_unit(
+           @pinned_endpoint,
+           %{"event" => "accepted"},
+           "access-token",
+           &1
+         ), Req.Response.new(status: 204), :ok},
+        {"JSON GET", nil, &OAuthHTTP.get_json(@pinned_endpoint, &1),
+         Req.Response.new(status: 200, body: JSON.encode!(%{"ok" => true})),
+         {:ok, %{"ok" => true}}},
+        {"text GET", nil, &OAuthHTTP.get_text(@pinned_endpoint, &1),
+         Req.Response.new(status: 200, body: "header.payload.signature"),
+         {:ok, "header.payload.signature"}},
+        {"open form POST", nil,
+         &OAuthHTTP.post_form_open(@pinned_endpoint, %{"vp_token" => "{}"}, &1),
+         Req.Response.new(status: 200, body: %{"ok" => true}), {:ok, %{"ok" => true}}}
+      ]
+
+      Enum.each(calls, fn {name, expected_authorization, call, response, expected_result} ->
+        opts = pinned_options(self(), name, response)
+
+        assert call.(opts) == expected_result
+        assert_receive {:pinned_request, ^name, request}
+        assert_pinned_request(request, expected_authorization)
+      end)
+    end
+
+    test "DNS screening returns one immutable public-IP target" do
+      resolutions = :atomics.new(1, [])
+
+      assert {:ok, target} =
+               Discovery.screen_endpoint(@pinned_endpoint,
+                 resolver: rebinding_resolver(resolutions)
+               )
+
+      assert target.url == @pinned_url
+      assert target.host == "service.example.test"
+      assert target.authority == "service.example.test:8443"
+      assert :atomics.get(resolutions, 1) == 2
+    end
+
+    test "a DPoP nonce retry preserves external htu and protocol-owned auth headers" do
+      attempts = :atomics.new(1, [])
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, request_body, conn} = Plug.Conn.read_body(conn)
+        attempt = :atomics.add_get(attempts, 1, 1)
+        send(parent, {:pinned_dpop_attempt, attempt, request_snapshot(conn, request_body)})
+
+        if attempt == 1 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "server-nonce")
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(401, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+        end
+      end
+
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_json(@pinned_endpoint, %{}, "access-token",
+                 dpop: key,
+                 req_options: hostile_transport_options(plug)
+               )
+
+      assert_receive {:pinned_dpop_attempt, 1, first_request}
+      assert_receive {:pinned_dpop_attempt, 2, second_request}
+      refute_receive {:pinned_dpop_attempt, 3, _request}
+
+      Enum.each([first_request, second_request], fn request ->
+        assert_pinned_request(request, "DPoP access-token")
+        assert [_proof] = request_header(request, "dpop")
+      end)
+
+      [first_proof] = request_header(first_request, "dpop")
+      [second_proof] = request_header(second_request, "dpop")
+      first_claims = dpop_claims(first_proof)
+      second_claims = dpop_claims(second_proof)
+
+      # RFC 9449 normalizes `htu` by removing the query, while retaining the
+      # external authority/path rather than the pinned socket IP.
+      assert first_claims["htu"] == @pinned_dpop_htu
+      assert second_claims["htu"] == @pinned_dpop_htu
+      refute Map.has_key?(first_claims, "nonce")
+      assert second_claims["nonce"] == "server-nonce"
+      refute first_claims["jti"] == second_claims["jti"]
+
+      assert :atomics.get(attempts, 1) == 2
+    end
+
+    test "rejects proxy and custom Finch routing when a DNS name is pinned to an IP" do
+      resolver = fn
+        _host, :inet -> {:ok, [{93, 184, 216, 34}]}
+        _host, :inet6 -> {:error, :nxdomain}
+      end
+
+      unsafe_options = [
+        [connect_options: [proxy: {:http, "proxy.example", 8080, []}]],
+        [finch: __MODULE__.CustomFinch],
+        [adapter: fn request -> {request, Req.Response.new(status: 200)} end]
+      ]
+
+      Enum.each(unsafe_options, fn req_options ->
+        assert {:error, :unsafe_transport_options} =
+                 OAuthHTTP.get_json(@pinned_endpoint,
+                   resolver: resolver,
+                   req_options: req_options
+                 )
+      end)
+    end
+
+    test "bounds OAuth POST response bodies before decoding" do
+      oversized = String.duplicate("x", 2_000_001)
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, oversized) end
+
+      assert {:error, :response_too_large} =
+               OAuthHTTP.post_json(@pinned_endpoint, %{}, "access-token",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "an in-process Req plug remains compatible with a caller Finch option" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, JSON.encode!(%{"ok" => true})) end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.get_json("https://127.0.0.1/document",
+                 req_options: [plug: plug, finch: __MODULE__.CustomFinch]
+               )
+    end
+  end
+
+  defp pinned_options(parent, name, response) do
+    plug = fn conn ->
+      {:ok, request_body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:pinned_request, name, request_snapshot(conn, request_body)})
+
+      conn =
+        if is_map(response.body) do
+          Plug.Conn.put_resp_content_type(conn, "application/json")
+        else
+          conn
+        end
+
+      body =
+        case response.body do
+          nil -> ""
+          body when is_map(body) -> JSON.encode!(body)
+          body when is_binary(body) -> body
+        end
+
+      Plug.Conn.send_resp(conn, response.status, body)
+    end
+
+    [req_options: hostile_transport_options(plug)]
+  end
+
+  defp rebinding_resolver(resolutions) do
+    fn host, family ->
+      resolution = :atomics.add_get(resolutions, 1, 1)
+      assert List.to_string(host) == "service.example.test"
+
+      case {resolution, family} do
+        {1, :inet} -> {:ok, [{93, 184, 216, 34}]}
+        {2, :inet6} -> {:error, :nxdomain}
+        {_rebound, _family} -> {:ok, [{127, 0, 0, 1}]}
+      end
+    end
+  end
+
+  defp hostile_transport_options(plug) do
+    [
+      plug: plug,
+      adapter: fn _request -> raise "caller adapter ran" end,
+      url: "https://caller.invalid/override",
+      auth: {:bearer, "caller-token"},
+      headers: [
+        {"authorization", "Bearer caller-header"},
+        {"content-encoding", "gzip"},
+        {"content-length", "999"},
+        {"content-type", "text/plain"},
+        {"dpop", "caller-proof"},
+        {"host", "caller.invalid"},
+        {"oauth-client-attestation", "caller-attestation"},
+        {"oauth-client-attestation-pop", "caller-pop"},
+        {"transfer-encoding", "chunked"},
+        {"accept-encoding", "gzip"},
+        {:content_type, "application/xml"},
+        {:oauth_client_attestation, "caller-atom-attestation"},
+        {"x-trace", "preserved"}
+      ],
+      aws_sigv4: [
+        access_key_id: "caller-access-key",
+        secret_access_key: "caller-secret-key",
+        region: "us-east-1",
+        service: "execute-api"
+      ],
+      params: [reroute: "true"],
+      body: "caller-body",
+      form: [caller: "form"],
+      form_multipart: [caller: "multipart"],
+      json: %{"caller" => "json"},
+      compress_body: true,
+      finch_request: fn _, _, _, _ -> raise "caller finch_request ran" end,
+      connect_options: [
+        hostname: "caller.invalid",
+        timeout: 321,
+        transport_opts: [
+          verify: :verify_none,
+          server_name_indication: ~c"caller.invalid",
+          customize_hostname_check: [match_fun: fn _, _ -> true end],
+          verify_fun: {fn _, _, state -> {:valid, state} end, nil},
+          partial_chain: fn _ -> {:trusted_ca, :caller} end
+        ]
+      ],
+      redirect: true,
+      follow_redirects: true,
+      retry: true,
+      receive_timeout: 1
+    ]
+  end
+
+  defp assert_pinned_request(request, expected_authorization) do
+    assert request.request_path == "/oauth/path"
+    assert request.query_string == "existing=1"
+    assert request_header(request, "host") == ["service.example.test:8443"]
+    assert request_header(request, "x-trace") == ["preserved"]
+    assert request_header(request, "oauth-client-attestation") == []
+    assert request_header(request, "oauth-client-attestation-pop") == []
+    assert request_header(request, "content-encoding") == []
+    refute request_header(request, "content-type") == ["text/plain"]
+    assert request_header(request, "transfer-encoding") == []
+    assert request_header(request, "accept-encoding") == []
+    refute String.contains?(request.body, "caller")
+
+    expected = if expected_authorization, do: [expected_authorization], else: []
+    assert request_header(request, "authorization") == expected
+  end
+
+  defp request_snapshot(conn, body) do
+    %{
+      method: conn.method,
+      request_path: conn.request_path,
+      query_string: conn.query_string,
+      headers: conn.req_headers,
+      body: body
+    }
+  end
+
+  defp request_header(%{headers: headers}, name) do
+    for {header_name, value} <- headers, header_name == name, do: value
   end
 end

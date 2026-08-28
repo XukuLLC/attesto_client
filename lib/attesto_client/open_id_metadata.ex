@@ -31,9 +31,23 @@ defmodule AttestoClient.OpenIDMetadata do
 
   defp fetch_or_use(issuer, opts) do
     case Keyword.fetch(opts, :metadata) do
-      {:ok, %{} = metadata} -> {:ok, metadata}
-      {:ok, _invalid} -> {:error, :invalid_metadata}
-      :error -> Discovery.fetch(issuer, Keyword.take(opts, [:well_known, :req_options]))
+      {:ok, %{} = metadata} ->
+        {:ok, metadata}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_metadata}
+
+      :error ->
+        Discovery.fetch(
+          issuer,
+          Keyword.take(opts, [
+            :well_known,
+            :req_options,
+            :resolver,
+            :max_response_bytes,
+            :timeout
+          ])
+        )
     end
   end
 

@@ -4,30 +4,33 @@ defmodule AttestoClient.OAuthHTTP do
   alias AttestoClient.ClientAssertion
   alias AttestoClient.Deadline
   alias AttestoClient.DPoP
+  alias AttestoClient.PinnedRequest
   alias AttestoClient.WalletAttestation
 
   @default_timeout_ms 10_000
+  @max_response_bytes 2_000_000
+  @reserved_headers ~w(
+    authorization
+    content-length
+    content-type
+    dpop
+    host
+    oauth-client-attestation
+    oauth-client-attestation-pop
+  )
 
   @spec post_form(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn -> request(endpoint, form, timeout_ms, :json, opts) end,
-        timeout_ms
-      )
-    end
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      request(target, endpoint, form, timeout_ms, :json, prepared_opts)
+    end)
   end
 
   @spec post_form_unit(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def post_form_unit(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn -> request(endpoint, form, timeout_ms, :unit, opts) end,
-        timeout_ms
-      )
-    end
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      request(target, endpoint, form, timeout_ms, :unit, prepared_opts)
+    end)
   end
 
   @doc """
@@ -45,13 +48,17 @@ defmodule AttestoClient.OAuthHTTP do
   @spec post_json(String.t(), map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_json(endpoint, body, access_token, opts)
       when is_map(body) and is_binary(access_token) and access_token != "" and is_list(opts) do
-    with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn -> json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json/1) end,
-        timeout_ms
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      json_request(
+        target,
+        endpoint,
+        body,
+        access_token,
+        prepared_opts,
+        timeout_ms,
+        &classify_json/1
       )
-    end
+    end)
   end
 
   @doc """
@@ -62,15 +69,17 @@ defmodule AttestoClient.OAuthHTTP do
   @spec post_json_unit(String.t(), map(), String.t(), keyword()) :: :ok | {:error, term()}
   def post_json_unit(endpoint, body, access_token, opts)
       when is_map(body) and is_binary(access_token) and access_token != "" and is_list(opts) do
-    with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn ->
-          json_request(endpoint, body, access_token, opts, timeout_ms, &classify_json_unit/1)
-        end,
-        timeout_ms
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      json_request(
+        target,
+        endpoint,
+        body,
+        access_token,
+        prepared_opts,
+        timeout_ms,
+        &classify_json_unit/1
       )
-    end
+    end)
   end
 
   @doc """
@@ -83,13 +92,9 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec get_json(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_json(url, opts) when is_binary(url) and is_list(opts) do
-    with :ok <- validate_endpoint(url, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn -> get_request(url, req_options(opts), timeout_ms) end,
-        timeout_ms
-      )
-    end
+    run_screened(url, opts, fn target, prepared_opts, timeout_ms ->
+      get_request(target, req_options(prepared_opts), timeout_ms)
+    end)
   end
 
   @doc """
@@ -101,13 +106,9 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec get_text(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def get_text(url, opts) when is_binary(url) and is_list(opts) do
-    with :ok <- validate_endpoint(url, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
-      Deadline.run(
-        fn -> get_text_request(url, req_options(opts), timeout_ms) end,
-        timeout_ms
-      )
-    end
+    run_screened(url, opts, fn target, prepared_opts, timeout_ms ->
+      get_text_request(target, req_options(prepared_opts), timeout_ms)
+    end)
   end
 
   @doc """
@@ -121,19 +122,67 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec post_form_open(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form_open(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    with :ok <- validate_endpoint(endpoint, opts),
-         {:ok, timeout_ms} <- timeout(opts) do
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      open_request(target, form, req_options(prepared_opts), timeout_ms)
+    end)
+  end
+
+  # The overall deadline includes DNS screening and request preparation, not
+  # only the socket exchange. A slow or wedged resolver therefore cannot hold a
+  # caller past the timeout promised by the higher-level flow.
+  defp run_screened(endpoint, opts, operation) do
+    with {:ok, timeout_ms} <- timeout(opts) do
       Deadline.run(
-        fn -> open_request(endpoint, form, req_options(opts), timeout_ms) end,
+        fn -> execute_screened(endpoint, opts, timeout_ms, operation) end,
         timeout_ms
       )
     end
   end
 
-  defp validate_endpoint(endpoint, opts) do
-    AttestoClient.Discovery.validate_endpoint(endpoint,
-      req_options: Keyword.get(opts, :req_options, [])
-    )
+  defp execute_screened(endpoint, opts, timeout_ms, operation) do
+    with {:ok, target, prepared_opts} <- screen_request(endpoint, opts) do
+      operation.(target, prepared_opts, timeout_ms)
+    end
+  end
+
+  # Validate and resolve once, then retain the checked IP target for every
+  # attempt belonging to this logical request. The original endpoint remains
+  # separate because DPoP `htu` and private_key_jwt audiences name the external
+  # URI, not the IP used for the socket.
+  defp screen_request(endpoint, opts) when is_binary(endpoint) do
+    case URI.parse(endpoint) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        with {:ok, screen_opts} <- screen_options(opts),
+             {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
+             {:ok, prepared} <-
+               PinnedRequest.prepare(target, req_options(opts), @reserved_headers, [:auth]) do
+          {:ok, target, Keyword.put(opts, :req_options, prepared)}
+        end
+
+      _invalid ->
+        {:error, :invalid_endpoint}
+    end
+  end
+
+  defp screen_request(_endpoint, _opts), do: {:error, :invalid_endpoint}
+
+  defp screen_options(opts) do
+    screen_opts = [req_options: req_options(opts)]
+
+    case Keyword.fetch(opts, :resolver) do
+      :error ->
+        {:ok, screen_opts}
+
+      {:ok, nil} ->
+        {:ok, screen_opts}
+
+      {:ok, resolver} when is_function(resolver, 2) ->
+        {:ok, Keyword.put(screen_opts, :resolver, resolver)}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_resolver}
+    end
   end
 
   defp authenticate(form, endpoint, opts) do
@@ -238,7 +287,7 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
-  defp request(endpoint, form, timeout_ms, response_mode, opts) do
+  defp request(target, endpoint, form, timeout_ms, response_mode, opts) do
     # Re-authenticate per attempt: a DPoP `use_dpop_nonce` retry must carry a
     # FRESH client_assertion / client-attestation PoP (unique `jti`), not a
     # replay of the first attempt's - the server rejects reused assertion jtis.
@@ -251,12 +300,15 @@ defmodule AttestoClient.OAuthHTTP do
         {:ok,
          req_options ++
            [
-             url: endpoint,
+             url: target.url,
              method: :post,
              form: form2,
              redirect: false,
              retry: false,
-             receive_timeout: timeout_ms
+             receive_timeout: timeout_ms,
+             compressed: false,
+             raw: false,
+             into: bounded_response_into(@max_response_bytes)
            ]}
       end
     end
@@ -280,19 +332,22 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp classify_form(%Req.Response{status: status}, _mode), do: {:error, {:http_status, status}}
 
-  defp json_request(endpoint, body, access_token, opts, timeout_ms, classify) do
+  defp json_request(target, endpoint, body, access_token, opts, timeout_ms, classify) do
     dpop_ctx = dpop_context(opts, "POST", endpoint, access_token)
 
     builder = fn ->
       base =
         req_options(opts) ++
           [
-            url: endpoint,
+            url: target.url,
             method: :post,
             json: body,
             redirect: false,
             retry: false,
-            receive_timeout: timeout_ms
+            receive_timeout: timeout_ms,
+            compressed: false,
+            raw: false,
+            into: bounded_response_into(@max_response_bytes)
           ]
 
       {:ok, put_token_auth(base, access_token, dpop_ctx)}
@@ -340,7 +395,9 @@ defmodule AttestoClient.OAuthHTTP do
       |> Keyword.get(:headers, [])
       |> Enum.reject(fn {name, _value} -> String.downcase(to_string(name)) == "authorization" end)
 
-    Keyword.put(base, :headers, [{"authorization", "DPoP " <> access_token} | headers])
+    base
+    |> Keyword.delete(:auth)
+    |> Keyword.put(:headers, [{"authorization", "DPoP " <> access_token} | headers])
   end
 
   defp classify_json(%Req.Response{status: status, body: body})
@@ -387,6 +444,7 @@ defmodule AttestoClient.OAuthHTTP do
   defp send_dpop_attempt(base, proof, ctx, builder, classify, first?) do
     case send_request(base, [{"dpop", proof}]) do
       {:ok, resp} -> handle_dpop_response(resp, ctx, builder, classify, first?)
+      {:error, :response_too_large} = error -> error
       {:error, _reason} -> {:error, :transport_error}
     end
   end
@@ -451,6 +509,7 @@ defmodule AttestoClient.OAuthHTTP do
   defp send_and_classify(base, headers, classify) do
     case send_request(base, headers) do
       {:ok, resp} -> classify.(resp)
+      {:error, :response_too_large} = error -> error
       {:error, _reason} -> {:error, :transport_error}
     end
   end
@@ -467,7 +526,18 @@ defmodule AttestoClient.OAuthHTTP do
   end
 
   defp run_req(options) do
-    Req.request(Req.new(options))
+    case Req.request(PinnedRequest.new(options)) do
+      {:ok, %Req.Response{private: %{attesto_client_response_too_large: true}}} ->
+        {:error, :response_too_large}
+
+      {:ok, %Req.Response{body: body}}
+      when is_binary(body) and
+             byte_size(body) > @max_response_bytes ->
+        {:error, :response_too_large}
+
+      result ->
+        result
+    end
   rescue
     _error -> {:error, :transport_error}
   end
@@ -477,10 +547,8 @@ defmodule AttestoClient.OAuthHTTP do
   # otherwise stream an unbounded body to exhaust memory. `raw: true` also skips
   # response decompression, so a small compressed body cannot inflate past the
   # cap either.
-  @max_response_bytes 2_000_000
-
-  defp get_request(url, req_options, timeout_ms) do
-    case bounded_get(url, req_options, timeout_ms) do
+  defp get_request(target, req_options, timeout_ms) do
+    case bounded_get(target, req_options, timeout_ms) do
       {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
         case JSON.decode(body) do
           {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
@@ -495,59 +563,53 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
-  defp get_text_request(url, req_options, timeout_ms) do
-    case bounded_get(url, req_options, timeout_ms) do
+  defp get_text_request(target, req_options, timeout_ms) do
+    case bounded_get(target, req_options, timeout_ms) do
       {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> {:ok, body}
       {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp bounded_get(url, req_options, timeout_ms) do
-    collector = fn {:data, chunk}, {req, resp} ->
-      body = (resp.body || "") <> chunk
-      acc = {req, %{resp | body: body}}
-      if byte_size(body) > @max_response_bytes, do: {:halt, acc}, else: {:cont, acc}
-    end
-
+  defp bounded_get(target, req_options, timeout_ms) do
     options =
       req_options ++
         [
-          url: url,
+          url: target.url,
           method: :get,
           redirect: false,
           retry: false,
           receive_timeout: timeout_ms,
+          compressed: false,
           raw: true,
-          into: collector
+          into: bounded_response_into(@max_response_bytes)
         ]
 
-    case Req.request(Req.new(options)) do
-      {:ok, %Req.Response{body: body} = resp} ->
-        if is_binary(body) and byte_size(body) > @max_response_bytes,
-          do: {:error, :response_too_large},
-          else: {:ok, resp}
-
-      {:error, _reason} ->
-        {:error, :transport_error}
+    case run_req(options) do
+      {:ok, %Req.Response{} = response} -> {:ok, response}
+      {:error, :response_too_large} = error -> error
+      {:error, _reason} -> {:error, :transport_error}
     end
   rescue
     _error -> {:error, :transport_error}
   end
 
-  defp open_request(endpoint, form, req_options, timeout_ms) do
+  defp open_request(target, form, req_options, timeout_ms) do
     options =
       req_options ++
         [
-          url: endpoint,
+          url: target.url,
           method: :post,
           form: form,
           redirect: false,
           retry: false,
-          receive_timeout: timeout_ms
+          receive_timeout: timeout_ms,
+          compressed: false,
+          raw: false,
+          into: bounded_response_into(@max_response_bytes)
         ]
 
-    case Req.request(Req.new(options)) do
+    case run_req(options) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, json_body(body)}
 
@@ -556,6 +618,9 @@ defmodule AttestoClient.OAuthHTTP do
 
       {:ok, %Req.Response{status: status}} ->
         {:error, {:http_status, status}}
+
+      {:error, :response_too_large} = error ->
+        error
 
       {:error, _reason} ->
         {:error, :transport_error}
@@ -566,6 +631,24 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp json_body(body) when is_map(body), do: body
   defp json_body(_body), do: %{}
+
+  defp bounded_response_into(max_bytes) do
+    fn {:data, data}, {request, response} ->
+      body = if is_binary(response.body), do: response.body, else: ""
+
+      if byte_size(body) + byte_size(data) > max_bytes do
+        response = %{
+          response
+          | body: "",
+            private: Map.put(response.private, :attesto_client_response_too_large, true)
+        }
+
+        {:halt, {request, response}}
+      else
+        {:cont, {request, %{response | body: body <> data}}}
+      end
+    end
+  end
 
   defp req_options(opts), do: Keyword.get(opts, :req_options, [])
 

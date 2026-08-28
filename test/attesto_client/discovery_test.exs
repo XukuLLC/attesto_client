@@ -106,6 +106,33 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:error, :response_too_large} =
                fetch(@issuer, json_plug(200, oversized), max_response_bytes: 64)
     end
+
+    test "the overall deadline includes DNS screening" do
+      parent = self()
+
+      slow_resolver = fn _host, _family ->
+        send(parent, :discovery_dns_started)
+        Process.sleep(3_000)
+        {:ok, [{93, 184, 216, 34}]}
+      end
+
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               Discovery.fetch(@issuer, resolver: slow_resolver, timeout: 20)
+
+      assert_receive :discovery_dns_started
+      assert System.monotonic_time(:millisecond) - started_at < 1_500
+    end
+
+    test "rejects an invalid overall timeout before DNS" do
+      resolver = fn _host, _family ->
+        flunk("resolver must not run for an invalid timeout")
+      end
+
+      assert {:error, :invalid_timeout} =
+               Discovery.fetch(@issuer, resolver: resolver, timeout: 0)
+    end
   end
 
   describe "fetch_jwks/2" do
@@ -187,7 +214,14 @@ defmodule AttestoClient.DiscoveryTest do
             "[2002:7f00:1::]",
             "[2001::1]",
             "[2001:2::1]",
+            "[2001:10::1]",
+            "[2001:40::1]",
             "[2001:20::1]",
+            "[2001:30::1]",
+            "[2001:db8::1]",
+            "[100:0:0:1::1]",
+            "[4000::1]",
+            "[8000::1]",
             "[3fff::1]",
             "[5f00::1]",
             "[ff00::1]"
@@ -200,6 +234,20 @@ defmodule AttestoClient.DiscoveryTest do
       # The globally reachable NAT64 prefix remains usable when its embedded
       # IPv4 destination is public.
       assert :ok = Discovery.validate_endpoint("https://[64:ff9b::808:808]/token")
+
+      # More-specific globally reachable allocations within IANA's otherwise
+      # non-global 2001::/23 protocol-assignment block remain usable.
+      for host <- [
+            "[2001:1::1]",
+            "[2001:1::2]",
+            "[2001:1::3]",
+            "[2001:3::1]",
+            "[2001:4:112::1]"
+          ] do
+        assert :ok = Discovery.validate_endpoint("https://#{host}/token"), host
+      end
+
+      assert :ok = Discovery.validate_endpoint("https://[2606:4700:4700::1111]/token")
     end
 
     test "pins the request URL to a screened address while retaining the original authority" do
@@ -216,6 +264,96 @@ defmodule AttestoClient.DiscoveryTest do
       assert target.url == "https://93.184.216.34:8443/jwks"
       assert target.host == "op.example.com"
       assert target.authority == "op.example.com:8443"
+    end
+
+    test "rejects proxy and custom Finch routing for a DNS-pinned fetch" do
+      resolver = fn
+        _host, :inet -> {:ok, [{93, 184, 216, 34}]}
+        _host, :inet6 -> {:error, :nxdomain}
+      end
+
+      unsafe_options = [
+        [connect_options: [proxy: {:http, "proxy.example", 8080, []}]],
+        [finch: __MODULE__.CustomFinch]
+      ]
+
+      Enum.each(unsafe_options, fn req_options ->
+        assert {:error, :unsafe_transport_options} =
+                 Discovery.fetch(@issuer, resolver: resolver, req_options: req_options)
+      end)
+    end
+
+    test "late Req signing and destination options cannot replace the screened authority" do
+      resolver = fn
+        _host, :inet -> {:ok, [{93, 184, 216, 34}]}
+        _host, :inet6 -> {:error, :nxdomain}
+      end
+
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, request_body, conn} = Plug.Conn.read_body(conn)
+
+        send(parent, {
+          :screened_discovery_request,
+          %{
+            method: conn.method,
+            host: Plug.Conn.get_req_header(conn, "host"),
+            authorization: Plug.Conn.get_req_header(conn, "authorization"),
+            cookie: Plug.Conn.get_req_header(conn, "cookie"),
+            request_path: conn.request_path,
+            request_body: request_body,
+            trace: Plug.Conn.get_req_header(conn, "x-trace")
+          }
+        })
+
+        json_plug(200, %{"issuer" => @issuer}).(conn)
+      end
+
+      assert {:ok, %{"issuer" => @issuer}} =
+               Discovery.fetch(@issuer,
+                 resolver: resolver,
+                 req_options: [
+                   plug: plug,
+                   adapter: fn _request -> raise "caller adapter ran" end,
+                   auth: :netrc,
+                   headers: [
+                     {"authorization", "Bearer caller-token"},
+                     {"cookie", "session=caller"},
+                     {"x-trace", "preserved"}
+                   ],
+                   params: [reroute: "true"],
+                   follow_redirects: true,
+                   form: [caller: "form"],
+                   body: "caller-body",
+                   connect_options: [
+                     transport_opts: [
+                       verify: :verify_none,
+                       server_name_indication: ~c"caller.invalid",
+                       customize_hostname_check: [match_fun: fn _, _ -> true end],
+                       verify_fun: {fn _, _, state -> {:valid, state} end, nil},
+                       partial_chain: fn _ -> {:trusted_ca, :caller} end
+                     ]
+                   ],
+                   aws_sigv4: [
+                     access_key_id: "caller-access-key",
+                     secret_access_key: "caller-secret-key",
+                     region: "us-east-1",
+                     service: "execute-api"
+                   ]
+                 ]
+               )
+
+      assert_receive {:screened_discovery_request,
+                      %{
+                        method: "GET",
+                        host: ["op.example.com"],
+                        authorization: [],
+                        cookie: [],
+                        request_path: "/.well-known/openid-configuration",
+                        request_body: "",
+                        trace: ["preserved"]
+                      }}
     end
 
     test "rejects a mixed DNS answer instead of pinning only its public member" do
@@ -253,6 +391,11 @@ defmodule AttestoClient.DiscoveryTest do
         assert {:error, :blocked_host} =
                  Discovery.fetch("https://127.0.0.1", opts)
       end)
+    end
+
+    test "rejects an invalid resolver instead of falling back to system DNS" do
+      assert {:error, :invalid_resolver} =
+               Discovery.fetch(@issuer, resolver: fn _host -> {:ok, []} end)
     end
 
     test "does not follow redirects (a 3xx is surfaced, never chased to its Location)" do

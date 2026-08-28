@@ -593,7 +593,11 @@ defmodule AttestoClient.ResourceServer do
     [
       well_known: state.well_known,
       req_options: state.req_options,
-      max_response_bytes: state.max_response_bytes
+      max_response_bytes: state.max_response_bytes,
+      # The ResourceServer refresh timer owns the whole metadata/JWKS cycle.
+      # Keep Discovery's defensive deadline outside it rather than reusing the
+      # much shorter per-socket phase timeout from req_options.
+      timeout: state.refresh_timeout + 1_000
     ]
   end
 
@@ -635,6 +639,7 @@ defmodule AttestoClient.ResourceServer do
   end
 
   defp transient_refresh_error?({:transport, _reason}), do: true
+  defp transient_refresh_error?(:timeout), do: true
   defp transient_refresh_error?(:refresh_timeout), do: true
   defp transient_refresh_error?({:refresh_task_exit, _reason}), do: true
   defp transient_refresh_error?({:http_status, 429}), do: true
