@@ -33,10 +33,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@v1.24.1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
@@ -47,7 +47,7 @@ jobs:
       # Both self-skip when their runtime is absent, so install them here or CI
       # would silently cover less than it appears to.
       - name: Set up Python (PyJWT parity leg)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -55,7 +55,7 @@ jobs:
         run: python -m pip install --upgrade pip pyjwt cryptography
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: deps
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('**/mix.lock') }}
@@ -63,7 +63,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: _build
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ hashFiles('**/mix.lock') }}-${{ hashFiles('**/mix.exs') }}
@@ -96,7 +96,7 @@ jobs:
 
       - name: Restore PLT cache
         if: ${{ matrix.lint }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: priv/plts
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-${{ hashFiles('**/mix.lock') }}
@@ -120,25 +120,25 @@ jobs:
 
     steps:
       - name: Checkout AttestoClient
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           path: attesto_client
 
       - name: Checkout Attesto 2 source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: XukuLLC/attesto
           ref: 1f7a739e3fd61925c74c6593ddc2c16c68de53cf
           path: attesto
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@v1.24.1
         with:
           elixir-version: "1.20.1"
           otp-version: "29.0.2"
 
       - name: Set up Python (PyJWT parity leg)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
