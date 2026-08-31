@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.4.1"
+  @version "2.5.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -77,7 +77,7 @@ defmodule AttestoClient.MixProject do
     if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, ">= 1.13.0 and < 2.0.0"}
+      {:attesto, ">= 1.13.0 and < 3.0.0"}
     end
   end
 
@@ -115,11 +115,13 @@ defmodule AttestoClient.MixProject do
         "guides/resource-server.md",
         "guides/digital_wallet.livemd",
         "CHANGELOG.md",
+        "CONTRIBUTING.md",
         "LICENSE"
       ],
       groups_for_extras: [
         Guides: ~r/guides\//,
         Changelog: ~r/CHANGELOG\.md/,
+        Contributing: ~r/CONTRIBUTING\.md/,
         License: ~r/LICENSE/
       ]
     ]
@@ -133,7 +135,7 @@ defmodule AttestoClient.MixProject do
         "Changelog" => "https://hexdocs.pm/attesto_client/changelog.html",
         "GitHub" => @url
       },
-      files: ~w(lib guides LICENSE mix.exs README.md CHANGELOG.md)
+      files: ~w(lib guides LICENSE mix.exs README.md CHANGELOG.md CONTRIBUTING.md)
     ]
   end
 end

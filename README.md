@@ -45,11 +45,16 @@ and issues server artifacts with the authorization server's keystore;
 `AttestoClient` builds artifacts signed with the client's own key and verifies
 the server artifacts a client receives.
 
-On the server side of the same family,
-[`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix) is the
-batteries-included Phoenix/Ecto authorization server built on `attesto`, and
-[`attesto_mcp`](https://github.com/XukuLLC/attesto_mcp) protects a Model Context
-Protocol server as an OAuth resource server.
+The Attesto family also includes:
+
+- [`attesto`](https://hex.pm/packages/attesto) — the transport-neutral OAuth,
+  OIDC, FAPI, DPoP, and mTLS engine beneath this package.
+- [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix) — the
+  batteries-included Phoenix/Ecto authorization server built on `attesto`.
+- [`attesto_mcp`](https://hex.pm/packages/attesto_mcp) — the reusable OAuth
+  resource-server boundary for custom MCP integrations.
+- [`attesto_mcp_server`](https://hex.pm/packages/attesto_mcp_server) — the
+  batteries-included authenticated Model Context Protocol server.
 
 It does **not** make authorization decisions or own application sessions. Its
 included ETS store retains only short-lived protocol correlation data, and its
@@ -166,12 +171,13 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.3`.
+a new major version. Pin to `~> 2.5`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto 1.8 or later, and JOSE
-1.11.12 or later within the JOSE 1.x line. The JOSE range keeps the patched
+AttestoClient requires Elixir 1.18 or later, Attesto 1.13 or later within the
+Attesto 1.x or 2.x lines, and JOSE 1.11.12 or later within the JOSE 1.x line.
+The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
 compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
