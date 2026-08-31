@@ -128,7 +128,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: XukuLLC/attesto
-          ref: 63ca009d8850ccb30d2d97c89dad852016135c20
+          ref: e83e879fe84cdaaa878013ea60b5e92689b720fe
           path: attesto
 
       - name: Set up Elixir
