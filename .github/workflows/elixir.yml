@@ -110,26 +110,16 @@ jobs:
           MIX_ENV: dev
         run: mix dialyzer
 
-  attesto-2-path:
-    name: Attesto 2 path compatibility
+  attesto-2-hex:
+    name: Published Attesto 2 compatibility
     runs-on: ubuntu-latest
 
     env:
       MIX_ENV: test
-      ATTESTO_PATH: "1"
 
     steps:
-      - name: Checkout AttestoClient
+      - name: Checkout code
         uses: actions/checkout@v7.0.1
-        with:
-          path: attesto_client
-
-      - name: Checkout Attesto 2 source
-        uses: actions/checkout@v7.0.1
-        with:
-          repository: XukuLLC/attesto
-          ref: 614832dd2b3c6365afe6b0047ffdde44bed78882
-          path: attesto
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1.24.1
@@ -145,23 +135,20 @@ jobs:
       - name: Install Python parity dependencies
         run: python -m pip install --upgrade pip pyjwt cryptography
 
-      - name: Install path dependencies
-        working-directory: attesto_client
+      - name: Resolve published Attesto 2
         run: |
           mix local.hex --force
           mix local.rebar --force
+          mix deps.unlock attesto
           mix deps.get
 
-      - name: Compile against Attesto 2 source
-        working-directory: attesto_client
+      - name: Compile against published Attesto 2
         run: mix compile --warnings-as-errors
 
-      - name: Assert Attesto 2 path dependency
-        working-directory: attesto_client
+      - name: Assert published Attesto 2 dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
           unless Version.match?(version, ">= 2.0.0 and < 3.0.0"), do: System.halt(1)'
 
-      - name: Run tests against Attesto 2 source
-        working-directory: attesto_client
+      - name: Run tests against published Attesto 2
         run: mix test --trace
