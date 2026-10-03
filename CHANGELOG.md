@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Default private-key client assertion audiences to the trusted authorization
+  server issuer and emit `typ: client-authentication+jwt` for rfc7523bis-11.
+  Pass `issuer: metadata["issuer"]` to select this profile. Calls without an
+  issuer retain endpoint audiences in 2.x and emit deprecation telemetry.
+  Assertion `typ:` can be overridden or omitted for a legacy server.
+- Retry an attestation Challenge or DPoP nonce at most once each, generating
+  fresh proofs and preserving both challenges when the server requires them.
+- Validate and expose optional refresh-token expiration response durations.
+- Forward DPoP and attestation Challenge callbacks during authorization-code
+  redemption and document browser and cross-device deployment policies.
+- Require patched Mint and refresh its development/test lock.
+- Keep Hex dependency declarations during package tasks even when
+  `ATTESTO_PATH` is inherited from a source-development shell.
+
 ## [2.5.0] - 2026-08-31
 
 ### Changed

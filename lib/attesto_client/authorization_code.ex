@@ -176,8 +176,15 @@ defmodule AttestoClient.AuthorizationCode do
 
     http_opts =
       opts
-      |> Keyword.take([:client_auth, :req_options, :timeout])
+      |> Keyword.take([
+        :client_auth,
+        :req_options,
+        :timeout,
+        :dpop,
+        :attestation_challenge_received
+      ])
       |> Keyword.put(:client_id, transaction.client_id)
+      |> Keyword.put(:issuer, transaction.issuer)
 
     with {:ok, jwks} <-
            Verifier.resolve_jwks(

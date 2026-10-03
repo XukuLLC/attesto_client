@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.5.0"
+  @version "2.6.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -50,6 +50,7 @@ defmodule AttestoClient.MixProject do
       # Discovery-metadata / JWKS fetching over HTTP (the family's HTTP client,
       # as in req_dpop).
       {:req, ">= 0.6.1 and < 1.0.0"},
+      {:mint, ">= 1.10.2 and < 2.0.0"},
 
       # Optional Plug integration for inbound resource-server verification.
       {:plug, "~> 1.16.6 or ~> 1.17.4 or ~> 1.18.5 or ~> 1.19.5 or >= 1.20.3 and < 2.0.0",
@@ -74,7 +75,8 @@ defmodule AttestoClient.MixProject do
   # `mix hex.publish` runs in :dev and a path dep cannot be packaged; the default
   # - including every publish - resolves the published version constraint.
   defp attesto_dep do
-    if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") do
+    if System.get_env("ATTESTO_PATH") in ~w(1 true) and File.dir?("../attesto") and
+         not Enum.any?(System.argv(), &(&1 in ["hex.build", "hex.publish"])) do
       {:attesto, path: "../attesto"}
     else
       {:attesto, ">= 1.13.0 and < 3.0.0"}

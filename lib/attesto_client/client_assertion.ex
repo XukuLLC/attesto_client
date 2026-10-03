@@ -7,8 +7,9 @@ defmodule AttestoClient.ClientAssertion do
   authorization server verifies the assertion at its token / PAR / introspection
   endpoints; the client builds one to authenticate. The assertion is a JWT whose
   `iss` and `sub` are the `client_id` and whose `aud` is the authorization
-  server (its issuer identifier or the concrete endpoint URL, per the server's
-  policy - RFC 7523 §3 / FAPI 2.0 prefers the issuer).
+  server issuer identifier, as required by `draft-ietf-oauth-rfc7523bis-11`.
+  Assertions carry the `client-authentication+jwt` type header. Endpoint URLs
+  are not valid audiences under the revised profile.
 
   ## Claims (RFC 7523 §3)
 
@@ -43,6 +44,7 @@ defmodule AttestoClient.ClientAssertion do
           | {:audience, String.t()}
           | {:alg, String.t()}
           | {:kid, String.t()}
+          | {:typ, String.t() | nil}
           | {:lifetime, pos_integer()}
           | {:now, integer()}
           | {:jti, String.t()}
@@ -69,8 +71,7 @@ defmodule AttestoClient.ClientAssertion do
   Required options:
 
     * `:client_id` - the client identifier (becomes `iss` and `sub`).
-    * `:audience` - the authorization server the assertion is addressed to
-      (`aud`).
+    * `:audience` - the authorization server's issuer identifier (`aud`).
 
   Optional:
 
@@ -78,6 +79,8 @@ defmodule AttestoClient.ClientAssertion do
       `"PS256"` explicitly for an RSA client under FAPI.
     * `:kid` - the JOSE `kid` header; defaults to the key's own `kid` when the
       JWK carries one, otherwise omitted.
+    * `:typ` - the JOSE type header; defaults to `client-authentication+jwt`.
+      Set `nil` to omit it or a non-empty string for a registered legacy type.
     * `:lifetime` - seconds until `exp`; defaults to `#{@default_lifetime_seconds}`.
     * `:now` - issuance time (Unix seconds), for deterministic tests.
     * `:jti` - the assertion identifier; defaults to a fresh random value.
@@ -88,6 +91,7 @@ defmodule AttestoClient.ClientAssertion do
           | :invalid_audience
           | :invalid_lifetime
           | :invalid_jti
+          | :invalid_typ
           | :unsupported_alg
           | :unsupported_key
           | {:signing_failed, String.t()}
@@ -97,6 +101,7 @@ defmodule AttestoClient.ClientAssertion do
     with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
          {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
          {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
+         {:ok, typ} <- assertion_typ(opts),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
@@ -111,8 +116,31 @@ defmodule AttestoClient.ClientAssertion do
         "jti" => jti
       }
 
-      header = Builder.put_kid(%{"alg" => alg}, jose_jwk, opts)
-      Builder.sign(jose_jwk, header, claims)
+      header = %{"alg" => alg}
+      header = if is_nil(typ), do: header, else: Map.put(header, "typ", typ)
+      header = Builder.put_kid(header, jose_jwk, opts)
+      sign_assertion(jose_jwk, header, claims)
     end
+  end
+
+  defp assertion_typ(opts) do
+    case Keyword.get(opts, :typ, "client-authentication+jwt") do
+      nil -> {:ok, nil}
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _invalid -> {:error, :invalid_typ}
+    end
+  end
+
+  # JOSE.JWT.sign/3 supplies typ=JWT when absent. The lower-level signer lets
+  # callers explicitly omit typ for peers that still require a legacy header.
+  defp sign_assertion(jose_jwk, header, claims) do
+    {_jws, compact} =
+      jose_jwk
+      |> JOSE.JWS.sign(JSON.encode!(claims), header)
+      |> JOSE.JWS.compact()
+
+    {:ok, compact}
+  rescue
+    error -> {:error, {:signing_failed, Exception.message(error)}}
   end
 end

@@ -1,7 +1,7 @@
 defmodule AttestoClient.WalletAttestation do
   @moduledoc """
   Build the two JWTs of OAuth 2.0 Attestation-Based Client Authentication
-  (`draft-ietf-oauth-attestation-based-client-auth-10`), the client-side mirror
+  (`draft-ietf-oauth-attestation-based-client-auth-11`), the client-side mirror
   of `Attesto.WalletAttestation.verify/3` and the client-auth method OID4VCI
   recommends for native-app wallets over `private_key_jwt`/mTLS.
 
@@ -24,6 +24,17 @@ defmodule AttestoClient.WalletAttestation do
   `{:client_attestation, ...}` client-auth attaches both. Signing and key-bound
   `:alg`/`:kid` validation behave as in `AttestoClient.Wallet.Proof` (shared
   `AttestoClient.Builder` internals).
+
+  `OAuthHTTP` retries `use_attestation_challenge` once with a fresh PoP and
+  the response's `OAuth-Client-Attestation-Challenge`. Set `:challenge` in
+  the client-auth options to use a Challenge obtained proactively. Its
+  `:attestation_challenge_received` callback receives Challenge response
+  headers, including successful responses, so a host can retain the newest
+  Challenge for its next request. The callback receives one string.
+
+  Independent DPoP can accompany this authentication method using a separate
+  proof and key. The optional `attest_jwt_client_auth_dpop` combined mode is
+  not implemented; both attestation headers remain required.
   """
 
   alias AttestoClient.Builder
@@ -61,6 +72,7 @@ defmodule AttestoClient.WalletAttestation do
           :invalid_key
           | :invalid_client_id
           | :invalid_audience
+          | :invalid_challenge
           | :invalid_instance_key
           | :invalid_lifetime
           | :invalid_jti
@@ -129,6 +141,7 @@ defmodule AttestoClient.WalletAttestation do
     with {:ok, instance_jwk} <- Builder.normalize_key(instance_key),
          {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
          {:ok, audience} <- Builder.require_string(opts, :audience, :invalid_audience),
+         :ok <- validate_challenge(Keyword.get(opts, :challenge)),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_pop_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, now} <- Builder.validate_now(opts),
@@ -154,6 +167,10 @@ defmodule AttestoClient.WalletAttestation do
       {:ok, public}
     end
   end
+
+  defp validate_challenge(nil), do: :ok
+  defp validate_challenge(challenge) when is_binary(challenge), do: :ok
+  defp validate_challenge(_invalid), do: {:error, :invalid_challenge}
 
   defp normalize_instance_key(nil), do: {:error, :invalid_instance_key}
 

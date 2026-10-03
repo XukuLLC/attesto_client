@@ -20,6 +20,23 @@ defmodule AttestoClient.ClientAssertionTest do
   end
 
   describe "build/2" do
+    test "permits a legacy type or omission and rejects an invalid type" do
+      key = es256_key()
+      base = [client_id: @client_id, audience: @audience]
+
+      for typ <- [nil, "JWT"] do
+        assert {:ok, assertion} = ClientAssertion.build(key, Keyword.put(base, :typ, typ))
+        header = JSON.decode!(JOSE.JWS.peek_protected(assertion))
+        assert Map.get(header, "typ") == typ
+        if is_nil(typ), do: refute(Map.has_key?(header, "typ"))
+      end
+
+      for invalid <- ["", false, 42, []] do
+        assert {:error, :invalid_typ} =
+                 ClientAssertion.build(key, Keyword.put(base, :typ, invalid))
+      end
+    end
+
     test "produces an RFC 7523 assertion with iss=sub=client_id and the given aud" do
       now = 1_700_000_000
 
@@ -30,6 +47,9 @@ defmodule AttestoClient.ClientAssertionTest do
           now: now,
           lifetime: 60
         )
+
+      assert %{"typ" => "client-authentication+jwt"} =
+               assertion |> JOSE.JWS.peek_protected() |> JSON.decode!()
 
       c = claims(assertion)
       assert c["iss"] == @client_id

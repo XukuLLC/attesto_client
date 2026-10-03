@@ -7,6 +7,8 @@ defmodule AttestoClient.OAuthHTTP do
   alias AttestoClient.PinnedRequest
   alias AttestoClient.WalletAttestation
 
+  require Logger
+
   @default_timeout_ms 10_000
   @max_response_bytes 2_000_000
   @reserved_headers ~w(
@@ -214,7 +216,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp authenticate_as({:private_key_jwt, jwk, assertion_opts}, client_id, form, endpoint, opts)
        when is_binary(client_id) and client_id != "" and is_list(assertion_opts) do
-    with {:ok, build_opts} <- client_assertion_options(assertion_opts, client_id, endpoint) do
+    with {:ok, build_opts} <- client_assertion_options(assertion_opts, client_id, opts, endpoint) do
       case ClientAssertion.build(jwk, build_opts) do
         {:ok, assertion} ->
           {:ok,
@@ -267,15 +269,17 @@ defmodule AttestoClient.OAuthHTTP do
   defp authenticate_as(_invalid, _client_id, _form, _endpoint, _opts),
     do: {:error, :invalid_client_auth}
 
-  defp client_assertion_options(opts, client_id, endpoint) do
-    allowed = [:audience, :alg, :kid, :lifetime, :now, :jti]
+  defp client_assertion_options(opts, client_id, request_opts, endpoint) do
+    allowed = [:audience, :alg, :kid, :typ, :lifetime, :now, :jti]
     keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
 
     if keys != [] or opts == [] do
       if Enum.all?(keys, &(&1 in allowed)) and length(keys) == length(Enum.uniq(keys)) do
         build_opts =
           opts
-          |> Keyword.put_new(:audience, endpoint)
+          |> Keyword.put_new_lazy(:audience, fn ->
+            client_assertion_audience(request_opts, endpoint)
+          end)
           |> Keyword.put(:client_id, client_id)
 
         {:ok, build_opts}
@@ -287,14 +291,57 @@ defmodule AttestoClient.OAuthHTTP do
     end
   end
 
+  # The current major retains the RFC 7523 endpoint-audience fallback.
+  # Passing the trusted issuer selects the revised audience behavior. Explicit
+  # assertion audiences are deliberate registration compatibility settings.
+  defp client_assertion_audience(request_opts, endpoint) do
+    case Keyword.fetch(request_opts, :issuer) do
+      {:ok, issuer} ->
+        issuer
+
+      :error ->
+        :telemetry.execute(
+          [:attesto_client, :client_assertion, :legacy_endpoint_audience],
+          %{count: 1},
+          %{}
+        )
+
+        warn_legacy_assertion_audience()
+        endpoint
+    end
+  end
+
+  defp warn_legacy_assertion_audience do
+    key = {__MODULE__, :legacy_assertion_audience_warning}
+
+    unless :persistent_term.get(key, false) do
+      :global.trans(
+        {key, self()},
+        fn ->
+          unless :persistent_term.get(key, false) do
+            :persistent_term.put(key, true)
+
+            Logger.warning(
+              "private_key_jwt without :issuer uses the deprecated endpoint audience; " <>
+                "pass the trusted :issuer or an explicit assertion :audience. " <>
+                "The fallback will be removed in the next major release."
+            )
+          end
+        end,
+        [node()]
+      )
+    end
+  end
+
   defp request(target, endpoint, form, timeout_ms, response_mode, opts) do
     # Re-authenticate per attempt: a DPoP `use_dpop_nonce` retry must carry a
     # FRESH client_assertion / client-attestation PoP (unique `jti`), not a
     # replay of the first attempt's - the server rejects reused assertion jtis.
-    builder = fn retry? ->
+    builder = fn retry?, challenge ->
       # On a nonce retry, force fresh client-auth `jti`s even if the caller
       # pinned one, so the retried assertion/PoP cannot be a replay of the first.
       attempt_opts = if retry?, do: drop_client_auth_jti(opts), else: opts
+      attempt_opts = put_attestation_challenge(attempt_opts, challenge)
 
       with {:ok, form2, req_options} <- authenticate(form, endpoint, attempt_opts) do
         {:ok,
@@ -317,7 +364,9 @@ defmodule AttestoClient.OAuthHTTP do
     run_with_dpop(
       dpop_context(opts, "POST", endpoint, nil),
       builder,
-      &classify_form(&1, response_mode)
+      &classify_form(&1, response_mode),
+      attestation: match?({:client_attestation, _, _, _}, Keyword.get(opts, :client_auth)),
+      challenge_received: Keyword.get(opts, :attestation_challenge_received)
     )
   end
 
@@ -355,7 +404,7 @@ defmodule AttestoClient.OAuthHTTP do
 
     # The credential/resource request has no client_assertion, so the retry only
     # needs a fresh DPoP proof (minted per attempt below); the base is identical.
-    run_with_dpop(dpop_ctx, fn _retry? -> builder.() end, classify)
+    run_with_dpop(dpop_ctx, fn _retry?, _challenge -> builder.() end, classify)
   end
 
   # Drop a caller-pinned client-auth `jti` so re-authentication mints a fresh
@@ -374,6 +423,22 @@ defmodule AttestoClient.OAuthHTTP do
           opts,
           :client_auth,
           {:client_attestation, attestation, key, Keyword.delete(ca_opts, :jti)}
+        )
+
+      _other ->
+        opts
+    end
+  end
+
+  defp put_attestation_challenge(opts, nil), do: opts
+
+  defp put_attestation_challenge(opts, challenge) do
+    case Keyword.get(opts, :client_auth) do
+      {:client_attestation, attestation, key, ca_opts} when is_list(ca_opts) ->
+        Keyword.put(
+          opts,
+          :client_auth,
+          {:client_attestation, attestation, key, Keyword.put(ca_opts, :challenge, challenge)}
         )
 
       _other ->
@@ -419,46 +484,81 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp classify_json_unit(%Req.Response{status: status}), do: {:error, {:http_status, status}}
 
-  # RFC 9449: when `:dpop` is set, attach a fresh proof header per attempt and
-  # retry once against a `use_dpop_nonce` challenge, echoing the server's
-  # `DPoP-Nonce`. `builder` is re-run per attempt so each retry also gets fresh
-  # client-auth artifacts (a new client_assertion / client-attestation PoP),
-  # never a replay. Without `:dpop`, build and send once.
-  defp run_with_dpop(nil, builder, classify) do
-    with {:ok, base} <- builder.(false) do
-      send_and_classify(base, [], classify)
-    end
+  # Each logical request permits one retry for each independent challenge.
+  # Rebuild all proofs on every retry and retain both challenge values, so
+  # sequential attestation / DPoP challenges cannot replay proofs or loop.
+  defp run_with_dpop(ctx, builder, classify, options \\ []) do
+    state = %{
+      nonce: nil,
+      challenge: nil,
+      retry?: false,
+      dpop_retry?: not is_nil(ctx),
+      attestation_retry?: Keyword.get(options, :attestation, false),
+      challenge_received: Keyword.get(options, :challenge_received)
+    }
+
+    auth_attempt(ctx, builder, classify, state)
   end
 
-  defp run_with_dpop(ctx, builder, classify), do: dpop_attempt(ctx, builder, classify, nil, true)
-
-  # `first?` is true for the initial attempt and false for the single retry; the
-  # builder is told `retry? = not first?` so it can refresh client-auth `jti`s.
-  defp dpop_attempt(ctx, builder, classify, nonce, first?) do
-    with {:ok, base} <- builder.(not first?),
-         {:ok, proof} <- dpop_proof(ctx, nonce) do
-      send_dpop_attempt(base, proof, ctx, builder, classify, first?)
-    end
-  end
-
-  defp send_dpop_attempt(base, proof, ctx, builder, classify, first?) do
-    case send_request(base, [{"dpop", proof}]) do
-      {:ok, resp} -> handle_dpop_response(resp, ctx, builder, classify, first?)
-      {:error, :response_too_large} = error -> error
-      {:error, _reason} -> {:error, :transport_error}
-    end
-  end
-
-  defp handle_dpop_response(resp, ctx, builder, classify, first?) do
-    if first? and dpop_nonce_challenge?(resp) do
-      case dpop_nonce(resp) do
-        nil -> classify.(resp)
-        fresh -> dpop_attempt(ctx, builder, classify, fresh, false)
+  defp auth_attempt(ctx, builder, classify, state) do
+    with {:ok, base} <- builder.(state.retry?, state.challenge),
+         {:ok, headers} <- dpop_headers(ctx, state.nonce) do
+      case send_request(base, headers) do
+        {:ok, resp} -> handle_auth_response(resp, ctx, builder, classify, state)
+        {:error, :response_too_large} = error -> error
+        {:error, _reason} -> {:error, :transport_error}
       end
-    else
-      classify.(resp)
     end
   end
+
+  defp dpop_headers(nil, _nonce), do: {:ok, []}
+
+  defp dpop_headers(ctx, nonce) do
+    with {:ok, proof} <- dpop_proof(ctx, nonce), do: {:ok, [{"dpop", proof}]}
+  end
+
+  defp handle_auth_response(resp, ctx, builder, classify, state) do
+    challenge = attestation_challenge(resp)
+    notify_attestation_challenge(state.challenge_received, challenge)
+    state = if challenge, do: %{state | challenge: challenge}, else: state
+
+    cond do
+      state.attestation_retry? and attestation_challenge_error?(resp) and challenge != nil ->
+        auth_attempt(ctx, builder, classify, %{state | retry?: true, attestation_retry?: false})
+
+      state.dpop_retry? and dpop_nonce_challenge?(resp) ->
+        auth_attempt(ctx, builder, classify, %{
+          state
+          | nonce: dpop_nonce(resp),
+            retry?: true,
+            dpop_retry?: false
+        })
+
+      true ->
+        classify.(resp)
+    end
+  end
+
+  defp attestation_challenge_error?(%Req.Response{
+         status: 400,
+         body: %{"error" => "use_attestation_challenge"}
+       }),
+       do: true
+
+  defp attestation_challenge_error?(_resp), do: false
+
+  defp attestation_challenge(resp) do
+    case Req.Response.get_header(resp, "oauth-client-attestation-challenge") do
+      [challenge] when is_binary(challenge) and byte_size(challenge) in 1..1024 -> challenge
+      _other -> nil
+    end
+  end
+
+  defp notify_attestation_challenge(_callback, nil), do: :ok
+  defp notify_attestation_challenge(nil, _challenge), do: :ok
+
+  defp notify_attestation_challenge(callback, challenge) when is_function(callback, 1),
+    do: callback.(challenge)
 
   defp dpop_proof(ctx, nonce) do
     proof_opts =
@@ -503,14 +603,6 @@ defmodule AttestoClient.OAuthHTTP do
     case Req.Response.get_header(resp, "dpop-nonce") do
       [nonce | _] when is_binary(nonce) and nonce != "" -> nonce
       _ -> nil
-    end
-  end
-
-  defp send_and_classify(base, headers, classify) do
-    case send_request(base, headers) do
-      {:ok, resp} -> classify.(resp)
-      {:error, :response_too_large} = error -> error
-      {:error, _reason} -> {:error, :transport_error}
     end
   end
 

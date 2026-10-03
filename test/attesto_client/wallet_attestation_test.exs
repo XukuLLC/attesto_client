@@ -64,6 +64,19 @@ defmodule AttestoClient.WalletAttestationTest do
   end
 
   describe "pop/2" do
+    test "rejects a non-string Challenge before signing" do
+      instance = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      for invalid <- [42, [], %{}] do
+        assert {:error, :invalid_challenge} =
+                 WalletAttestation.pop(instance,
+                   client_id: @client_id,
+                   audience: @audience,
+                   challenge: invalid
+                 )
+      end
+    end
+
     test "targets one audience, carries iss/jti/iat/exp and an optional challenge" do
       instance = es256_key()
       now = 1_700_000_000

@@ -88,6 +88,79 @@ defmodule AttestoClient.OAuthHTTPTest do
     JSON.decode!(json)
   end
 
+  test "private_key_jwt prefers the trusted issuer and retains a deprecated endpoint fallback" do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    owner = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assertion = URI.decode_query(body)["client_assertion"]
+      send(owner, {:issuer_assertion, assertion})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, "{}")
+    end
+
+    opts = [
+      client_id: "issuer-client",
+      client_auth: {:private_key_jwt, key},
+      req_options: [plug: plug]
+    ]
+
+    event = [:attesto_client, :client_assertion, :legacy_endpoint_audience]
+    handler = "assertion-audience-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        event,
+        &__MODULE__.handle_legacy_audience/4,
+        owner
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, %{}} = OAuthHTTP.post_form(@endpoint, %{}, opts)
+    assert_receive {:issuer_assertion, legacy}
+    assert JSON.decode!(JOSE.JWS.peek_payload(legacy))["aud"] == @endpoint
+    assert_receive {:legacy_audience, ^event, %{count: 1}, %{}}
+
+    assert {:ok, %{}} =
+             OAuthHTTP.post_form(
+               @endpoint,
+               %{},
+               Keyword.put(opts, :issuer, "https://op.example.com")
+             )
+
+    assert_receive {:issuer_assertion, assertion}
+    assert JSON.decode!(JOSE.JWS.peek_payload(assertion))["aud"] == "https://op.example.com"
+    assert JSON.decode!(JOSE.JWS.peek_protected(assertion))["typ"] == "client-authentication+jwt"
+    refute_received {:legacy_audience, _, _, _}
+
+    # An explicitly supplied, unusable issuer must never silently fall back.
+    assert {:error, {:client_assertion, :invalid_audience}} =
+             OAuthHTTP.post_form(@endpoint, %{}, Keyword.put(opts, :issuer, nil))
+
+    refute_received {:issuer_assertion, _}
+
+    for typ <- [nil, "JWT"] do
+      auth = {:private_key_jwt, key, [typ: typ, audience: "https://op.example.com"]}
+
+      assert {:ok, %{}} =
+               OAuthHTTP.post_form(@endpoint, %{}, Keyword.put(opts, :client_auth, auth))
+
+      assert_receive {:issuer_assertion, assertion}
+      assert JSON.decode!(JOSE.JWS.peek_protected(assertion))["typ"] == typ
+      refute_received {:legacy_audience, _, _, _}
+    end
+  end
+
+  @doc false
+  def handle_legacy_audience(name, measurements, metadata, pid) do
+    send(pid, {:legacy_audience, name, measurements, metadata})
+  end
+
   describe "post_json/4" do
     test "authenticates with a bearer token and returns the decoded JSON body" do
       parent = self()
@@ -310,6 +383,7 @@ defmodule AttestoClient.OAuthHTTPTest do
                  %{"grant_type" => "authorization_code"},
                  client_id: "c",
                  client_auth: {:private_key_jwt, client_key},
+                 issuer: "https://op.example.com",
                  dpop: key,
                  req_options: [plug: plug]
                )
@@ -420,6 +494,130 @@ defmodule AttestoClient.OAuthHTTPTest do
 
       {_, instance_public} = JOSE.JWK.to_public_map(ctx.instance)
       assert jwk == instance_public
+    end
+
+    test "retries a Challenge once with a fresh PoP and reports the newest response Challenge",
+         ctx do
+      owner = self()
+
+      plug = fn conn ->
+        [pop] = Plug.Conn.get_req_header(conn, "oauth-client-attestation-pop")
+        claims = JSON.decode!(JOSE.JWS.peek_payload(pop))
+        send(owner, {:pop_attempt, claims})
+        conn = Plug.Conn.put_resp_content_type(conn, "application/json")
+
+        if claims["challenge"] == "challenge-1" do
+          conn
+          |> Plug.Conn.put_resp_header("oauth-client-attestation-challenge", "challenge-2")
+          |> Plug.Conn.send_resp(200, "{}")
+        else
+          conn
+          |> Plug.Conn.put_resp_header("oauth-client-attestation-challenge", "challenge-1")
+          |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_attestation_challenge"}))
+        end
+      end
+
+      assert {:ok, %{}} =
+               OAuthHTTP.post_form("https://op.example.com/token", %{},
+                 client_id: ctx.client_id,
+                 client_auth:
+                   {:client_attestation, ctx.attestation, ctx.instance,
+                    audience: ctx.audience, jti: "pinned-jti", challenge: "obsolete-challenge"},
+                 attestation_challenge_received: fn challenge ->
+                   send(owner, {:received_challenge, challenge})
+                 end,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:pop_attempt, first}
+      assert_receive {:pop_attempt, second}
+      assert first["jti"] == "pinned-jti"
+      assert first["challenge"] == "obsolete-challenge"
+      assert second["challenge"] == "challenge-1"
+      refute second["jti"] == first["jti"]
+      assert_receive {:received_challenge, "challenge-1"}
+      assert_receive {:received_challenge, "challenge-2"}
+      refute_receive {:pop_attempt, _}
+    end
+
+    test "attestation and DPoP challenges each permit one retry and retain the latest values",
+         ctx do
+      owner = self()
+      dpop_key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      plug = fn conn ->
+        [pop] = Plug.Conn.get_req_header(conn, "oauth-client-attestation-pop")
+        [proof] = Plug.Conn.get_req_header(conn, "dpop")
+        pop_claims = JSON.decode!(JOSE.JWS.peek_payload(pop))
+        dpop_claims = JSON.decode!(JOSE.JWS.peek_payload(proof))
+        send(owner, {:combined_attempt, pop_claims, dpop_claims})
+        conn = Plug.Conn.put_resp_content_type(conn, "application/json")
+
+        cond do
+          pop_claims["challenge"] == nil ->
+            conn
+            |> Plug.Conn.put_resp_header("oauth-client-attestation-challenge", "challenge-1")
+            |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_attestation_challenge"}))
+
+          dpop_claims["nonce"] == nil ->
+            conn
+            |> Plug.Conn.put_resp_header("oauth-client-attestation-challenge", "challenge-2")
+            |> Plug.Conn.put_resp_header("dpop-nonce", "nonce-1")
+            |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+
+          true ->
+            Plug.Conn.send_resp(conn, 200, "{}")
+        end
+      end
+
+      assert {:ok, %{}} =
+               OAuthHTTP.post_form("https://op.example.com/token", %{},
+                 client_id: ctx.client_id,
+                 client_auth:
+                   {:client_attestation, ctx.attestation, ctx.instance, audience: ctx.audience},
+                 dpop: dpop_key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:combined_attempt, pop1, dpop1}
+      assert_receive {:combined_attempt, pop2, dpop2}
+      assert_receive {:combined_attempt, pop3, dpop3}
+      assert pop2["challenge"] == "challenge-1"
+      assert pop3["challenge"] == "challenge-2"
+      assert dpop3["nonce"] == "nonce-1"
+      assert length(Enum.uniq(Enum.map([pop1, pop2, pop3], & &1["jti"]))) == 3
+      assert length(Enum.uniq(Enum.map([dpop1, dpop2, dpop3], & &1["jti"]))) == 3
+      refute_receive {:combined_attempt, _, _}
+    end
+
+    test "repeated or incomplete Challenge errors cannot retry indefinitely", ctx do
+      owner = self()
+
+      for header <- ["fresh-challenge", nil] do
+        plug = fn conn ->
+          send(owner, :attestation_attempt)
+          conn = Plug.Conn.put_resp_content_type(conn, "application/json")
+
+          conn =
+            if header,
+              do: Plug.Conn.put_resp_header(conn, "oauth-client-attestation-challenge", header),
+              else: conn
+
+          Plug.Conn.send_resp(conn, 400, JSON.encode!(%{"error" => "use_attestation_challenge"}))
+        end
+
+        assert {:error, {:oauth_error, 400, %{"error" => "use_attestation_challenge"}}} =
+                 OAuthHTTP.post_form("https://op.example.com/token", %{},
+                   client_id: ctx.client_id,
+                   client_auth:
+                     {:client_attestation, ctx.attestation, ctx.instance, audience: ctx.audience},
+                   req_options: [plug: plug]
+                 )
+
+        assert_receive :attestation_attempt
+        if header, do: assert_receive(:attestation_attempt)
+        refute_receive :attestation_attempt
+      end
     end
 
     test "fails closed when no PoP audience is supplied (no endpoint fallback)", ctx do

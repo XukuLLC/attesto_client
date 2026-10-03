@@ -26,10 +26,12 @@ defmodule AttestoClient.Token do
   @doc """
   Exchange an OID4VCI pre-authorized code for an access token
   (`urn:ietf:params:oauth:grant-type:pre-authorized_code`,
-  `draft-ietf-oauth-openid4vci` §6.1/§6.2) - the wallet-holder token step
+  `OpenID4VCI 1.0 Final` §6.1/§6.2) - the wallet-holder token step
   ahead of `AttestoClient.Wallet.request_credential/3`.
 
-  Required option: `:token_endpoint`. `:client_id`, `:client_auth`, and
+  Required option: `:token_endpoint`. Private-key JWT authentication also
+  uses `:issuer` from trusted discovery when supplied. An omitted issuer
+  retains the deprecated endpoint-audience fallback in 2.x. `:client_id`, `:client_auth`, and
   `:req_options` behave as for `refresh/4` - the pre-authorized_code grant
   still authenticates the wallet the same way any other grant does. Pass
   `:tx_code` when the offer's grant carried a `tx_code` object, i.e. the end
@@ -102,6 +104,9 @@ defmodule AttestoClient.Token do
   A successful 2xx response is `:ok`, including when the server did not know
   the token. Required options: `:revocation_endpoint`, `:client_id`; optional
   `:token_type_hint`, `:client_auth`, `:req_options`, and `:timeout`.
+  With `private_key_jwt`, pass `:issuer` from trusted discovery, or an explicit
+  registered audience in the assertion options for a legacy server. Omitting
+  both retains the deprecated endpoint-audience fallback in 2.x.
   """
   @spec revoke(String.t(), keyword()) :: :ok | {:error, term()}
   def revoke(token, opts) when is_binary(token) and token != "" and is_list(opts) do

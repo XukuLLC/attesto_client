@@ -6,6 +6,11 @@ defmodule AttestoClient.TokenSet do
   where, and for how long to retain access, refresh, and ID tokens. In
   particular, this library never creates a login session or makes an
   authorization decision from token claims.
+
+  The optional `:refresh_token_timeout` and `:authorization_expires_in`
+  durations follow `draft-ietf-oauth-refresh-token-expiration-03`. They are
+  literal seconds from the response time; absence is not proof that the
+  server implements the draft or that a credential cannot expire early.
   """
 
   @enforce_keys [:access_token, :token_type]
@@ -13,6 +18,8 @@ defmodule AttestoClient.TokenSet do
     :access_token,
     :token_type,
     :expires_in,
+    :refresh_token_timeout,
+    :authorization_expires_in,
     :refresh_token,
     :id_token,
     :scope,
@@ -23,6 +30,8 @@ defmodule AttestoClient.TokenSet do
           access_token: String.t(),
           token_type: String.t(),
           expires_in: non_neg_integer() | nil,
+          refresh_token_timeout: non_neg_integer() | nil,
+          authorization_expires_in: non_neg_integer() | nil,
           refresh_token: String.t() | nil,
           id_token: String.t() | nil,
           scope: String.t() | nil,
@@ -42,16 +51,22 @@ defmodule AttestoClient.TokenSet do
       when is_binary(access_token) and access_token != "" and is_binary(token_type) and
              token_type != "" do
     with :ok <- optional_non_negative_integer(response, "expires_in"),
+         :ok <- optional_non_negative_integer(response, "refresh_token_timeout"),
+         :ok <- optional_non_negative_integer(response, "authorization_expires_in"),
+         :ok <- validate_refresh_expiry_order(response),
          :ok <- optional_string(response, "refresh_token"),
          :ok <- optional_string(response, "id_token"),
          :ok <- optional_string(response, "scope") do
-      known = ~w(access_token token_type expires_in refresh_token id_token scope)
+      known =
+        ~w(access_token token_type expires_in refresh_token_timeout authorization_expires_in refresh_token id_token scope)
 
       {:ok,
        %__MODULE__{
          access_token: access_token,
          token_type: token_type,
          expires_in: Map.get(response, "expires_in"),
+         refresh_token_timeout: Map.get(response, "refresh_token_timeout"),
+         authorization_expires_in: Map.get(response, "authorization_expires_in"),
          refresh_token: Map.get(response, "refresh_token", old_refresh),
          id_token: Map.get(response, "id_token"),
          scope: Map.get(response, "scope", old_scope),
@@ -61,6 +76,14 @@ defmodule AttestoClient.TokenSet do
   end
 
   def from_response(_response, _old_refresh, _old_scope), do: {:error, :invalid_token_response}
+
+  defp validate_refresh_expiry_order(%{
+         "refresh_token_timeout" => timeout,
+         "authorization_expires_in" => authorization
+       })
+       when timeout > authorization, do: {:error, :invalid_token_response}
+
+  defp validate_refresh_expiry_order(_response), do: :ok
 
   defp optional_non_negative_integer(response, key) do
     case Map.fetch(response, key) do

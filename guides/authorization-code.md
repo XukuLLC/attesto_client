@@ -5,6 +5,12 @@ and nonce correlation, code exchange, ID Token verification, refresh
 single-flight, revocation, and logout request construction. Your application
 still owns authorization, durable token persistence, and session policy.
 
+For a browser frontend, use this server-side client as the backend for frontend
+described in [RFC 10017](https://www.rfc-editor.org/rfc/rfc10017.html). Keep
+OAuth tokens on the backend; protect the browser session with secure, HttpOnly
+cookies and CSRF defenses, and authenticate the backend as a confidential
+client. A browser session should end when its usable grant expires.
+
 ## Supervision
 
 The included transaction store and each refresh coordinator process are
@@ -126,12 +132,20 @@ not retain it after returning. If the response contains an ID Token,
 `result.id_token_claims` contains its verified claims; issuer, audience,
 subject, algorithm, time, and any `at_hash` are checked.
 
+When the provider implements
+[refresh-expiration draft03](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-refresh-token-expiration-03),
+`result.tokens.refresh_token_timeout` and `authorization_expires_in` carry
+validated, literal durations in seconds. Record the response time when deriving
+deadlines; a retry must not restart a previously recorded grant deadline.
+Absent fields stay `nil`, and credentials may expire earlier through revocation.
+
 ## Revocation and logout
 
 ```elixir
 :ok =
   AttestoClient.Token.revoke(tokens.refresh_token,
     revocation_endpoint: metadata["revocation_endpoint"],
+    issuer: metadata["issuer"],
     client_id: "my-client",
     client_auth: {:private_key_jwt, client_private_jwk},
     token_type_hint: "refresh_token"
