@@ -3,7 +3,7 @@
 ```elixir
 Mix.install([
   {:attesto, ">= 1.13.0 and < 3.0.0"},
-  {:attesto_client, "~> 2.5"},
+  {:attesto_client, "~> 2.6"},
   {:kino, "~> 0.14"},
   {:eqrcode, "~> 0.2"}
 ])
