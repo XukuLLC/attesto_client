@@ -273,19 +273,16 @@ defmodule AttestoClient.OAuthHTTP do
     allowed = [:audience, :alg, :kid, :typ, :lifetime, :now, :jti]
     keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
 
-    if keys != [] or opts == [] do
-      if Enum.all?(keys, &(&1 in allowed)) and length(keys) == length(Enum.uniq(keys)) do
-        build_opts =
-          opts
-          |> Keyword.put_new_lazy(:audience, fn ->
-            client_assertion_audience(request_opts, endpoint)
-          end)
-          |> Keyword.put(:client_id, client_id)
+    if (keys != [] or opts == []) and Enum.all?(keys, &(&1 in allowed)) and
+         length(keys) == length(Enum.uniq(keys)) do
+      build_opts =
+        opts
+        |> Keyword.put_new_lazy(:audience, fn ->
+          client_assertion_audience(request_opts, endpoint)
+        end)
+        |> Keyword.put(:client_id, client_id)
 
-        {:ok, build_opts}
-      else
-        {:error, :invalid_client_assertion_options}
-      end
+      {:ok, build_opts}
     else
       {:error, :invalid_client_assertion_options}
     end
@@ -317,18 +314,20 @@ defmodule AttestoClient.OAuthHTTP do
     unless :persistent_term.get(key, false) do
       :global.trans(
         {key, self()},
-        fn ->
-          unless :persistent_term.get(key, false) do
-            :persistent_term.put(key, true)
-
-            Logger.warning(
-              "private_key_jwt without :issuer uses the deprecated endpoint audience; " <>
-                "pass the trusted :issuer or an explicit assertion :audience. " <>
-                "The fallback will be removed in the next major release."
-            )
-          end
-        end,
+        fn -> emit_legacy_assertion_audience_warning(key) end,
         [node()]
+      )
+    end
+  end
+
+  defp emit_legacy_assertion_audience_warning(key) do
+    unless :persistent_term.get(key, false) do
+      :persistent_term.put(key, true)
+
+      Logger.warning(
+        "private_key_jwt without :issuer uses the deprecated endpoint audience; " <>
+          "pass the trusted :issuer or an explicit assertion :audience. " <>
+          "The fallback will be removed in the next major release."
       )
     end
   end
