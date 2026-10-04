@@ -435,5 +435,44 @@ defmodule AttestoClient.Wallet.PresentationTest do
 
       assert {:error, {:no_match, "mdl"}} = Presentation.select(wrong_type_query, [held])
     end
+
+    test "rejects an oversized encoded IssuerSigned before Base64URL decoding" do
+      {holder_jwk, holder_public} = mdoc_holder_keypair()
+
+      oversized_issuer_signed =
+        %{
+          "issuerAuth" => [],
+          "nameSpaces" => %{},
+          "padding" => :binary.copy(<<0>>, 1_048_576)
+        }
+        |> CBOR.encode()
+        |> Base.url_encode64(padding: false)
+
+      max_encoded_bytes = div(1_048_576 * 4 + 2, 3)
+      assert byte_size(oversized_issuer_signed) > max_encoded_bytes
+
+      held = %{
+        format: "mso_mdoc",
+        credential: oversized_issuer_signed,
+        claims: %{},
+        holder_binding: holder_public,
+        doc_type: @doc_type
+      }
+
+      req =
+        request(%{
+          dcql_query: %{
+            "credentials" => [
+              %{"id" => "mdl", "format" => "mso_mdoc", "meta" => %{"doctype_value" => @doc_type}}
+            ]
+          }
+        })
+
+      assert {:error, {"mdl", :invalid_credential}} =
+               Presentation.build_vp_token(%{"mdl" => held}, req,
+                 holder_keys: %{"mdl" => holder_jwk},
+                 now: @now
+               )
+    end
   end
 end

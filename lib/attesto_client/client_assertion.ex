@@ -36,6 +36,7 @@ defmodule AttestoClient.ClientAssertion do
 
   # RFC 7523 §3: assertions are short-lived; the server bounds the lifetime.
   @default_lifetime_seconds 60
+  @signing_failure_message "signing operation failed"
 
   @type jwk :: JOSE.JWK.t() | map()
 
@@ -141,6 +142,6 @@ defmodule AttestoClient.ClientAssertion do
 
     {:ok, compact}
   rescue
-    error -> {:error, {:signing_failed, Exception.message(error)}}
+    _error -> {:error, {:signing_failed, @signing_failure_message}}
   end
 end

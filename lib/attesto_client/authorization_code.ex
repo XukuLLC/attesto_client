@@ -28,6 +28,7 @@ defmodule AttestoClient.AuthorizationCode do
 
   @default_transaction_ttl_ms 10 * 60 * 1_000
   @default_timeout_ms 10_000
+  @max_callback_bytes 1_000_000
   @reserved_params ~w(client_id redirect_uri response_type scope state nonce code_challenge code_challenge_method)
 
   @type store :: Store.store()
@@ -105,8 +106,17 @@ defmodule AttestoClient.AuthorizationCode do
   @doc """
   Consume an authorization response and complete the code exchange.
 
-  `params` is the string-keyed callback parameter map. State is consumed before
-  any token request, so replay and concurrent duplicate callbacks fail.
+  The second argument may be either the original callback URI (or raw
+  `application/x-www-form-urlencoded` response body) or a string-keyed callback
+  parameter map. Prefer the encoded form: it is inspected before conversion to
+  a map and rejects repeated parameter names, including percent-encoded aliases
+  such as `co%64e` plus `code`. A framework-produced map cannot reveal names
+  that its parser already collapsed; reject duplicates at that parser or pass
+  the original URI/body here.
+
+  State is consumed before any token request, so replay and concurrent duplicate
+  callbacks fail. A malformed or ambiguous encoded response is rejected before
+  state is consumed.
   `:browser_binding` is required and must equal the opaque value supplied to
   `start/2`; a mismatch consumes state and fails before token exchange. The
   client authentication option is forwarded as `:client_auth`; supported forms
@@ -120,9 +130,15 @@ defmodule AttestoClient.AuthorizationCode do
   A timeout leaves the remote outcome unknown and the transaction consumed; do
   not retry an authorization code.
   """
-  @spec callback(store(), map(), keyword()) ::
+  @spec callback(store(), map() | String.t(), keyword()) ::
           {:ok, %{tokens: TokenSet.t(), id_token_claims: map()}} | {:error, term()}
-  def callback(store, params, opts \\ [])
+  def callback(store, response, opts \\ [])
+
+  def callback(store, response, opts) when is_binary(response) and is_list(opts) do
+    with {:ok, params} <- decode_callback_response(response) do
+      callback(store, params, opts)
+    end
+  end
 
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
     with {:ok, state} <- callback_state(params),
@@ -136,6 +152,62 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   def callback(_store, _params, _opts), do: {:error, :invalid_callback}
+
+  defp decode_callback_response(response) when byte_size(response) <= @max_callback_bytes do
+    with {:ok, query} <- callback_query(response),
+         {:ok, pairs} <- unique_callback_pairs(query) do
+      {:ok, Map.new(pairs)}
+    end
+  end
+
+  defp decode_callback_response(_response), do: {:error, :invalid_callback}
+
+  # Browser redirects supply an absolute or relative URI. OIDC `form_post`
+  # integrations can instead pass the original URL-encoded body; accepting both
+  # lets callers retain duplicate detection before their web framework builds a
+  # map. Code-flow responses never use the URI fragment.
+  defp callback_query(response) do
+    cond do
+      String.contains?(response, "?") ->
+        case URI.new(response) do
+          {:ok, %URI{query: query, fragment: nil}} when is_binary(query) -> {:ok, query}
+          _ -> {:error, :invalid_callback}
+        end
+
+      String.contains?(response, ["://", "#"]) ->
+        {:error, :invalid_callback}
+
+      true ->
+        {:ok, response}
+    end
+  end
+
+  defp unique_callback_pairs(query) do
+    query
+    |> URI.query_decoder()
+    |> Enum.reduce_while({MapSet.new(), []}, fn {key, value}, {seen, pairs} ->
+      logical_key = parameter_root(key)
+
+      if MapSet.member?(seen, logical_key) do
+        {:halt, {:error, {:duplicate_callback_parameter, logical_key}}}
+      else
+        {:cont, {MapSet.put(seen, logical_key), [{key, value} | pairs]}}
+      end
+    end)
+    |> case do
+      {:error, _reason} = error -> error
+      {_seen, pairs} -> {:ok, Enum.reverse(pairs)}
+    end
+  rescue
+    ArgumentError -> {:error, :invalid_callback}
+  end
+
+  defp parameter_root(key) do
+    case :binary.match(key, "[") do
+      {position, _length} -> binary_part(key, 0, position)
+      :nomatch -> key
+    end
+  end
 
   defp store_transaction(store, context, ttl_ms) do
     Enum.reduce_while(1..3, {:error, :state_collision}, fn _attempt, _acc ->

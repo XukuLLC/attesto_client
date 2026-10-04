@@ -183,6 +183,11 @@ compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
 working older-Elixir installation.
 
+For the coordinated security update, deploy AttestoClient 2.6.1 with Attesto
+2.2.2 or later in the 2.x line. JOSE and credential verification delegated to
+Attesto receives the new core hardening only with that update. The existing
+Attesto 1.x compatibility range remains available.
+
 Ed448 verification and OIDC hash claims additionally require JOSE to have a
 working Curve448 and SHAKE256 backend. That may come from supported native OTP
 crypto in a later JOSE 1.x release, an installed backend, or JOSE's cryptographic

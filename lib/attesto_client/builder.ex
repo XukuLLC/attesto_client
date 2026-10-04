@@ -10,6 +10,7 @@ defmodule AttestoClient.Builder do
   # and unknown values are rejected); inherited from attesto so client and server
   # share one allow-list.
   @allowed_algs SigningAlg.allowed()
+  @signing_failure_message "signing operation failed"
 
   # Normalise the client key to a `JOSE.JWK`. A `%JOSE.JWK{}` passes through; a
   # JWK map is parsed, and a malformed/unparseable map (or a non-map) is rejected
@@ -83,7 +84,7 @@ defmodule AttestoClient.Builder do
   defp validate_alg_for_key(jose_jwk, alg) do
     {:ok, SigningAlg.validate_for_key!(alg, jose_jwk)}
   rescue
-    error -> {:error, {:signing_failed, Exception.message(error)}}
+    _error -> {:error, {:signing_failed, @signing_failure_message}}
   end
 
   # Add the `kid` header: an explicit `:kid` wins, else the key's own embedded
@@ -139,7 +140,7 @@ defmodule AttestoClient.Builder do
     {_protected, compact} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
     {:ok, compact}
   rescue
-    error -> {:error, {:signing_failed, Exception.message(error)}}
+    _error -> {:error, {:signing_failed, @signing_failure_message}}
   end
 
   defp jwk_kid(%JOSE.JWK{} = jwk) do

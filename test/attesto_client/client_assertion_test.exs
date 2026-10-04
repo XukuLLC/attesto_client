@@ -164,12 +164,30 @@ defmodule AttestoClient.ClientAssertionTest do
     test "a key/algorithm mismatch preserves the signing_failed error tuple" do
       key = es256_key()
 
-      assert {:error, {:signing_failed, _message}} =
+      assert {:error, {:signing_failed, "signing operation failed"}} =
                ClientAssertion.build(key,
                  client_id: @client_id,
                  audience: @audience,
                  alg: "RS256"
                )
+    end
+
+    test "a signing backend failure does not expose private key material" do
+      key = es256_key()
+      {:jose_jwk_kty_ec, private_key} = key.kty
+      private_sentinel = "private-signing-sentinel-that-must-not-escape"
+      malformed_private_key = put_elem(private_key, 2, private_sentinel)
+      malformed_key = %{key | kty: {:jose_jwk_kty_ec, malformed_private_key}}
+
+      assert {:error, {:signing_failed, message}} =
+               ClientAssertion.build(malformed_key,
+                 client_id: @client_id,
+                 audience: @audience,
+                 alg: "ES256"
+               )
+
+      assert message == "signing operation failed"
+      refute message =~ private_sentinel
     end
 
     test "an unsupported key type (symmetric oct) fails as unsupported_key, not a raise" do

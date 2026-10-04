@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-10-04
+
+### Security
+
+- Bound compact JWS values and their protected/signature segments before
+  splitting or decoding, require canonical Base64URL, and reject duplicate JSON
+  members at every nesting depth before verifying signed claims.
+- Accept an original callback URI or raw form body in the authorization-code
+  client, bound the encoded input to 1,000,000 bytes, and reject repeated or
+  percent-encoded alias parameter names before state is consumed. Map input
+  remains available for integrations whose parser already enforces uniqueness.
+- Bound encoded mdoc credentials before Base64URL decoding and normalize signing
+  failures so exception text cannot expose private key material.
+- Keep Attesto 1.x compatibility. Deploy with Attesto 2.2.2 or later in the 2.x
+  line to include hardening of delegated core JOSE and credential verification.
+
 ## [2.6.0] - 2026-10-03
 
 ### Changed

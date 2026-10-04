@@ -6,6 +6,17 @@ defmodule AttestoClient.Verifier do
 
   @minimum_rsa_bits 2048
 
+  # Compact JOSE values arrive before authentication. Bound the encoded input
+  # before splitting or decoding it so a hostile token cannot force an
+  # unbounded separator list or Base64URL allocation. The per-segment ceilings
+  # follow Authlib's hardened 256 KiB limit; the 1 MiB total also bounds the
+  # payload while leaving ample room for ordinary JWT claims and x5c headers.
+  @max_compact_bytes 1_048_576
+  @max_protected_segment_bytes 256 * 1_024
+  @max_signature_segment_bytes 256 * 1_024
+
+  @type compact_segments :: {binary(), binary(), binary()}
+
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
 
   @spec require_string(keyword(), atom(), term()) :: {:ok, String.t()} | {:error, term()}
@@ -68,8 +79,9 @@ defmodule AttestoClient.Verifier do
 
   def verify_signature(jwt, keys, accepted_algs, opts)
       when is_binary(jwt) and is_list(keys) and is_list(accepted_algs) and is_list(opts) do
-    with :ok <- check_compact_form(jwt),
-         {:ok, header} <- peek_header(jwt),
+    with {:ok, segments} <- parse_compact(jwt),
+         {:ok, header} <- decode_header(segments),
+         {:ok, _claims} <- decode_payload(segments),
          :ok <- check_crit(header),
          {:ok, candidates} <- candidates(keys, header, accepted_algs, opts),
          {:ok, claims, verified_jwk} <- verify_against_any(jwt, candidates) do
@@ -102,12 +114,10 @@ defmodule AttestoClient.Verifier do
   """
   @spec decode_unsigned(String.t()) :: {:ok, map(), map()} | {:error, :invalid_token}
   def decode_unsigned(jwt) when is_binary(jwt) do
-    with :ok <- check_compact_form(jwt),
-         {:ok, %{"alg" => "none"} = header} <- peek_header(jwt),
+    with {:ok, {_, _payload, ""} = segments} <- parse_compact(jwt),
+         {:ok, %{"alg" => "none"} = header} <- decode_header(segments),
          :ok <- check_crit_result(header),
-         [_header, payload, ""] <- String.split(jwt, "."),
-         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, %{} = claims} <- JSON.decode(decoded) do
+         {:ok, claims} <- decode_payload(segments) do
       {:ok, claims, header}
     else
       _other -> {:error, :invalid_token}
@@ -179,17 +189,23 @@ defmodule AttestoClient.Verifier do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
-  defp check_compact_form(jwt) do
-    case String.split(jwt, ".") do
-      [_, _, _] = segments ->
-        if Enum.all?(segments, &canonical_base64url?/1),
-          do: :ok,
-          else: {:error, :invalid_token}
-
-      _other ->
-        {:error, :invalid_token}
+  # Split at most twice, then scan the final segment for one extra separator.
+  # A global split allocates one list entry per attacker-supplied period before
+  # it can reject the wrong part count.
+  defp parse_compact(jwt) when byte_size(jwt) <= @max_compact_bytes do
+    with [protected, rest] <- :binary.split(jwt, "."),
+         [payload, signature] <- :binary.split(rest, "."),
+         :nomatch <- :binary.match(signature, "."),
+         true <- byte_size(protected) <= @max_protected_segment_bytes,
+         true <- byte_size(signature) <= @max_signature_segment_bytes,
+         true <- Enum.all?([protected, payload, signature], &canonical_base64url?/1) do
+      {:ok, {protected, payload, signature}}
+    else
+      _other -> {:error, :invalid_token}
     end
   end
+
+  defp parse_compact(_jwt), do: {:error, :invalid_token}
 
   defp canonical_base64url?(segment) do
     case Base.url_decode64(segment, padding: false) do
@@ -201,13 +217,46 @@ defmodule AttestoClient.Verifier do
   @doc false
   @spec peek_header(String.t()) :: {:ok, map()} | {:error, :invalid_token}
   def peek_header(jwt) do
-    with [header, _payload, _signature] <- String.split(jwt, ".", parts: 3),
-         {:ok, decoded} <- Base.url_decode64(header, padding: false),
-         {:ok, %{} = map} <- JSON.decode(decoded) do
+    with {:ok, segments} <- parse_compact(jwt), do: decode_header(segments)
+  end
+
+  defp decode_header({header, _payload, _signature}) do
+    with {:ok, decoded} <- Base.url_decode64(header, padding: false),
+         {:ok, map} <- decode_json_map(decoded) do
       {:ok, map}
     else
       _ -> {:error, :invalid_token}
     end
+  end
+
+  defp decode_payload({_header, payload, _signature}) do
+    with {:ok, decoded} <- Base.url_decode64(payload, padding: false),
+         {:ok, map} <- decode_json_map(decoded) do
+      {:ok, map}
+    else
+      _ -> {:error, :invalid_token}
+    end
+  end
+
+  defp decode_json_map(bytes) do
+    decoders = [
+      object_start: fn _old_acc -> %{} end,
+      object_push: fn key, value, object ->
+        if Map.has_key?(object, key),
+          do: throw(:duplicate_json_member),
+          else: Map.put(object, key, value)
+      end,
+      object_finish: fn object, old_acc -> {object, old_acc} end
+    ]
+
+    case JSON.decode(bytes, nil, decoders) do
+      {%{} = map, nil, ""} -> {:ok, map}
+      _other -> {:error, :invalid_token}
+    end
+  rescue
+    _error -> {:error, :invalid_token}
+  catch
+    :duplicate_json_member -> {:error, :invalid_token}
   end
 
   defp check_crit(header) do

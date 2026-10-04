@@ -86,6 +86,14 @@ defmodule AttestoClient.IDTokenTest do
     jwt
   end
 
+  defp sign_raw_payload(payload) when is_binary(payload) do
+    pem = Keystore.signing_pem()
+    jwk = Attesto.Key.signing_jwk(pem)
+    header = %{"alg" => "RS256", "kid" => Attesto.Key.kid(pem), "typ" => "JWT"}
+    {_, jwt} = jwk |> JOSE.JWS.sign(payload, header) |> JOSE.JWS.compact()
+    jwt
+  end
+
   describe "verify/2 success" do
     test "verifies an ID token minted by attesto with nonce and hash claims" do
       access_token = "access-token-123"
@@ -338,6 +346,58 @@ defmodule AttestoClient.IDTokenTest do
 
       assert result == {:error, :invalid_signature}
       assert microseconds < 500_000
+    end
+  end
+
+  describe "verify/2 compact input bounds" do
+    test "rejects an oversized protected header before signature verification" do
+      protected =
+        %{"alg" => "RS256", "padding" => String.duplicate("a", 200_000)}
+        |> JSON.encode!()
+        |> Base.url_encode64(padding: false)
+
+      payload = base_claims() |> JSON.encode!() |> Base.url_encode64(padding: false)
+      jwt = Enum.join([protected, payload, "AA"], ".")
+
+      assert byte_size(protected) > 256 * 1_024
+      assert byte_size(jwt) < 1_048_576
+      assert {:error, :invalid_token} = verify(jwt)
+    end
+
+    test "rejects an oversized signature segment before JOSE verification" do
+      [protected, payload, _signature] = sign(base_claims()) |> String.split(".")
+      signature = :binary.copy("A", 256 * 1_024 + 4)
+      jwt = Enum.join([protected, payload, signature], ".")
+
+      assert byte_size(jwt) < 1_048_576
+      assert {:error, :invalid_token} = verify(jwt)
+    end
+
+    test "rejects an oversized unsigned token before payload decoding" do
+      jwt = unsigned(base_claims(%{"padding" => String.duplicate("a", 768 * 1_024)}))
+
+      assert byte_size(jwt) > 1_048_576
+      assert {:error, :invalid_token} = verify(jwt, allow_unsigned: true)
+    end
+
+    test "rejects a separator flood through the bounded compact parser" do
+      jwt = :binary.copy("e30.", 50_000) <> "e30"
+
+      assert byte_size(jwt) < 1_048_576
+      assert {:error, :invalid_token} = verify(jwt)
+    end
+
+    test "rejects duplicate JSON members before claims are used" do
+      duplicate_payload =
+        ~s({"iss":"#{@issuer}","iss":["#{@issuer}","https://evil.example"],"sub":"#{@subject}","aud":"#{@client_id}","iat":#{@now},"exp":#{@now + 600}})
+
+      assert {:error, :invalid_token} = duplicate_payload |> sign_raw_payload() |> verify()
+
+      duplicate_header = ~s({"alg":"RS256","alg":"none","typ":"JWT"})
+      payload = base_claims() |> JSON.encode!() |> Base.url_encode64(padding: false)
+      jwt = Base.url_encode64(duplicate_header, padding: false) <> "." <> payload <> ".AA"
+
+      assert {:error, :invalid_token} = verify(jwt)
     end
   end
 

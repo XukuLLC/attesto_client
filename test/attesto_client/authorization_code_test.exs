@@ -403,6 +403,63 @@ defmodule AttestoClient.AuthorizationCodeTest do
              )
   end
 
+  test "rejects duplicate parameters in the original callback before consuming state" do
+    store = start_supervised!(ETS)
+    assert {:ok, started} = start_flow(store)
+
+    callback_uri =
+      "https://rp.example.com/callback?state=#{started.state}&code=first&co%64e=second"
+
+    assert {:error, {:duplicate_callback_parameter, "code"}} =
+             callback({ETS, store}, callback_uri)
+
+    # Ambiguity is rejected before the one-time transaction is taken.
+    assert {:error, :browser_binding_mismatch} =
+             AuthorizationCode.callback(
+               {ETS, store},
+               %{"state" => started.state, "code" => "code"},
+               browser_binding: "different-browser"
+             )
+  end
+
+  test "accepts an unambiguous raw callback query" do
+    store = start_supervised!(ETS)
+    assert {:ok, started} = start_flow(store)
+
+    assert {:error, :browser_binding_mismatch} =
+             AuthorizationCode.callback(
+               {ETS, store},
+               "state=#{started.state}&code=code",
+               browser_binding: "different-browser"
+             )
+
+    assert {:error, {:invalid_state, :not_found}} =
+             callback({ETS, store}, %{"state" => started.state, "code" => "code"})
+  end
+
+  test "rejects duplicate state, error metadata, and nested-name aliases in encoded responses" do
+    store = start_supervised!(ETS)
+
+    for encoded <- [
+          "state=first&st%61te=second&code=code",
+          "state=state&error=denied&error_description=first&error_description=second",
+          "state=state&code=first&code[]=second"
+        ] do
+      assert {:error, {:duplicate_callback_parameter, _parameter}} =
+               callback({ETS, store}, encoded)
+    end
+  end
+
+  test "rejects malformed callback locations and bounds encoded callback input" do
+    store = start_supervised!(ETS)
+
+    assert {:error, :invalid_callback} =
+             callback({ETS, store}, "https://rp.example.com/callback#code=code&state=state")
+
+    assert {:error, :invalid_callback} =
+             callback({ETS, store}, "code=" <> String.duplicate("a", 1_000_000))
+  end
+
   test "a token-endpoint timeout is bounded, never retried, and consumes state" do
     store = start_supervised!(ETS)
     counter = start_supervised!({Agent, fn -> 0 end})

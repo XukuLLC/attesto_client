@@ -111,7 +111,7 @@ jobs:
         run: mix dialyzer
 
   attesto-2-hex:
-    name: Published Attesto 2 compatibility
+    name: Published Attesto 2.2.2 security compatibility
     runs-on: ubuntu-latest
 
     env:
@@ -145,10 +145,10 @@ jobs:
       - name: Compile against published Attesto 2
         run: mix compile --warnings-as-errors
 
-      - name: Assert published Attesto 2 dependency
+      - name: Assert published hardened Attesto dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
-          unless Version.match?(version, ">= 2.0.0 and < 3.0.0"), do: System.halt(1)'
+          unless Version.match?(version, ">= 2.2.2 and < 3.0.0"), do: System.halt(1)'
 
       - name: Run tests against published Attesto 2
         run: mix test --trace

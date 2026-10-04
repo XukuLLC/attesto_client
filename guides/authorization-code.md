@@ -81,12 +81,13 @@ clients.
 
 ## Handle the callback
 
-Pass the callback's string-keyed parameter map. State is consumed before the
-token request, including for provider errors and invalid responses:
+Pass the original callback URI or raw URL-encoded query whenever it is
+available. The client rejects repeated names before building a map, including
+equivalent percent-encoded names such as `code` and `co%64e`:
 
 ```elixir
 {:ok, completed} =
-  AttestoClient.AuthorizationCode.callback(store, callback_params,
+  AttestoClient.AuthorizationCode.callback(store, conn.query_string,
     browser_binding: browser_binding_from_secure_session,
     client_auth: {:private_key_jwt, client_private_jwk},
     timeout: 10_000
@@ -95,6 +96,15 @@ token request, including for provider errors and invalid responses:
 claims = completed.id_token_claims
 tokens = completed.tokens
 ```
+
+A string-keyed parameter map remains accepted for framework integrations. A map
+cannot reveal duplicate names that the framework already collapsed, so the host
+must reject duplicates before parsing when the original URI or body is not
+passed to `callback/3`.
+
+State is consumed before the token request, including for provider errors and
+invalid responses. An ambiguous encoded response is rejected before state is
+consumed.
 
 A timeout means the token endpoint outcome is unknown. The code and transaction
 have already been consumed and must not be retried.

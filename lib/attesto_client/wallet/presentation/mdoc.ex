@@ -25,6 +25,12 @@ if Code.ensure_loaded?(CBOR) do
     @doc_status 0
     @version "1.0"
 
+    # Attesto's mdoc decoder caps raw CBOR at 1 MiB. Apply the equivalent
+    # unpadded Base64URL ceiling before decoding so an oversized held
+    # credential cannot allocate its full decoded representation first.
+    @max_issuer_signed_bytes 1_048_576
+    @max_encoded_issuer_signed_bytes div(@max_issuer_signed_bytes * 4 + 2, 3)
+
     @type error :: :invalid_credential | :invalid_key
 
     @doc """
@@ -89,7 +95,9 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
-    defp decode_issuer_signed(%{credential: credential}) when is_binary(credential) do
+    defp decode_issuer_signed(%{credential: credential})
+         when is_binary(credential) and
+                byte_size(credential) <= @max_encoded_issuer_signed_bytes do
       with {:ok, bytes} <- JWS.decode64(credential),
            {:ok, %{"issuerAuth" => _issuer_auth, "nameSpaces" => _name_spaces} = issuer_signed,
             ""} <-
