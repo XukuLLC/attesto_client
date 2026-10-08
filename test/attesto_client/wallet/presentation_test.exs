@@ -33,7 +33,8 @@ defmodule AttestoClient.Wallet.PresentationTest do
               }
             ]
           },
-          state: nil
+          state: nil,
+          client_metadata: %{"vp_formats_supported" => %{"dc+sd-jwt" => %{}, "mso_mdoc" => %{}}}
         },
         overrides
       )
@@ -73,7 +74,19 @@ defmodule AttestoClient.Wallet.PresentationTest do
       {holder_jwk, holder_public} = ec_keypair()
 
       held = issue_held_sd_jwt(issuer_pem, holder_public)
-      req = request()
+
+      req =
+        request(%{
+          dcql_query: %{
+            "credentials" => [
+              %{
+                "id" => "identity",
+                "format" => "dc+sd-jwt",
+                "claims" => [%{"path" => ["given_name"]}, %{"path" => ["family_name"]}]
+              }
+            ]
+          }
+        })
 
       assert {:ok, vp_token} =
                Presentation.build_vp_token(%{"identity" => held}, req,
@@ -81,10 +94,10 @@ defmodule AttestoClient.Wallet.PresentationTest do
                  now: @now
                )
 
-      assert %{"identity" => presentation} = vp_token
+      assert %{"identity" => [presentation]} = vp_token
       assert is_binary(presentation)
 
-      assert {:ok, %{"identity" => result}} =
+      assert {:ok, %{"identity" => [result]}} =
                VpToken.verify(vp_token,
                  nonce: req.nonce,
                  audience: req.client_id,
@@ -118,14 +131,14 @@ defmodule AttestoClient.Wallet.PresentationTest do
           }
         })
 
-      assert {:ok, %{"identity" => presentation}} =
+      assert {:ok, %{"identity" => [presentation]}} =
                Presentation.build_vp_token(%{"identity" => held}, req,
                  holder_keys: %{"identity" => holder_jwk},
                  now: @now
                )
 
-      assert {:ok, %{"identity" => result}} =
-               VpToken.verify(%{"identity" => presentation},
+      assert {:ok, %{"identity" => [result]}} =
+               VpToken.verify(%{"identity" => [presentation]},
                  nonce: req.nonce,
                  audience: req.client_id,
                  issuer_jwks: issuer_jwks_for(issuer_pem),
@@ -154,7 +167,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
                Presentation.build_vp_token(%{"identity" => held}, req, now: @now)
     end
 
-    test "rejects direct_post.jwt (not yet supported)" do
+    test "rejects direct_post.jwt without authenticated encryption metadata" do
       issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
       {holder_jwk, holder_public} = ec_keypair()
@@ -162,7 +175,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
       held = issue_held_sd_jwt(issuer_pem, holder_public)
       req = request(%{response_mode: "direct_post.jwt"})
 
-      assert {:error, :unsupported_response_mode} =
+      assert {:error, :invalid_encryption_metadata} =
                Presentation.build_vp_token(%{"identity" => held}, req,
                  holder_keys: %{"identity" => holder_jwk}
                )
@@ -203,7 +216,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
       held = %{
         format: "dc+sd-jwt",
         credential: credential,
-        claims: %{"vct" => "identity"},
+        claims: %{"vct" => "identity", "name" => "TopValue"},
         holder_binding: %{"jwk" => holder_public}
       }
 
@@ -216,7 +229,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
           }
         })
 
-      assert {:ok, %{"identity" => presentation}} =
+      assert {:ok, %{"identity" => [presentation]}} =
                Presentation.build_vp_token(%{"identity" => held}, req,
                  holder_keys: %{"identity" => holder_jwk},
                  now: @now
@@ -226,10 +239,10 @@ defmodule AttestoClient.Wallet.PresentationTest do
       refute String.contains?(presentation, nested)
     end
 
-    test "submit/3 refuses direct_post.jwt even with a caller-built vp_token" do
+    test "submit/3 refuses plaintext downgrade without encryption metadata" do
       req = request(%{response_mode: "direct_post.jwt"})
 
-      assert {:error, :unsupported_response_mode} =
+      assert {:error, :invalid_encryption_metadata} =
                Presentation.submit(req, %{"identity" => "eyJ..."}, [])
     end
 
@@ -308,7 +321,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
 
     test "submit/3 POSTs the JSON-encoded vp_token and state" do
       req = request(%{state: "state-xyz"})
-      vp_token = %{"identity" => "presentation-string"}
+      vp_token = %{"identity" => ["presentation-string"]}
 
       assert {:ok, %{"ok" => true}} =
                Presentation.submit(req, vp_token, req_options: [plug: form_plug(self())])
@@ -324,7 +337,19 @@ defmodule AttestoClient.Wallet.PresentationTest do
       {holder_jwk, holder_public} = ec_keypair()
 
       held = issue_held_sd_jwt(issuer_pem, holder_public)
-      req = request()
+
+      req =
+        request(%{
+          dcql_query: %{
+            "credentials" => [
+              %{
+                "id" => "identity",
+                "format" => "dc+sd-jwt",
+                "claims" => [%{"path" => ["given_name"]}]
+              }
+            ]
+          }
+        })
 
       assert {:ok, %{"ok" => true}} =
                Presentation.present(req, [held],
@@ -334,10 +359,10 @@ defmodule AttestoClient.Wallet.PresentationTest do
                )
 
       assert_receive {:submitted, form}
-      assert %{"identity" => presentation} = JSON.decode!(form["vp_token"])
+      assert %{"identity" => [presentation]} = JSON.decode!(form["vp_token"])
 
-      assert {:ok, %{"identity" => result}} =
-               VpToken.verify(%{"identity" => presentation},
+      assert {:ok, %{"identity" => [result]}} =
+               VpToken.verify(%{"identity" => [presentation]},
                  nonce: req.nonce,
                  audience: req.client_id,
                  issuer_jwks: issuer_jwks_for(issuer_pem),
@@ -384,19 +409,27 @@ defmodule AttestoClient.Wallet.PresentationTest do
         request(%{
           dcql_query: %{
             "credentials" => [
-              %{"id" => "mdl", "format" => "mso_mdoc", "meta" => %{"doctype_value" => @doc_type}}
+              %{
+                "id" => "mdl",
+                "format" => "mso_mdoc",
+                "meta" => %{"doctype_value" => @doc_type},
+                "claims" => [
+                  %{"path" => [@mdl_namespace, "given_name"]},
+                  %{"path" => [@mdl_namespace, "family_name"]}
+                ]
+              }
             ]
           }
         })
 
-      assert {:ok, %{"mdl" => device_response}} =
+      assert {:ok, %{"mdl" => [device_response]}} =
                Presentation.build_vp_token(%{"mdl" => held}, req,
                  holder_keys: %{"mdl" => holder_jwk},
                  now: @now
                )
 
-      assert {:ok, %{"mdl" => result}} =
-               VpToken.verify(%{"mdl" => device_response},
+      assert {:ok, %{"mdl" => [result]}} =
+               VpToken.verify(%{"mdl" => [device_response]},
                  nonce: req.nonce,
                  audience: req.client_id,
                  issuer_jwks: issuer_jwks_for(issuer_pem),
@@ -468,7 +501,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
           }
         })
 
-      assert {:error, {"mdl", :invalid_credential}} =
+      assert {:error, {"mdl", :incompatible_verifier_format}} =
                Presentation.build_vp_token(%{"mdl" => held}, req,
                  holder_keys: %{"mdl" => holder_jwk},
                  now: @now

@@ -137,7 +137,14 @@ defmodule AttestoClient.Builder do
   @spec sign(JOSE.JWK.t(), map(), map()) ::
           {:ok, String.t()} | {:error, {:signing_failed, String.t()}}
   def sign(jose_jwk, header, claims) do
-    {_protected, compact} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+    compact =
+      if header["alg"] in ~w(PS256 PS384 PS512) do
+        Attesto.JWS.sign_compact_jwk(jose_jwk, Map.put_new(header, "typ", "JWT"), claims)
+      else
+        {_protected, signed} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+        signed
+      end
+
     {:ok, compact}
   rescue
     _error -> {:error, {:signing_failed, @signing_failure_message}}

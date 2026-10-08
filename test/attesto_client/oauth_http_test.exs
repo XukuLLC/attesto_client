@@ -747,10 +747,10 @@ defmodule AttestoClient.OAuthHTTPTest do
       assert_receive {:request, %{"vp_token" => "{}", "state" => "state-1"}}
     end
 
-    test "treats a non-JSON success body as an empty map" do
+    test "rejects a non-JSON success body" do
       plug = fn conn -> Plug.Conn.send_resp(conn, 200, "") end
 
-      assert {:ok, %{}} =
+      assert {:error, :invalid_response_content_type} =
                OAuthHTTP.post_form_open("https://verifier.example.com/response", %{},
                  req_options: [plug: plug]
                )
@@ -830,7 +830,7 @@ defmodule AttestoClient.OAuthHTTPTest do
 
         assert call.(opts) == expected_result
         assert_receive {:pinned_request, ^name, request}
-        assert_pinned_request(request, expected_authorization)
+        assert_pinned_request(request, expected_authorization, name)
       end)
     end
 
@@ -935,7 +935,7 @@ defmodule AttestoClient.OAuthHTTPTest do
     end
 
     test "an in-process Req plug remains compatible with a caller Finch option" do
-      plug = fn conn -> Plug.Conn.send_resp(conn, 200, JSON.encode!(%{"ok" => true})) end
+      plug = fn conn -> Req.Test.json(conn, %{"ok" => true}) end
 
       assert {:ok, %{"ok" => true}} =
                OAuthHTTP.get_json("https://127.0.0.1/document",
@@ -950,10 +950,10 @@ defmodule AttestoClient.OAuthHTTPTest do
       send(parent, {:pinned_request, name, request_snapshot(conn, request_body)})
 
       conn =
-        if is_map(response.body) do
-          Plug.Conn.put_resp_content_type(conn, "application/json")
+        if name == "text GET" do
+          Plug.Conn.put_resp_content_type(conn, "application/oauth-authz-req+jwt")
         else
-          conn
+          Plug.Conn.put_resp_content_type(conn, "application/json")
         end
 
       body =
@@ -1034,11 +1034,15 @@ defmodule AttestoClient.OAuthHTTPTest do
     ]
   end
 
-  defp assert_pinned_request(request, expected_authorization) do
+  defp assert_pinned_request(request, expected_authorization, name \\ nil) do
     assert request.request_path == "/oauth/path"
     assert request.query_string == "existing=1"
     assert request_header(request, "host") == ["service.example.test:8443"]
-    assert request_header(request, "x-trace") == ["preserved"]
+
+    expected_trace =
+      if name in ["JSON GET", "text GET", "open form POST"], do: [], else: ["preserved"]
+
+    assert request_header(request, "x-trace") == expected_trace
     assert request_header(request, "oauth-client-attestation") == []
     assert request_header(request, "oauth-client-attestation-pop") == []
     assert request_header(request, "content-encoding") == []

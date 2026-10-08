@@ -79,7 +79,7 @@ defmodule AttestoClient.MixProject do
          not Enum.any?(System.argv(), &(&1 in ["hex.build", "hex.publish"])) do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, ">= 1.13.0 and < 3.0.0"}
+      {:attesto, ">= 2.3.1 and < 3.0.0"}
     end
   end
 
