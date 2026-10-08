@@ -1,6 +1,6 @@
 defmodule AttestoClient.Wallet do
   @moduledoc """
-  OID4VCI Wallet (Holder) issuance flow (`draft-ietf-oauth-openid4vci`).
+  OpenID4VCI 1.0 Wallet (Holder) issuance flow.
 
   `request_credential/3` drives the pre-authorized_code issuance flow end to
   end:
@@ -13,9 +13,9 @@ defmodule AttestoClient.Wallet do
     2. fetch a fresh `c_nonce` when the issuer advertises a nonce endpoint;
     3. build the holder key proof (`AttestoClient.Wallet.Proof`);
     4. POST the Credential Request and parse the Credential Response
-       (`Attesto.CredentialResponse` shape) - a `transaction_id` response is
-       returned as a `:pending` marker (deferred issuance is not polled
-       here); and
+       (`Attesto.CredentialResponse`), decrypting an encrypted response when
+       negotiated with the issuer; a deferred response is polled when a
+       Deferred Credential Endpoint is supplied; and
     5. verify each returned credential with the attesto verifier matching
        `:format` (`Attesto.SdJwtVc`, `Attesto.JwtVc`, or `Attesto.Mdoc`).
 
@@ -24,10 +24,15 @@ defmodule AttestoClient.Wallet do
   """
 
   alias Attesto.Thumbprint
+  alias AttestoClient.AuthorizationProfile
   alias AttestoClient.Builder
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.Token
+  alias AttestoClient.TokenSet
+  alias AttestoClient.Wallet.CredentialEncryption
   alias AttestoClient.Wallet.CredentialOffer
+  alias AttestoClient.Wallet.CredentialTrust
+  alias AttestoClient.Wallet.Deferred
   alias AttestoClient.Wallet.Proof
 
   @sd_jwt_vc_formats ~w(vc+sd-jwt dc+sd-jwt)
@@ -39,7 +44,9 @@ defmodule AttestoClient.Wallet do
           required(:credential) => String.t(),
           required(:claims) => map(),
           required(:holder_binding) => map() | nil,
-          optional(:doc_type) => String.t()
+          optional(:doc_type) => String.t(),
+          optional(:authority_key_identifiers) => [String.t()],
+          optional(:issuer_certificate_chain) => [binary()]
         }
 
   @type pending_credential :: %{
@@ -56,16 +63,28 @@ defmodule AttestoClient.Wallet do
   @type opt ::
           {:credential_configuration_id, String.t()}
           | {:credential_endpoint, String.t()}
+          | {:credential_issuer_metadata, map()}
+          | {:credential_encryption, :auto | :required | :disabled}
+          | {:credential_response_encryption_key, Proof.jwk()}
+          | {:deferred_credential_endpoint, String.t()}
+          | {:deferred_poll, boolean()}
+          | {:deferred_timeout, pos_integer()}
+          | {:deferred_max_attempts, pos_integer()}
+          | {:deferred_clock, (-> integer())}
+          | {:deferred_sleep, (non_neg_integer() -> :ok | {:error, term()})}
           | {:token_endpoint, String.t()}
           | {:nonce_endpoint, String.t()}
           | {:notification_endpoint, String.t()}
           | {:notification_event, String.t()}
-          | {:access_token, String.t()}
+          | {:access_token, String.t() | TokenSet.t()}
           | {:tx_code, String.t()}
           | {:client_id, String.t()}
           | {:client_auth, term()}
           | {:format, String.t()}
           | {:trusted, term()}
+          | {:haip, boolean()}
+          | {:trusted_certificates, [binary()]}
+          | {:certificate_trust, ([binary()] -> :ok | {:error, term()})}
           | {:verify_opts, keyword()}
           | {:proof_alg, String.t()}
           | {:proof_kid, String.t()}
@@ -105,43 +124,118 @@ defmodule AttestoClient.Wallet do
   the `ath` binding to that token), and a `use_dpop_nonce` challenge is retried
   once - see `AttestoClient.DPoP`.
 
+  HAIP requires DPoP and authenticated token acquisition. When supplying an
+  existing token, pass `access_token: tokens` with the complete locally bound
+  `AttestoClient.TokenSet` and the same DPoP private key. Bare token strings
+  remain available for generic flows only. A retained HAIP profile cannot be
+  disabled by passing `haip: false` to credential issuance.
+
   `:key_attestation` (a compact JWT from `AttestoClient.KeyAttestation.build/2`)
   is carried in the holder proof's `key_attestation` header, vouching to the
   issuer that the holder key is held in secure storage (a HAIP requirement).
 
-  `:notification_endpoint`, when supplied, makes the wallet POST an OID4VCI §10
+  `:notification_endpoint`, when supplied, makes the wallet POST an OID4VCI §11
   Notification acknowledging the credential once issuance succeeds and the
   response carried a `notification_id`; `:notification_event` overrides the
   default `"credential_accepted"`. The returned result always includes the
   issuer's `notification_id` (or `nil`).
+
+  `:credential_issuer_metadata` accepts metadata already fetched and validated
+  by the caller. Its `credential_issuer` must equal the offer's issuer. Endpoint
+  options may be omitted when present in this metadata; conflicting endpoint
+  overrides are rejected. Encryption uses ECDH-ES/P-256 and A128GCM or A256GCM.
+  `:credential_encryption` defaults to `:auto`, which requests encryption when
+  advertised. `:required` requires encrypted requests and responses; `:disabled`
+  is allowed only when the issuer does not require encryption. Response
+  encryption always also encrypts the request, as required by §8.2.
+
+  `:deferred_credential_endpoint` enables bounded polling of a deferred result.
+  `:deferred_poll` can be set to `false` to retain a pending marker. Polling
+  respects the issuer's positive `interval`, with at most 10 attempts and a
+  120-second overall deadline by default. `:deferred_max_attempts` (1–100) and
+  `:deferred_timeout` (milliseconds, at most one hour) customize these bounds;
+  `:deferred_clock` and `:deferred_sleep` provide injectable monotonic clock and
+  wait functions. The response encryption key remains private to this flow.
   """
   @spec request_credential(CredentialOffer.t(), Proof.jwk() | [Proof.jwk()], [opt()]) ::
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
-    with {:ok, holder_keys} <- holder_keys(holder_key),
+    with {:ok, opts} <- issuer_options(offer, opts),
+         {:ok, opts} <- issuance_profile(opts),
+         :ok <- Deferred.validate_options(opts),
+         {:ok, encryption} <- CredentialEncryption.prepare(opts),
+         {:ok, holder_keys} <- holder_keys(holder_key),
          {:ok, holder_publics} <- holder_public_keys(holder_keys),
          :ok <- validate_trusted(opts),
          {:ok, format} <- required_format(opts),
          {:ok, configuration_id} <- configuration_id(offer, opts),
+         {:ok, type_binding} <- configuration_type_binding(format, configuration_id, opts),
          {:ok, access_token} <- access_token(offer, opts),
          {:ok, c_nonce} <- fetch_nonce(opts),
          {:ok, key_attestation} <- resolve_key_attestation(opts, holder_publics, c_nonce),
          {:ok, proofs} <- build_proofs(offer, holder_keys, c_nonce, key_attestation, opts),
-         {:ok, response} <- post_credential_request(configuration_id, proofs, access_token, opts) do
-      finalize(response, format, c_nonce, access_token, holder_publics, opts)
+         {:ok, response} <-
+           post_credential_request(configuration_id, proofs, access_token, encryption, opts),
+         {:ok, response} <- deferred_response(response, access_token, encryption, opts) do
+      finalize(response, format, c_nonce, access_token, holder_publics, opts, type_binding)
     end
   end
 
   def request_credential(_offer, _holder_key, _opts), do: {:error, :invalid_offer}
 
+  defp issuer_options(offer, opts) do
+    case Keyword.fetch(opts, :credential_issuer_metadata) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, %{"credential_issuer" => issuer} = metadata} when issuer == offer.credential_issuer ->
+        metadata_endpoints(metadata, opts)
+
+      {:ok, _invalid} ->
+        {:error, :credential_issuer_metadata_mismatch}
+    end
+  end
+
+  defp metadata_endpoints(metadata, opts) do
+    ~w(credential_endpoint nonce_endpoint deferred_credential_endpoint notification_endpoint)a
+    |> Enum.reduce_while({:ok, opts}, fn key, {:ok, accumulated} ->
+      case metadata_endpoint(metadata, accumulated, key) do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp metadata_endpoint(metadata, opts, key) do
+    case {Map.get(metadata, Atom.to_string(key)), Keyword.get(opts, key)} do
+      {nil, _configured} ->
+        {:ok, opts}
+
+      {advertised, configured} when is_binary(advertised) and advertised != "" ->
+        if configured in [nil, advertised],
+          do: {:ok, Keyword.put(opts, key, advertised)},
+          else: {:error, {:credential_endpoint_mismatch, key}}
+
+      _invalid ->
+        {:error, {:invalid_credential_endpoint_metadata, key}}
+    end
+  end
+
   defp required_format(opts) do
     case Keyword.get(opts, :format) do
       format when format in @sd_jwt_vc_formats or format in [@jwt_vc_format, @mdoc_format] ->
-        {:ok, format}
+        supported_format(format)
 
       _invalid ->
         {:error, :missing_format}
     end
+  end
+
+  if Code.ensure_loaded?(CBOR) do
+    defp supported_format(format), do: {:ok, format}
+  else
+    defp supported_format(@mdoc_format), do: {:error, :unsupported_mdoc}
+    defp supported_format(format), do: {:ok, format}
   end
 
   defp configuration_id(offer, opts) do
@@ -160,12 +254,114 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp access_token(offer, opts) do
-    case Keyword.get(opts, :access_token) do
-      token when is_binary(token) and token != "" -> {:ok, token}
-      _missing -> exchange_pre_authorized_code(offer, opts)
+  defp configuration_type_binding(format, id, opts) do
+    metadata = Keyword.get(opts, :credential_issuer_metadata, %{})
+
+    case Map.fetch(metadata, "credential_configurations_supported") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, configurations} ->
+        advertised_configuration_type(configurations, format, id)
     end
   end
+
+  defp advertised_configuration_type(configurations, format, id) when is_map(configurations) do
+    with true <- valid_configuration_catalog?(configurations),
+         {:ok, configuration} <- fetch_configuration(configurations, id),
+         :ok <- configuration_format(configuration, format) do
+      configuration_type(configuration, format)
+    else
+      false -> {:error, :invalid_credential_configuration_metadata}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp advertised_configuration_type(_configurations, _format, _id),
+    do: {:error, :invalid_credential_configuration_metadata}
+
+  defp valid_configuration_catalog?(configurations) do
+    map_size(configurations) > 0 and
+      Enum.all?(configurations, fn {id, configuration} ->
+        is_binary(id) and id != "" and is_map(configuration) and
+          is_binary(configuration["format"]) and configuration["format"] != ""
+      end)
+  end
+
+  defp fetch_configuration(configurations, id) do
+    case Map.fetch(configurations, id) do
+      {:ok, configuration} -> {:ok, configuration}
+      :error -> {:error, :credential_configuration_not_advertised}
+    end
+  end
+
+  defp configuration_format(%{"format" => format}, format), do: :ok
+
+  defp configuration_format(_configuration, _format),
+    do: {:error, :credential_configuration_format_mismatch}
+
+  defp configuration_type(configuration, format) when format in @sd_jwt_vc_formats,
+    do: required_configuration_type(configuration, "vct", :vct)
+
+  defp configuration_type(configuration, @mdoc_format),
+    do: required_configuration_type(configuration, "doctype", :doc_type)
+
+  defp configuration_type(_configuration, _format), do: {:ok, nil}
+
+  defp required_configuration_type(configuration, field, binding) do
+    case Map.get(configuration, field) do
+      value when is_binary(value) and value != "" -> {:ok, {binding, value}}
+      _invalid -> {:error, :invalid_credential_configuration_metadata}
+    end
+  end
+
+  defp access_token(offer, opts) do
+    case Keyword.get(opts, :access_token) do
+      %TokenSet{} = tokens ->
+        with :ok <- check_token_binding(tokens, opts), do: {:ok, tokens.access_token}
+
+      token when is_binary(token) and token != "" ->
+        {:ok, token}
+
+      nil ->
+        exchange_pre_authorized_code(offer, opts)
+
+      _invalid ->
+        {:error, :invalid_token_set}
+    end
+  end
+
+  defp issuance_profile(opts) do
+    tokens = Keyword.get(opts, :access_token)
+
+    stored =
+      if is_struct(tokens, TokenSet), do: Map.get(tokens, :profile, :generic), else: :generic
+
+    with {:ok, requested} <- AuthorizationProfile.select(opts),
+         true <- stored in [:generic, :haip, :fapi],
+         true <- stored == :generic or requested in [:generic, stored] do
+      profile = if stored == :generic, do: requested, else: stored
+      opts = opts |> Keyword.put(:haip, profile == :haip) |> Keyword.put(:fapi?, profile == :fapi)
+
+      with {:ok, jkt} <- TokenSet.dpop_thumbprint(opts),
+           :ok <- AuthorizationProfile.require_dpop(profile, jkt),
+           :ok <- AuthorizationProfile.dpop_policy(profile, opts),
+           :ok <- require_profile_tokens(profile, tokens) do
+        {:ok, opts}
+      end
+    else
+      false -> {:error, :profile_mismatch}
+      error -> error
+    end
+  end
+
+  defp require_profile_tokens(:generic, _tokens), do: :ok
+  defp require_profile_tokens(_profile, nil), do: :ok
+
+  defp require_profile_tokens(profile, %TokenSet{profile: profile, client_auth_binding: binding})
+       when is_map(binding), do: :ok
+
+  defp require_profile_tokens(_profile, _tokens), do: {:error, :profile_token_set_required}
 
   defp exchange_pre_authorized_code(%CredentialOffer{grants: %{pre_authorized_code: nil}}, _opts),
     do: {:error, :missing_pre_authorized_code_grant}
@@ -173,8 +369,25 @@ defmodule AttestoClient.Wallet do
   defp exchange_pre_authorized_code(%CredentialOffer{grants: %{pre_authorized_code: grant}}, opts) do
     with {:ok, tx_code} <- required_tx_code(grant, opts),
          {:ok, tokens} <-
-           Token.exchange_pre_authorized_code(grant.code, Keyword.put(opts, :tx_code, tx_code)) do
+           Token.exchange_pre_authorized_code(grant.code, Keyword.put(opts, :tx_code, tx_code)),
+         :ok <- check_token_binding(tokens, opts) do
       {:ok, tokens.access_token}
+    end
+  end
+
+  defp check_token_binding(tokens, opts) do
+    with {:ok, jkt} <- TokenSet.dpop_thumbprint(opts),
+         {:ok, _bound} <- TokenSet.bind_dpop(tokens, jkt) do
+      cond do
+        not is_binary(tokens.access_token) or tokens.access_token == "" ->
+          {:error, :invalid_token_set}
+
+        TokenSet.dpop?(tokens.token_type) and Map.get(tokens, :dpop_jkt) != jkt ->
+          {:error, :dpop_key_mismatch}
+
+        true ->
+          :ok
+      end
     end
   end
 
@@ -235,6 +448,12 @@ defmodule AttestoClient.Wallet do
   # trust anchor: without it the issued credential's signature cannot be
   # verified (and `Attesto.SdJwtVc.verify/3` would raise on `nil`).
   defp validate_trusted(opts) do
+    with :ok <- CredentialTrust.validate_options(opts) do
+      if Keyword.get(opts, :haip, false), do: :ok, else: validate_fixed_trust(opts)
+    end
+  end
+
+  defp validate_fixed_trust(opts) do
     case Keyword.get(opts, :trusted) do
       %{} = trusted when map_size(trusted) > 0 -> :ok
       [_ | _] -> :ok
@@ -298,7 +517,7 @@ defmodule AttestoClient.Wallet do
     Proof.build(holder_key, proof_opts)
   end
 
-  defp post_credential_request(configuration_id, proofs, access_token, opts) do
+  defp post_credential_request(configuration_id, proofs, access_token, encryption, opts) do
     with {:ok, endpoint} <-
            required_string(opts, :credential_endpoint, :missing_credential_endpoint) do
       # OID4VCI 1.0 final §8.2: a Credential Request carries `proofs`, an object
@@ -310,8 +529,23 @@ defmodule AttestoClient.Wallet do
         "proofs" => %{"jwt" => proofs}
       }
 
-      OAuthHTTP.post_json(endpoint, body, access_token, opts)
+      CredentialEncryption.post(endpoint, body, access_token, encryption, opts)
     end
+  end
+
+  defp deferred_response(response, access_token, encryption, opts) do
+    Deferred.resolve(response, opts, fn transaction_id, poll_opts ->
+      with {:ok, endpoint} <-
+             required_string(poll_opts, :deferred_credential_endpoint, :missing_deferred_endpoint) do
+        CredentialEncryption.post(
+          endpoint,
+          %{"transaction_id" => transaction_id},
+          access_token,
+          encryption,
+          poll_opts
+        )
+      end
+    end)
   end
 
   defp finalize(
@@ -320,7 +554,8 @@ defmodule AttestoClient.Wallet do
          c_nonce,
          _access_token,
          _holder_publics,
-         _opts
+         _opts,
+         _type_binding
        )
        when is_binary(transaction_id) and transaction_id != "" do
     pending = %{
@@ -338,10 +573,12 @@ defmodule AttestoClient.Wallet do
          c_nonce,
          access_token,
          holder_publics,
-         opts
+         opts,
+         type_binding
        )
        when is_list(credentials) and credentials != [] do
-    with {:ok, held} <- verify_credentials(credentials, format, holder_publics, opts),
+    with {:ok, held} <-
+           verify_credentials(credentials, format, holder_publics, opts, type_binding),
          :ok <- maybe_notify(response, access_token, opts) do
       {:ok,
        %{
@@ -352,8 +589,16 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp finalize(_response, _format, _c_nonce, _access_token, _holder_publics, _opts),
-    do: {:error, :invalid_credential_response}
+  defp finalize(
+         _response,
+         _format,
+         _c_nonce,
+         _access_token,
+         _holder_publics,
+         _opts,
+         _type_binding
+       ),
+       do: {:error, :invalid_credential_response}
 
   # OID4VCI §10: when the caller supplies a `:notification_endpoint` and the
   # issuer returned a `notification_id`, POST a Notification acknowledging the
@@ -376,16 +621,14 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  # The issuer MUST return exactly one credential per submitted proof, each
-  # bound to that proof's holder key (OID4VCI §8.2). Enforcing the count and the
-  # per-credential holder binding stops a hostile issuer from returning fewer or
-  # extra credentials, or credentials bound to a key the wallet does not control
-  # (which the wallet could then neither present nor be sure it holds).
-  defp verify_credentials(credentials, _format, holder_publics, _opts)
-       when length(credentials) != length(holder_publics),
+  # OID4VCI §8.3 permits fewer credentials than submitted proofs. Every returned
+  # credential must still bind to a distinct requested holder key. Reject extra
+  # credentials and any key the wallet did not prove possession of.
+  defp verify_credentials(credentials, _format, holder_publics, _opts, _type_binding)
+       when length(credentials) > length(holder_publics),
        do: {:error, :credential_count_mismatch}
 
-  defp verify_credentials(credentials, format, holder_publics, opts) do
+  defp verify_credentials(credentials, format, holder_publics, opts, type_binding) do
     with {:ok, expected} <- expected_thumbprints(holder_publics) do
       # Each returned credential must be bound to a DISTINCT holder key the
       # wallet proved possession of. Membership + distinctness is order-
@@ -393,7 +636,7 @@ defmodule AttestoClient.Wallet do
       # one-to-one binding between proofs and credentials.
       credentials
       |> Enum.reduce_while({:ok, [], MapSet.new()}, fn entry, acc ->
-        verify_credential_entry(entry, acc, format, opts, expected)
+        verify_credential_entry(entry, acc, format, opts, expected, type_binding)
       end)
       |> case do
         {:ok, held, _used} -> {:ok, Enum.reverse(held)}
@@ -402,9 +645,10 @@ defmodule AttestoClient.Wallet do
     end
   end
 
-  defp verify_credential_entry(entry, {:ok, acc, used}, format, opts, expected) do
+  defp verify_credential_entry(entry, {:ok, acc, used}, format, opts, expected, type_binding) do
     with {:ok, credential} <- credential_value(entry),
          {:ok, held} <- verify_credential(format, credential, opts),
+         :ok <- check_configuration_type(held, type_binding),
          {:ok, thumb} <- held_binding_thumbprint(held),
          :ok <- check_binding_membership(thumb, expected, used) do
       {:cont, {:ok, [held | acc], MapSet.put(used, thumb)}}
@@ -412,6 +656,14 @@ defmodule AttestoClient.Wallet do
       {:error, reason} -> {:halt, {:error, reason}}
     end
   end
+
+  defp check_configuration_type(_held, nil), do: :ok
+
+  defp check_configuration_type(%{claims: %{"vct" => type}}, {:vct, type}), do: :ok
+  defp check_configuration_type(%{doc_type: type}, {:doc_type, type}), do: :ok
+
+  defp check_configuration_type(_held, _binding),
+    do: {:error, :credential_configuration_type_mismatch}
 
   defp expected_thumbprints(holder_publics) do
     holder_publics
@@ -450,39 +702,63 @@ defmodule AttestoClient.Wallet do
 
   defp credential_value(_entry), do: {:error, :invalid_credential_response}
 
-  defp verify_credential(format, credential, opts) when format in @sd_jwt_vc_formats do
+  defp verify_credential(format, credential, opts) do
+    with {:ok, key, provenance} <- CredentialTrust.resolve(format, credential, opts),
+         {:ok, held} <- verify_format(format, credential, key, opts) do
+      {:ok, CredentialTrust.attach(held, provenance)}
+    end
+  end
+
+  defp verify_format(format, credential, key, opts) when format in @sd_jwt_vc_formats do
     with {:ok, %{claims: claims, cnf: cnf}} <-
-           Attesto.SdJwtVc.verify(credential, trusted(opts), verify_opts(opts)) do
+           Attesto.SdJwtVc.verify(credential, key, verify_opts(opts)) do
       {:ok, %{format: format, credential: credential, claims: claims, holder_binding: cnf}}
     end
   end
 
-  defp verify_credential(@jwt_vc_format, credential, opts) do
+  defp verify_format(@jwt_vc_format, credential, key, opts) do
     with {:ok, %{claims: claims, cnf: cnf}} <-
-           Attesto.JwtVc.verify(credential, trusted(opts), verify_opts(opts)) do
+           Attesto.JwtVc.verify(credential, key, verify_opts(opts)) do
       {:ok,
        %{format: @jwt_vc_format, credential: credential, claims: claims, holder_binding: cnf}}
     end
   end
 
-  defp verify_credential(@mdoc_format, credential, opts) do
-    with {:ok, %{namespaces: namespaces, device_key: device_key, doc_type: doc_type}} <-
-           Attesto.Mdoc.verify(credential, trusted(opts), verify_opts(opts)) do
-      {:ok,
-       %{
-         format: @mdoc_format,
-         credential: credential,
-         claims: namespaces,
-         holder_binding: device_key,
-         doc_type: doc_type
-       }}
+  if Code.ensure_loaded?(CBOR) do
+    defp verify_format(@mdoc_format, credential, key, opts) do
+      with {:ok, %{namespaces: namespaces, device_key: device_key, doc_type: doc_type}} <-
+             Attesto.Mdoc.verify(credential, key, verify_opts(opts)) do
+        {:ok,
+         %{
+           format: @mdoc_format,
+           credential: credential,
+           claims: namespaces,
+           holder_binding: device_key,
+           doc_type: doc_type
+         }}
+      end
     end
+  else
+    defp verify_format(@mdoc_format, _credential, _key, _opts),
+      do: {:error, :unsupported_mdoc}
   end
 
-  defp verify_credential(_format, _credential, _opts), do: {:error, :unsupported_format}
+  defp verify_format(_format, _credential, _key, _opts), do: {:error, :unsupported_format}
 
-  defp trusted(opts), do: Keyword.get(opts, :trusted)
-  defp verify_opts(opts), do: Keyword.get(opts, :verify_opts, [])
+  defp verify_opts(opts) do
+    verify_opts = Keyword.get(opts, :verify_opts, [])
+
+    if Keyword.get(opts, :haip, false) do
+      # CredentialTrust has already enforced certificate provenance and PS256
+      # RSA strength. HAIP also supports the larger ECDSA curves; that broader
+      # algorithm policy is explicit at this composition boundary.
+      verify_opts
+      |> Keyword.put(:issuer_identity, :certificate)
+      |> Keyword.put_new(:enforce_fapi_alg_policy, false)
+    else
+      verify_opts
+    end
+  end
 
   defp put_optional(opts, _key, nil), do: opts
   defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)
