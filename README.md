@@ -9,7 +9,7 @@
 
 AttestoClient is
 [OpenID Certified](https://openid.net/certification/certified-openid-relying-parties-profiles/)
-as a Relying Party library to the **Basic**, **Config**, and **Dynamic** OP
+as a Relying Party library to the **Basic**, **Config**, and **Dynamic** RP
 profiles, run against the OpenID Foundation's conformance suite.
 
 Run a secure OpenID Connect Authorization Code + PKCE exchange, refresh and
@@ -90,8 +90,9 @@ the tool for DPoP-binding arbitrary outgoing requests.
 - `AttestoClient.ResourceServer.Plug` — authenticate Bearer, DPoP, and mTLS
   requests, fail closed on missing sender-constraint evidence, and assign
   verified claims.
-- `AttestoClient.AuthorizationCode` — complete OIDC Authorization Code flow
-  with S256 PKCE, nonce, issuer and browser-session binding, and one-time state.
+- `AttestoClient.AuthorizationCode` — OAuth or OIDC Authorization Code flow
+  with S256 PKCE, PAR, DPoP, issuer and browser-session binding, and one-time
+  state; OIDC additionally verifies nonce and the ID Token.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
   single-node transaction store with atomic consumption.
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,
@@ -106,7 +107,9 @@ presents verifiable credentials, mirroring `attesto`'s issuer/verifier core.
 - `AttestoClient.Wallet` — the OID4VCI issuance flow end to end: exchange a
   credential offer's pre-authorized code, prove the holder key, request the
   credential, and verify each returned SD-JWT VC, `jwt_vc_json`, or mdoc. Supports
-  batch issuance and the OID4VCI §10 Notification Endpoint.
+  batch issuance, bounded deferred polling, encrypted credential requests and
+  responses, and the OID4VCI §11 Notification Endpoint. Authorization-code
+  issuance uses `AttestoClient.AuthorizationCode` in plain OAuth mode.
 - `AttestoClient.DPoP` — RFC 9449 DPoP proofs, sender-constraining the token and
   credential requests (with a `use_dpop_nonce` retry).
 - `AttestoClient.WalletAttestation` / `AttestoClient.KeyAttestation` — OAuth
@@ -115,9 +118,21 @@ presents verifiable credentials, mirroring `attesto`'s issuer/verifier core.
 - `AttestoClient.Wallet.Proof` / `AttestoClient.Wallet.CredentialOffer` — the
   holder key proof and credential-offer parsing.
 - `AttestoClient.Wallet.Presentation` / `AttestoClient.Wallet.PresentationRequest`
-  — OID4VP: verify a signed Authorization Request and build a `direct_post`
-  `vp_token` (SD-JWT VC with a holder Key Binding JWT, or an ISO 18013-5 mdoc
-  DeviceResponse), with claim minimisation.
+  — OID4VP: verify a signed Authorization Request, match DCQL queries, and
+  build a `direct_post` or encrypted `direct_post.jwt` response (SD-JWT VC with
+  a holder Key Binding JWT, or an ISO 18013-5 mdoc DeviceResponse). HAIP request
+  verification uses explicit certificate trust anchors. The application owns
+  consent and chooses the credentials and claims to disclose.
+
+Start with the [Credential wallet guide](guides/credential-wallet.md), which
+progresses from a local selective-disclosure presentation to issuance, OAuth
+authorization, encryption, deferred polling and HAIP integration. The
+[interactive wallet Livebook](guides/digital_wallet.livemd) runs a local
+SD-JWT VC example and an encrypted presentation without an HTTP server.
+
+The RP certification above covers the listed OpenID Connect profiles.
+Wallet-role OID4VCI/HAIP and OID4VP/HAIP certification is a separate submission;
+these wallet features do not extend the existing certification claim.
 
 ## Example
 
@@ -171,22 +186,21 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.6`.
+a new major version. Pin to `~> 2.7`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto 1.13 or later within the
-Attesto 1.x or 2.x lines, and JOSE 1.11.12 or later within the JOSE 1.x line.
+AttestoClient requires Elixir 1.18 or later, Attesto 2.3.1 or later within the
+Attesto 2.x line, and JOSE 1.11.12 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
 compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
 working older-Elixir installation.
 
-For the coordinated security update, deploy AttestoClient 2.6.1 with Attesto
-2.2.2 or later in the 2.x line. JOSE and credential verification delegated to
-Attesto receives the new core hardening only with that update. The existing
-Attesto 1.x compatibility range remains available.
+Deploy AttestoClient 2.7.0 with Attesto 2.3.1 or later in the 2.x line. The core
+floor ensures exact PSS signature policy and the OID4VP-specific Request Object
+checks are available for every installation.
 
 Ed448 verification and OIDC hash claims additionally require JOSE to have a
 working Curve448 and SHAKE256 backend. That may come from supported native OTP
