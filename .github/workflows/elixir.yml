@@ -5,14 +5,25 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      dependency_source:
+        description: Core dependency source (published is the release gate)
+        type: choice
+        options: [published, candidate]
+        default: published
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build & Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && 'Candidate core' || 'Published core' }} (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: attesto_client
 
     strategy:
       fail-fast: false
@@ -30,10 +41,31 @@ jobs:
 
     env:
       MIX_ENV: test
+      ATTESTO_PATH: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && '1' || '0' }}
+      REVIEWED_CORE_REF: 28df935e8a74967044da1dcd8334d028dcbd6726
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7.0.1
+        with:
+          path: attesto_client
+
+      # The reviewed core is not published yet. PR checks use this explicit
+      # immutable candidate; main and default manual runs require public Hex.
+      - name: Checkout reviewed candidate core
+        if: env.ATTESTO_PATH == '1'
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: XukuLLC/attesto
+          ref: ${{ env.REVIEWED_CORE_REF }}
+          path: attesto
+
+      - name: Verify candidate checkout identity
+        if: env.ATTESTO_PATH == '1'
+        run: |
+          test "$(git -C ../attesto rev-parse HEAD)" = "$REVIEWED_CORE_REF"
+          test -z "$(git -C ../attesto status --porcelain)"
+          echo 'Testing the pinned core source candidate; public Hex compatibility remains pending.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1.24.1
@@ -57,16 +89,16 @@ jobs:
       - name: Restore dependencies cache
         uses: actions/cache@v6.1.0
         with:
-          path: deps
-          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('**/mix.lock') }}
+          path: attesto_client/deps
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('attesto_client/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-
 
       - name: Restore build cache
         uses: actions/cache@v6.1.0
         with:
-          path: _build
-          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ hashFiles('**/mix.lock') }}-${{ hashFiles('**/mix.exs') }}
+          path: attesto_client/_build
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ env.ATTESTO_PATH }}-${{ hashFiles('attesto_client/mix.lock') }}-${{ hashFiles('attesto_client/mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-
 
@@ -74,14 +106,33 @@ jobs:
         run: |
           mix local.hex --force
           mix local.rebar --force
+          # Hex validates every registry lock entry, even for an overridden
+          # path dependency. Remove only this unpublished entry in candidate
+          # runners; the committed release lock and published lane stay intact.
+          if [ "$ATTESTO_PATH" = "1" ]; then
+            mix deps.unlock attesto
+          fi
           mix deps.get
 
       - name: Audit dependency advisories
         if: ${{ matrix.lint }}
         run: mix hex.audit
 
+      - name: Compile pinned candidate core afresh
+        if: env.ATTESTO_PATH == '1'
+        run: |
+          mix deps.compile
+          mix deps.compile attesto --force
+
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
+
+      - name: Assert effective candidate dependency
+        if: env.ATTESTO_PATH == '1'
+        run: >-
+          mix run --no-compile -e 'dep = Enum.find(Mix.Dep.cached(), &(&1.app == :attesto));
+          unless dep && dep.scm == Mix.SCM.Path && Path.expand(dep.opts[:dest]) == Path.expand("../attesto"), do: System.halt(1);
+          unless Application.spec(:attesto, :vsn) |> to_string() == "2.3.1", do: System.halt(1)'
 
       - name: Run tests
         run: mix test --trace
@@ -98,7 +149,7 @@ jobs:
         if: ${{ matrix.lint }}
         uses: actions/cache@v6.1.0
         with:
-          path: priv/plts
+          path: attesto_client/priv/plts
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-
@@ -111,7 +162,8 @@ jobs:
         run: mix dialyzer
 
   attesto-2-hex:
-    name: Published Attesto 2.2.2 security compatibility
+    name: Published Attesto 2.3.1 security compatibility
+    if: github.event_name != 'pull_request' && inputs.dependency_source != 'candidate'
     runs-on: ubuntu-latest
 
     env:
@@ -148,7 +200,7 @@ jobs:
       - name: Assert published hardened Attesto dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
-          unless Version.match?(version, ">= 2.2.2 and < 3.0.0"), do: System.halt(1)'
+          unless Version.match?(version, ">= 2.3.1 and < 3.0.0"), do: System.halt(1)'
 
       - name: Run tests against published Attesto 2
         run: mix test --trace
