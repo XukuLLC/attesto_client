@@ -492,12 +492,7 @@ defmodule AttestoClient.EdwardsAlgorithmsTest do
   end
 
   defp sign(key, alg, claims, kid, typ \\ "JWT") do
-    {_, jwt} =
-      key
-      |> JOSE.JWT.sign(%{"alg" => alg, "kid" => kid, "typ" => typ}, claims)
-      |> JOSE.JWS.compact()
-
-    jwt
+    Attesto.JWS.sign_compact_jwk(key, %{"alg" => alg, "kid" => kid, "typ" => typ}, claims)
   end
 
   defp jwks(key, alg, kid), do: %{"keys" => [public_map(key, alg, kid)]}

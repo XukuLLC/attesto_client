@@ -13,6 +13,32 @@ defmodule AttestoClient.WalletAttestationTest do
   defp header(jwt), do: jwt |> JOSE.JWS.peek_protected() |> JSON.decode!()
 
   describe "attestation/2" do
+    test "includes the explicitly configured attester issuer without changing the client identity" do
+      provider = es256_key()
+
+      assert {:ok, jwt} =
+               WalletAttestation.attestation(provider,
+                 client_id: @client_id,
+                 instance_key: es256_key(),
+                 issuer: "https://attester.example.com"
+               )
+
+      assert claims(jwt)["iss"] == "https://attester.example.com"
+      assert claims(jwt)["sub"] == @client_id
+      assert {true, _payload, _header} = JOSE.JWS.verify_strict(provider, ["ES256"], jwt)
+    end
+
+    test "rejects invalid attester issuer options" do
+      for issuer <- [nil, "", 42, [], String.duplicate("x", 2_049)] do
+        assert {:error, :invalid_issuer} =
+                 WalletAttestation.attestation(es256_key(),
+                   client_id: @client_id,
+                   instance_key: es256_key(),
+                   issuer: issuer
+                 )
+      end
+    end
+
     test "binds the instance key into cnf and names the client_id in sub" do
       provider = es256_key()
       instance = es256_key()

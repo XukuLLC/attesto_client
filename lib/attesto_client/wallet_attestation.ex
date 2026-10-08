@@ -38,6 +38,8 @@ defmodule AttestoClient.WalletAttestation do
   """
 
   alias AttestoClient.Builder
+  alias AttestoClient.OAuthHTTP
+  alias AttestoClient.Wallet.CredentialJSON
 
   @attestation_typ "oauth-client-attestation+jwt"
   @pop_typ "oauth-client-attestation-pop+jwt"
@@ -51,6 +53,7 @@ defmodule AttestoClient.WalletAttestation do
 
   @type attestation_opt ::
           {:client_id, String.t()}
+          | {:issuer, String.t()}
           | {:instance_key, jwk()}
           | {:x5c, [String.t()]}
           | {:lifetime, pos_integer()}
@@ -70,6 +73,7 @@ defmodule AttestoClient.WalletAttestation do
 
   @type error ::
           :invalid_key
+          | :invalid_issuer
           | :invalid_client_id
           | :invalid_audience
           | :invalid_challenge
@@ -79,6 +83,85 @@ defmodule AttestoClient.WalletAttestation do
           | :unsupported_alg
           | :unsupported_key
           | {:signing_failed, String.t()}
+
+  @doc """
+  Obtain a Client Attestation Challenge from an advertised challenge endpoint.
+
+  Sends an empty, unauthenticated POST using the same endpoint screening and
+  timeout protections as the OAuth HTTP layer. Requires HTTP 200, JSON, and a
+  nonempty `attestation_challenge`; rejects duplicate JSON members. Response
+  bytes are limited to 16 KiB and challenge/nonce values to 4 KiB.
+
+  Returns `%{challenge: challenge, dpop_nonce: nonce_or_nil, expires_in: seconds_or_nil}`.
+  Supply `challenge` in the client-auth tuple's options, and `dpop_nonce` as
+  the `:dpop_nonce` request option when using DPoP. The most recently received
+  challenge and DPoP nonce supersede older values. `expires_in` is an optional
+  positive-integer extension, not a field required by the attestation draft.
+
+  Options include `:timeout` (milliseconds), `:resolver`, and `:req_options`.
+  Select the endpoint from trusted server metadata; this call performs no
+  issuer discovery and stores no challenge globally.
+  """
+  @spec fetch_challenge(String.t(), keyword()) ::
+          {:ok,
+           %{challenge: String.t(), dpop_nonce: String.t() | nil, expires_in: pos_integer() | nil}}
+          | {:error, term()}
+  def fetch_challenge(endpoint, opts \\ []) when is_list(opts) do
+    with {:ok, response} <- OAuthHTTP.post_challenge(endpoint, opts),
+         :ok <- challenge_response(response),
+         {:ok, body} <- challenge_json(response.body),
+         {:ok, challenge} <- fetched_challenge(body),
+         {:ok, nonce} <- fetched_dpop_nonce(response),
+         {:ok, lifetime} <- challenge_lifetime(body) do
+      {:ok, %{challenge: challenge, dpop_nonce: nonce, expires_in: lifetime}}
+    end
+  end
+
+  defp challenge_response(%Req.Response{status: 200} = response) do
+    case Req.Response.get_header(response, "content-type") do
+      [type] ->
+        if type |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase() ==
+             "application/json",
+           do: :ok,
+           else: {:error, :invalid_challenge_response}
+
+      _invalid ->
+        {:error, :invalid_challenge_response}
+    end
+  end
+
+  defp challenge_response(%Req.Response{status: status}), do: {:error, {:http_status, status}}
+
+  defp challenge_json(bytes) when is_binary(bytes) and byte_size(bytes) <= 16_384 do
+    case CredentialJSON.decode(bytes) do
+      {:ok, body} -> {:ok, body}
+      _invalid -> {:error, :invalid_challenge_response}
+    end
+  end
+
+  defp challenge_json(_invalid), do: {:error, :invalid_challenge_response}
+
+  defp fetched_challenge(%{"attestation_challenge" => challenge})
+       when is_binary(challenge) and byte_size(challenge) in 1..4_096,
+       do: {:ok, challenge}
+
+  defp fetched_challenge(_invalid), do: {:error, :invalid_challenge_response}
+
+  defp fetched_dpop_nonce(response) do
+    case Req.Response.get_header(response, "dpop-nonce") do
+      [] -> {:ok, nil}
+      [nonce] when is_binary(nonce) and byte_size(nonce) in 1..4_096 -> {:ok, nonce}
+      _invalid -> {:error, :invalid_challenge_response}
+    end
+  end
+
+  defp challenge_lifetime(body) do
+    case Map.fetch(body, "expires_in") do
+      :error -> {:ok, nil}
+      {:ok, seconds} when is_integer(seconds) and seconds > 0 -> {:ok, seconds}
+      _invalid -> {:error, :invalid_challenge_response}
+    end
+  end
 
   @doc """
   Build a Client Attestation JWT, returning `{:ok, compact_jws}` or
@@ -91,8 +174,14 @@ defmodule AttestoClient.WalletAttestation do
     * `:instance_key` - the wallet instance's key; its public half is embedded
       as the `cnf` confirmation JWK the PoP must be signed by.
 
-  Optional: `:x5c` (a list of base64 DER certificates for the `x5c` header, so
-  the server can chain the signer to a trust anchor), `:lifetime` (seconds to
+  Optional: `:issuer` names the Client Attester in the `iss` claim where the
+  ecosystem uses that claim; draft 11 does not require it. `:x5c` is optional
+  for the generic builder, but HAIP's Appendix E format requires the provider
+  certificate and any intermediate certificates, excluding the trust anchor,
+  in this base64 DER certificate list. The authorization server validates
+  signature, certificate trust and attestation validity. Renewals may retain
+  the same client subject and instance key without retaining the same JWT.
+  Other options include `:lifetime` (seconds to
   `exp`, default `#{@default_attestation_lifetime_seconds}`), and `:alg`,
   `:kid`, `:now` as in `AttestoClient.Wallet.Proof.build/2`.
   """
@@ -100,6 +189,7 @@ defmodule AttestoClient.WalletAttestation do
   def attestation(provider_key, opts) when is_list(opts) do
     with {:ok, provider_jwk} <- Builder.normalize_key(provider_key),
          {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
+         {:ok, issuer} <- attester_issuer(opts),
          {:ok, instance_public} <- instance_public_jwk(opts),
          {:ok, lifetime} <-
            Builder.validate_lifetime(opts, @default_attestation_lifetime_seconds),
@@ -112,12 +202,22 @@ defmodule AttestoClient.WalletAttestation do
         "cnf" => %{"jwk" => instance_public}
       }
 
+      claims = if issuer, do: Map.put(claims, "iss", issuer), else: claims
+
       header =
         %{"alg" => alg, "typ" => @attestation_typ}
         |> Builder.put_x5c(Keyword.get(opts, :x5c))
         |> Builder.put_kid(provider_jwk, opts)
 
       Builder.sign(provider_jwk, header, claims)
+    end
+  end
+
+  defp attester_issuer(opts) do
+    case Keyword.fetch(opts, :issuer) do
+      :error -> {:ok, nil}
+      {:ok, issuer} when is_binary(issuer) and byte_size(issuer) in 1..2_048 -> {:ok, issuer}
+      {:ok, _invalid} -> {:error, :invalid_issuer}
     end
   end
 

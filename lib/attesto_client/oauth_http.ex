@@ -5,12 +5,14 @@ defmodule AttestoClient.OAuthHTTP do
   alias AttestoClient.Deadline
   alias AttestoClient.DPoP
   alias AttestoClient.PinnedRequest
+  alias AttestoClient.Wallet.CredentialJSON
   alias AttestoClient.WalletAttestation
 
   require Logger
 
   @default_timeout_ms 10_000
   @max_response_bytes 2_000_000
+  @protected_form_query ~w(client_id redirect_uri response_type response_mode scope state nonce code_challenge code_challenge_method dpop_jkt request_uri request request_uri_method client_secret client_assertion client_assertion_type grant_type code code_verifier refresh_token pre-authorized_code tx_code token token_type_hint)
   @reserved_headers ~w(
     authorization
     content-length
@@ -21,18 +23,68 @@ defmodule AttestoClient.OAuthHTTP do
     oauth-client-attestation-pop
   )
 
+  # Validate the original encoded query before URI.decode_query can collapse
+  # aliases or duplicates. Hosts may retain benign fixed endpoint parameters.
+  @doc false
+  @spec validate_endpoint_query(term(), [String.t()]) :: :ok | {:error, :invalid_endpoint_query}
+  def validate_endpoint_query(endpoint, protected) when is_binary(endpoint) do
+    case URI.parse(endpoint).query do
+      nil ->
+        :ok
+
+      query when byte_size(query) <= 1_000_000 ->
+        Enum.reduce_while(
+          URI.query_decoder(query),
+          MapSet.new(),
+          &endpoint_query_pair(&1, &2, protected)
+        )
+        |> endpoint_query_result()
+
+      _oversized ->
+        {:error, :invalid_endpoint_query}
+    end
+  rescue
+    _error -> {:error, :invalid_endpoint_query}
+  end
+
+  def validate_endpoint_query(_invalid, _protected), do: {:error, :invalid_endpoint_query}
+
+  defp endpoint_query_pair({key, _value}, seen, protected) do
+    root = key |> String.split("[", parts: 2) |> hd()
+
+    if root in protected or MapSet.member?(seen, root),
+      do: {:halt, {:error, :invalid_endpoint_query}},
+      else: {:cont, MapSet.put(seen, root)}
+  end
+
+  defp endpoint_query_result(%MapSet{}), do: :ok
+  defp endpoint_query_result(error), do: error
+
   @spec post_form(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
-      request(target, endpoint, form, timeout_ms, :json, prepared_opts)
-    end)
+    with :ok <- validate_endpoint_query(endpoint, @protected_form_query),
+         {:ok, response_mode} <- form_response_mode(opts) do
+      run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+        request(target, endpoint, form, timeout_ms, response_mode, prepared_opts)
+      end)
+    end
+  end
+
+  defp form_response_mode(opts) do
+    case Keyword.get(opts, :expected_status) do
+      nil -> {:ok, :json}
+      status when is_integer(status) and status in 200..299 -> {:ok, {:json, status}}
+      _invalid -> {:error, :invalid_expected_status}
+    end
   end
 
   @spec post_form_unit(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def post_form_unit(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
-      request(target, endpoint, form, timeout_ms, :unit, prepared_opts)
-    end)
+    with :ok <- validate_endpoint_query(endpoint, @protected_form_query) do
+      run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+        request(target, endpoint, form, timeout_ms, :unit, prepared_opts)
+      end)
+    end
   end
 
   @doc """
@@ -62,6 +114,34 @@ defmodule AttestoClient.OAuthHTTP do
       )
     end)
   end
+
+  # Credential and deferred endpoints can exchange either JSON or compact JWE.
+  # Retain the status and headers so the wallet can validate media types and
+  # distinguish immediate issuance from a deferred response before verification.
+  @spec post_credential(String.t(), {:json, map()} | {:jwt, String.t()}, String.t(), keyword()) ::
+          {:ok, %{status: integer(), headers: map(), body: term()}} | {:error, term()}
+  def post_credential(endpoint, payload, access_token, opts)
+      when is_binary(access_token) and access_token != "" and is_list(opts) do
+    with {:ok, body_options} <- credential_body_options(payload) do
+      run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+        credential_request(
+          target,
+          endpoint,
+          body_options,
+          access_token,
+          prepared_opts,
+          timeout_ms
+        )
+      end)
+    end
+  end
+
+  defp credential_body_options({:json, body}) when is_map(body), do: {:ok, [json: body]}
+
+  defp credential_body_options({:jwt, body}) when is_binary(body) and body != "",
+    do: {:ok, [body: body, headers: [{"content-type", "application/jwt"}]]}
+
+  defp credential_body_options(_payload), do: {:error, :invalid_credential_request}
 
   @doc """
   POST a JSON body authenticated with an access token, expecting a 2xx with no
@@ -94,8 +174,9 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec get_json(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_json(url, opts) when is_binary(url) and is_list(opts) do
-    run_screened(url, opts, fn target, prepared_opts, timeout_ms ->
-      get_request(target, req_options(prepared_opts), timeout_ms)
+    run_open_screened(url, opts, fn target, prepared_opts, timeout_ms ->
+      options = accept_options(req_options(prepared_opts), "application/json")
+      get_request(target, options, timeout_ms)
     end)
   end
 
@@ -108,14 +189,15 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec get_text(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def get_text(url, opts) when is_binary(url) and is_list(opts) do
-    run_screened(url, opts, fn target, prepared_opts, timeout_ms ->
-      get_text_request(target, req_options(prepared_opts), timeout_ms)
+    run_open_screened(url, opts, fn target, prepared_opts, timeout_ms ->
+      options = accept_options(req_options(prepared_opts), "application/oauth-authz-req+jwt")
+      get_text_request(target, options, timeout_ms)
     end)
   end
 
   @doc """
-  POST a form body with no OAuth client authentication, returning the decoded
-  JSON body when present (an empty/non-JSON success body decodes to `%{}`).
+  POST a form body with no OAuth client authentication, requiring HTTP 200,
+  `application/json`, and a duplicate-free JSON object in the response.
 
   Used for a submission the OAuth client-authentication model does not
   cover - the OID4VP `direct_post` `response_uri`, which a wallet POSTs to
@@ -124,20 +206,138 @@ defmodule AttestoClient.OAuthHTTP do
   """
   @spec post_form_open(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_form_open(endpoint, form, opts) when is_map(form) and is_list(opts) do
-    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+    run_open_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
       open_request(target, form, req_options(prepared_opts), timeout_ms)
     end)
   end
+
+  @doc """
+  POST an unauthenticated form and return the raw response text. This is used
+  by OID4VP `request_uri_method=post` to receive a signed request JWT.
+  Endpoint screening, response limits and the overall deadline also apply.
+  """
+  @spec post_text_open(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def post_text_open(endpoint, form, opts) when is_map(form) and is_list(opts) do
+    run_open_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      options = accept_options(req_options(prepared_opts), "application/oauth-authz-req+jwt")
+      open_request(target, form, options, timeout_ms, :text)
+    end)
+  end
+
+  @spec post_challenge(String.t(), keyword()) :: {:ok, Req.Response.t()} | {:error, term()}
+  def post_challenge(endpoint, opts) when is_list(opts) do
+    run_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+      options =
+        prepared_opts
+        |> req_options()
+        |> accept_options("application/json")
+        |> Keyword.merge(
+          url: target.url,
+          method: :post,
+          body: "",
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms,
+          compressed: false,
+          raw: true,
+          into: bounded_response_into(16_384)
+        )
+
+      case run_req(options) do
+        {:ok, %Req.Response{} = response} -> {:ok, response}
+        {:error, :response_too_large} = error -> error
+        {:error, _reason} -> {:error, :transport_error}
+      end
+    end)
+  end
+
+  defp accept_options(options, media_type) do
+    headers =
+      options
+      |> Keyword.get(:headers, [])
+      |> Enum.reject(fn
+        {name, _value} -> name |> to_string() |> String.downcase() == "accept"
+        _malformed -> false
+      end)
+
+    Keyword.put(options, :headers, [{"accept", media_type} | headers])
+  end
+
+  # By-reference endpoints are untrusted until their document is verified.
+  # Only explicit in-process test transport, connection timeout and public CA
+  # trust inputs may cross this boundary. In particular, no caller headers,
+  # cookies, authentication, TLS client identity, plugins or nested routing
+  # options reach either DNS screening or the request pipeline.
+  defp run_open_screened(endpoint, opts, operation) do
+    with {:ok, open_opts} <- open_options(opts) do
+      run_screened(endpoint, open_opts, operation)
+    end
+  end
+
+  defp open_options(opts) do
+    with true <- unique_keyword?(opts),
+         options = req_options(opts),
+         true <- unique_keyword?(options),
+         connect = Keyword.get(options, :connect_options, []),
+         true <- unique_keyword?(connect),
+         transport = Keyword.get(connect, :transport_opts, []),
+         true <- unique_keyword?(transport),
+         :ok <- open_routing(options, connect) do
+      safe_connect =
+        connect
+        |> Keyword.take([:timeout])
+        |> Keyword.put(:transport_opts, Keyword.take(transport, [:cacerts, :cacertfile]))
+
+      safe_options =
+        options
+        |> Keyword.take([:plug])
+        |> Keyword.put(:connect_options, safe_connect)
+
+      {:ok,
+       opts |> Keyword.take([:timeout, :resolver]) |> Keyword.put(:req_options, safe_options)}
+    else
+      _unsafe -> {:error, :unsafe_transport_options}
+    end
+  end
+
+  defp open_routing(options, connect) do
+    in_process? = Keyword.get(options, :plug) not in [nil, false]
+    routed? = Enum.any?([:adapter, :finch], &(Keyword.get(options, &1) not in [nil, false]))
+    proxy? = Keyword.get(connect, :proxy) not in [nil, false]
+
+    if Keyword.get(options, :unix_socket) not in [nil, false] or
+         (not in_process? and (routed? or proxy?)) do
+      {:error, :unsafe_transport_options}
+    else
+      :ok
+    end
+  end
+
+  defp unique_keyword?(options) when is_list(options) do
+    Keyword.keyword?(options) and
+      length(Keyword.keys(options)) == length(Enum.uniq(Keyword.keys(options)))
+  end
+
+  defp unique_keyword?(_options), do: false
 
   # The overall deadline includes DNS screening and request preparation, not
   # only the socket exchange. A slow or wedged resolver therefore cannot hold a
   # caller past the timeout promised by the higher-level flow.
   defp run_screened(endpoint, opts, operation) do
-    with {:ok, timeout_ms} <- timeout(opts) do
+    with {:ok, timeout_ms} <- timeout(opts),
+         :ok <- initial_dpop_nonce(opts) do
       Deadline.run(
         fn -> execute_screened(endpoint, opts, timeout_ms, operation) end,
         timeout_ms
       )
+    end
+  end
+
+  defp initial_dpop_nonce(opts) do
+    case Keyword.get(opts, :dpop_nonce) do
+      nil -> :ok
+      nonce when is_binary(nonce) and byte_size(nonce) in 1..4_096 -> :ok
+      _invalid -> {:error, :invalid_dpop_nonce}
     end
   end
 
@@ -369,6 +569,12 @@ defmodule AttestoClient.OAuthHTTP do
     )
   end
 
+  defp classify_form(%Req.Response{status: status}, {:json, expected})
+       when status in 200..299 and status != expected,
+       do: {:error, {:unexpected_http_status, status}}
+
+  defp classify_form(response, {:json, _expected}), do: classify_form(response, :json)
+
   defp classify_form(%Req.Response{status: status}, :unit) when status in 200..299, do: :ok
 
   defp classify_form(%Req.Response{status: status, body: body}, _mode)
@@ -404,6 +610,81 @@ defmodule AttestoClient.OAuthHTTP do
     # The credential/resource request has no client_assertion, so the retry only
     # needs a fresh DPoP proof (minted per attempt below); the base is identical.
     run_with_dpop(dpop_ctx, fn _retry?, _challenge -> builder.() end, classify)
+  end
+
+  defp credential_request(target, endpoint, body_options, access_token, opts, timeout_ms) do
+    context = dpop_context(opts, "POST", endpoint, access_token)
+
+    builder = fn _retry?, _challenge ->
+      base =
+        credential_request_options(opts, body_options)
+        |> Keyword.merge(
+          url: target.url,
+          method: :post,
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms,
+          compressed: false,
+          raw: true,
+          into: bounded_response_into(@max_response_bytes)
+        )
+
+      {:ok, put_token_auth(base, access_token, context)}
+    end
+
+    run_with_dpop(context, builder, &classify_credential/1)
+  end
+
+  defp credential_request_options(opts, body_options) do
+    headers =
+      Keyword.get(req_options(opts), :headers, []) ++ Keyword.get(body_options, :headers, [])
+
+    opts
+    |> req_options()
+    |> Keyword.merge(body_options)
+    |> Keyword.put(:headers, headers)
+  end
+
+  defp classify_credential(%Req.Response{} = response) do
+    with {:ok, response} <- credential_response_body(response) do
+      classify_credential_response(response)
+    end
+  end
+
+  defp credential_response_body(%Req.Response{body: body} = response) when is_binary(body) do
+    if jwt_response?(response) do
+      {:ok, response}
+    else
+      with {:ok, decoded} <- CredentialJSON.decode(body) do
+        {:ok, %{response | body: decoded}}
+      end
+    end
+  end
+
+  defp credential_response_body(_response), do: {:error, :invalid_credential_response}
+
+  defp classify_credential_response(%Req.Response{status: status, body: body} = response) do
+    cond do
+      status in [200, 202] ->
+        {:ok, %{status: status, headers: response.headers, body: body}}
+
+      is_binary(body) and jwt_response?(response) ->
+        {:ok, %{status: status, headers: response.headers, body: body}}
+
+      true ->
+        classify_json(response)
+    end
+  end
+
+  defp jwt_response?(response) do
+    case Req.Response.get_header(response, "content-type") do
+      [type] ->
+        type |> String.split(";") |> hd() |> String.trim() |> String.downcase() ==
+          "application/jwt"
+
+      _invalid ->
+        false
+    end
   end
 
   # Drop a caller-pinned client-auth `jti` so re-authentication mints a fresh
@@ -488,7 +769,7 @@ defmodule AttestoClient.OAuthHTTP do
   # sequential attestation / DPoP challenges cannot replay proofs or loop.
   defp run_with_dpop(ctx, builder, classify, options \\ []) do
     state = %{
-      nonce: nil,
+      nonce: if(ctx, do: ctx.nonce),
       challenge: nil,
       retry?: false,
       dpop_retry?: not is_nil(ctx),
@@ -572,8 +853,17 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp dpop_context(opts, method, url, access_token) do
     case Keyword.get(opts, :dpop) do
-      nil -> nil
-      key -> %{key: key, method: method, url: url, access_token: access_token}
+      nil ->
+        nil
+
+      key ->
+        %{
+          key: key,
+          method: method,
+          url: url,
+          access_token: access_token,
+          nonce: Keyword.get(opts, :dpop_nonce)
+        }
     end
   end
 
@@ -587,7 +877,16 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp dpop_error(%Req.Response{body: %{"error" => error}}) when is_binary(error), do: error
 
-  defp dpop_error(%Req.Response{} = resp) do
+  defp dpop_error(%Req.Response{body: body} = response) when is_binary(body) do
+    case CredentialJSON.decode(body) do
+      {:ok, %{"error" => error}} when is_binary(error) -> error
+      _other -> dpop_authenticate_error(response)
+    end
+  end
+
+  defp dpop_error(%Req.Response{} = resp), do: dpop_authenticate_error(resp)
+
+  defp dpop_authenticate_error(resp) do
     # A resource server carries the error in WWW-Authenticate, not a JSON body.
     case Req.Response.get_header(resp, "www-authenticate") do
       [header | _] ->
@@ -640,11 +939,8 @@ defmodule AttestoClient.OAuthHTTP do
   # cap either.
   defp get_request(target, req_options, timeout_ms) do
     case bounded_get(target, req_options, timeout_ms) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
-        case JSON.decode(body) do
-          {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
-          _other -> {:error, :invalid_json}
-        end
+      {:ok, %Req.Response{status: 200} = response} ->
+        open_response_body(response, :json)
 
       {:ok, %Req.Response{status: status}} ->
         {:error, {:http_status, status}}
@@ -656,7 +952,7 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp get_text_request(target, req_options, timeout_ms) do
     case bounded_get(target, req_options, timeout_ms) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> {:ok, body}
+      {:ok, %Req.Response{status: 200} = response} -> open_response_body(response, :text)
       {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
       {:error, reason} -> {:error, reason}
     end
@@ -685,7 +981,7 @@ defmodule AttestoClient.OAuthHTTP do
     _error -> {:error, :transport_error}
   end
 
-  defp open_request(target, form, req_options, timeout_ms) do
+  defp open_request(target, form, req_options, timeout_ms, response_mode \\ :json) do
     options =
       req_options ++
         [
@@ -696,19 +992,16 @@ defmodule AttestoClient.OAuthHTTP do
           retry: false,
           receive_timeout: timeout_ms,
           compressed: false,
-          raw: false,
+          raw: true,
           into: bounded_response_into(@max_response_bytes)
         ]
 
     case run_req(options) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        {:ok, json_body(body)}
+      {:ok, %Req.Response{status: 200} = response} ->
+        open_response_body(response, response_mode)
 
-      {:ok, %Req.Response{status: status, body: %{} = body}} ->
-        {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
-
-      {:ok, %Req.Response{status: status}} ->
-        {:error, {:http_status, status}}
+      {:ok, %Req.Response{} = response} ->
+        open_error_response(response)
 
       {:error, :response_too_large} = error ->
         error
@@ -720,8 +1013,48 @@ defmodule AttestoClient.OAuthHTTP do
     _error -> {:error, :transport_error}
   end
 
-  defp json_body(body) when is_map(body), do: body
-  defp json_body(_body), do: %{}
+  defp open_response_body(%Req.Response{body: body} = response, :text) do
+    with :ok <- response_media_type(response, "application/oauth-authz-req+jwt"),
+         true <- is_binary(body) do
+      {:ok, body}
+    else
+      false -> {:error, :invalid_text_response}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp open_response_body(%Req.Response{body: body} = response, :json) do
+    with :ok <- response_media_type(response, "application/json"),
+         {:ok, decoded} <- CredentialJSON.decode(body) do
+      {:ok, decoded}
+    else
+      {:error, :invalid_credential_response} -> {:error, :invalid_json}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp open_error_response(%Req.Response{status: status} = response) do
+    case open_response_body(response, :json) do
+      {:ok, %{"error" => _error} = body} when status not in 200..299 ->
+        {:error, {:oauth_error, status, Map.take(body, ["error", "error_description"])}}
+
+      _other ->
+        {:error, {:http_status, status}}
+    end
+  end
+
+  defp response_media_type(response, expected) do
+    case Req.Response.get_header(response, "content-type") do
+      [value] when is_binary(value) ->
+        media_type =
+          value |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()
+
+        if media_type == expected, do: :ok, else: {:error, :invalid_response_content_type}
+
+      _invalid ->
+        {:error, :invalid_response_content_type}
+    end
+  end
 
   defp bounded_response_into(max_bytes) do
     fn {:data, data}, {request, response} ->

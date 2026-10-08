@@ -24,7 +24,14 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
   end
 
   defp verify_opts(overrides \\ []) do
-    Keyword.merge([issuer: @verifier_client_id, audience: @wallet_audience], overrides)
+    Keyword.merge(
+      [
+        issuer: @verifier_client_id,
+        audience: @wallet_audience,
+        verifier_metadata: %{"vp_formats_supported" => %{"dc+sd-jwt" => %{}}}
+      ],
+      overrides
+    )
   end
 
   defp build_request_jwt(rp_key, params_overrides \\ %{}) do
@@ -33,6 +40,7 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
         %{
           "client_id" => @verifier_client_id,
           "response_type" => "vp_token",
+          "response_mode" => "direct_post",
           "nonce" => @nonce,
           "response_uri" => @response_uri,
           "dcql_query" => dcql_query()
@@ -69,8 +77,17 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
     test "carries state and an explicit response_mode" do
       {rp_key, rp_public} = verifier_keypair()
 
+      {_key, encryption_public} = verifier_keypair()
+
+      encryption_public =
+        Map.merge(encryption_public, %{"alg" => "ECDH-ES", "use" => "enc", "kid" => "recipient"})
+
       jwt =
-        build_request_jwt(rp_key, %{"state" => "state-1", "response_mode" => "direct_post.jwt"})
+        build_request_jwt(rp_key, %{
+          "state" => "state-1",
+          "response_mode" => "direct_post.jwt",
+          "client_metadata" => %{"jwks" => %{"keys" => [encryption_public]}}
+        })
 
       assert {:ok, request} = PresentationRequest.verify(jwt, rp_public, verify_opts())
       assert request.state == "state-1"
@@ -87,7 +104,7 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
       assert {:error, _reason} = PresentationRequest.verify(tampered, rp_public, verify_opts())
     end
 
-    test "rejects the wrong audience or issuer" do
+    test "rejects the wrong audience and ignores the legacy issuer option" do
       {rp_key, rp_public} = verifier_keypair()
       jwt = build_request_jwt(rp_key)
 
@@ -98,7 +115,7 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
                  verify_opts(audience: "https://other.example.com")
                )
 
-      assert {:error, :invalid_issuer} =
+      assert {:ok, _request} =
                PresentationRequest.verify(
                  jwt,
                  rp_public,
@@ -140,6 +157,7 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
           params: %{
             "client_id" => @verifier_client_id,
             "response_type" => "vp_token",
+            "response_mode" => "direct_post",
             "nonce" => @nonce,
             "response_uri" => @response_uri
           }

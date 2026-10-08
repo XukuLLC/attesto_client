@@ -5,22 +5,19 @@ if Code.ensure_loaded?(CBOR) do
     `DeviceResponse` - the holder-side mirror of
     `Attesto.Mdoc.verify_device_response/4`.
 
-    `build_device_response/4` re-embeds the held credential's `IssuerSigned`
-    structure unchanged, signs `DeviceAuthentication` as a detached ES256
-    `COSE_Sign1` over the OID4VP `SessionTranscript`/`OpenID4VPHandover`
-    (`draft-ietf-oauth-openid4vp` "Handover and SessionTranscript
-    Definitions", redirect-flow form - the same construction
-    `Attesto.Mdoc.verify_device_response/4` expects), and assembles the
-    `DeviceResponse`. `DeviceNameSpaces` (the device-signed, as opposed to
-    issuer-signed, namespace) is always empty: this slice presents the
-    credential's issuer-signed claims as a whole and does not filter
-    individual `IssuerSigned` items to the requested claim set. Only
-    unencrypted `direct_post` is supported - the handover's JWK thumbprint is
-    always absent (`nil`), matching `direct_post.jwt` being out of scope for
-    `AttestoClient.Wallet.Presentation` in this slice.
+    `build_device_response/4` preserves the issuer signature and selected
+    issuer-signed items, then signs `DeviceAuthentication` as a detached ES256
+    `COSE_Sign1` over the OID4VP 1.0 redirect-flow session transcript.
+    `:claim_paths` selects issuer-signed namespace elements; omitted paths
+    include all elements. Device-signed namespaces are empty.
+
+    For encrypted responses, `:response_encryption_jwk` supplies the exact
+    recipient public key selected from authenticated request metadata. Its
+    SHA-256 JWK thumbprint binds the handover to the encryption recipient.
+    Unencrypted responses use a null thumbprint.
     """
 
-    alias Attesto.{Cose, JWS}
+    alias Attesto.{Cose, JWS, Thumbprint}
 
     @doc_status 0
     @version "1.0"
@@ -52,7 +49,7 @@ if Code.ensure_loaded?(CBOR) do
 
     def build_device_response(%{credential: _} = held, request, holder_key, opts)
         when is_list(opts) do
-      do_build(held, request, holder_key)
+      do_build(held, request, holder_key, opts)
     rescue
       _error -> {:error, :invalid_key}
     catch
@@ -62,11 +59,13 @@ if Code.ensure_loaded?(CBOR) do
     def build_device_response(_held, _request, _holder_key, _opts),
       do: {:error, :invalid_credential}
 
-    defp do_build(held, request, holder_key) do
+    defp do_build(held, request, holder_key, opts) do
       with {:ok, issuer_signed} <- decode_issuer_signed(held),
+           {:ok, issuer_signed} <-
+             filter_namespaces(issuer_signed, Keyword.get(opts, :claim_paths, :all)),
            {:ok, doc_type} <- doc_type(held),
            {:ok, pem} <- holder_pem(holder_key),
-           {:ok, session_transcript} <- session_transcript(request) do
+           {:ok, session_transcript} <- session_transcript(request, opts) do
         device_namespaces_tagged = embedded_cbor(%{})
 
         device_authentication_bytes =
@@ -134,21 +133,66 @@ if Code.ensure_loaded?(CBOR) do
     # SessionTranscript = [null, null, OpenID4VPHandover], where
     # OpenID4VPHandover = ["OpenID4VPHandover", sha256(OpenID4VPHandoverInfo)]
     # and OpenID4VPHandoverInfo = [client_id, nonce, jwkThumbprint, response_uri].
-    # Unencrypted direct_post is the only response mode this builder supports,
-    # so jwkThumbprint is always null.
-    defp session_transcript(%{client_id: client_id, nonce: nonce, response_uri: response_uri})
+    # Encrypted responses use the recipient JWK's raw SHA-256 thumbprint bytes.
+    defp session_transcript(
+           %{client_id: client_id, nonce: nonce, response_uri: response_uri},
+           opts
+         )
          when is_binary(client_id) and client_id != "" and is_binary(nonce) and nonce != "" and
                 is_binary(response_uri) and response_uri != "" do
-      handover_info_hash =
-        [client_id, nonce, nil, response_uri]
-        |> CBOR.encode()
-        |> then(&:crypto.hash(:sha256, &1))
-        |> bytes()
+      with {:ok, thumbprint} <- encryption_thumbprint(Keyword.get(opts, :response_encryption_jwk)) do
+        hash =
+          [client_id, nonce, thumbprint, response_uri]
+          |> CBOR.encode()
+          |> then(&:crypto.hash(:sha256, &1))
 
-      {:ok, [nil, nil, ["OpenID4VPHandover", handover_info_hash]]}
+        {:ok, [nil, nil, ["OpenID4VPHandover", bytes(hash)]]}
+      end
     end
 
-    defp session_transcript(_request), do: {:error, :invalid_credential}
+    defp session_transcript(_request, _opts), do: {:error, :invalid_credential}
+
+    defp encryption_thumbprint(nil), do: {:ok, nil}
+
+    defp encryption_thumbprint(jwk) do
+      with {:ok, encoded} <- Thumbprint.of_jwk(jwk),
+           {:ok, raw} <- JWS.decode64(encoded),
+           do: {:ok, bytes(raw)}
+    end
+
+    defp filter_namespaces(issuer_signed, :all), do: {:ok, issuer_signed}
+
+    defp filter_namespaces(%{"nameSpaces" => namespaces} = issuer_signed, paths)
+         when is_list(paths) do
+      kept =
+        Enum.reduce(namespaces, %{}, fn {namespace, items}, acc ->
+          selected = Enum.filter(items, &requested_item?(&1, namespace, paths))
+          if selected == [], do: acc, else: Map.put(acc, namespace, selected)
+        end)
+
+      {:ok, Map.put(issuer_signed, "nameSpaces", kept)}
+    end
+
+    defp filter_namespaces(_issuer_signed, _paths), do: {:error, :invalid_credential}
+
+    defp requested_item?(
+           %CBOR.Tag{tag: 24, value: %CBOR.Tag{tag: :bytes, value: encoded}},
+           namespace,
+           paths
+         ) do
+      case CBOR.decode(encoded) do
+        {:ok, %{"elementIdentifier" => element}, ""} ->
+          Enum.any?(paths, fn
+            [^namespace, ^element | _rest] -> true
+            _ -> false
+          end)
+
+        _ ->
+          false
+      end
+    end
+
+    defp requested_item?(_item, _namespace, _paths), do: false
 
     defp embedded_cbor(value), do: %CBOR.Tag{tag: 24, value: bytes(CBOR.encode(value))}
     defp bytes(value) when is_binary(value), do: %CBOR.Tag{tag: :bytes, value: value}
@@ -157,9 +201,7 @@ else
   defmodule AttestoClient.Wallet.Presentation.Mdoc do
     @moduledoc "Requires the optional `:cbor` dependency."
 
-    @dep_error "AttestoClient.Wallet.Presentation.Mdoc requires the optional :cbor dependency. " <>
-                 "Add {:cbor, \"~> 1.0\"} to your deps."
-
-    def build_device_response(_held, _request, _holder_key, _opts \\ []), do: raise(@dep_error)
+    def build_device_response(_held, _request, _holder_key, _opts \\ []),
+      do: {:error, :unsupported_mdoc}
   end
 end
