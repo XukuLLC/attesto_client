@@ -1,6 +1,6 @@
 defmodule AttestoClient.AuthorizationCode do
   @moduledoc """
-  OpenID Connect Authorization Code flow with S256 PKCE.
+  OAuth and OpenID Connect Authorization Code flows with S256 PKCE.
 
   `start/2` validates discovery metadata, creates high-entropy state, nonce, and
   PKCE values, stores the transaction with a finite lifetime, and returns the
@@ -13,10 +13,14 @@ defmodule AttestoClient.AuthorizationCode do
   another. The store protects protocol correlation only. Applications remain
   responsible for deciding whether verified claims authorize a user, creating
   or retaining a session, and persisting rotated tokens.
+
+  `protocol: :oauth` supports plain OAuth authorization without OIDC metadata
+  or an ID Token. PAR and DPoP are supported in either protocol mode.
   """
 
   alias Attesto.SecureCompare
   alias Attesto.SigningAlg
+  alias AttestoClient.AuthorizationProfile
   alias AttestoClient.AuthorizationTransaction
   alias AttestoClient.AuthorizationTransaction.Store
   alias AttestoClient.Deadline
@@ -29,7 +33,7 @@ defmodule AttestoClient.AuthorizationCode do
   @default_transaction_ttl_ms 10 * 60 * 1_000
   @default_timeout_ms 10_000
   @max_callback_bytes 1_000_000
-  @reserved_params ~w(client_id redirect_uri response_type scope state nonce code_challenge code_challenge_method)
+  @reserved_params ~w(client_id redirect_uri response_type scope state nonce code_challenge code_challenge_method dpop_jkt request_uri request request_uri_method client_secret client_assertion client_assertion_type grant_type code code_verifier)
 
   @type store :: Store.store()
 
@@ -47,7 +51,38 @@ defmodule AttestoClient.AuthorizationCode do
   and must match the client's registration and the provider metadata.
 
   Additional request values may be supplied in `:authorization_params`, but
-  protocol-bound parameters cannot be overridden.
+  protocol-bound parameters and client-authentication fields cannot be
+  overridden, including bracket aliases decoded by web frameworks.
+
+  Use `protocol: :oauth` for a plain OAuth flow, including OID4VCI issuance.
+  It does not require the `openid` scope, OIDC metadata, or an ID Token; the
+  callback returns `id_token_claims: nil`. The protocol is pinned in the
+  transaction and cannot be changed at callback.
+
+  `par: true` submits the request to the advertised Pushed Authorization
+  Request endpoint with `:client_auth` and `:dpop`. The default `:auto` uses
+  PAR when the server or selected profile requires it. `par: false` cannot
+  override a required PAR policy. DPoP keys supplied at start are bound to the transaction and
+  must also be supplied at callback; their thumbprint is sent as `dpop_jkt`.
+
+  Set exactly one of `haip: true` or `fapi?: true` to select the stored profile.
+  Both require authenticated PAR, the authorization response's `iss`, and a
+  retained DPoP private key even when metadata omits the corresponding flags.
+  This client supports the DPoP sender constraint; it does not bind mTLS
+  certificate identities. FAPI requires `private_key_jwt` with a compatible
+  signing algorithm. HAIP supports the existing authenticated methods, including
+  client attestation according to the issuer's ecosystem policy.
+
+  Retain the same client-authentication method and signing key at callback.
+  Client attestation retains the client subject and instance key, so renewed
+  attestations and refreshed challenges are allowed. HAIP's Appendix E format
+  requires a bounded `x5c` certificate chain. The authorization server verifies
+  its signature, certificate trust and validity; an optional attester `iss`
+  claim is not part of the local instance binding.
+  The transaction records public key identity or a secret digest, never private
+  signing material. Callback options cannot weaken the selected profile.
+  Generic flows preserve existing authentication choices, require `iss` when
+  metadata advertises support, and always reject a returned issuer mismatch.
   """
   @spec start(store(), keyword()) ::
           {:ok, %{url: String.t(), state: String.t(), expires_in: pos_integer()}}
@@ -55,18 +90,30 @@ defmodule AttestoClient.AuthorizationCode do
   def start(store, opts) when is_list(opts) do
     default_ttl_ms = @default_transaction_ttl_ms
 
-    with {:ok, issuer} <- required_string(opts, :issuer),
+    with {:ok, protocol} <- protocol(opts),
+         {:ok, profile} <- AuthorizationProfile.select(opts),
+         :ok <- profile_par_option(opts, profile != :generic),
+         {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, client_id} <- required_string(opts, :client_id),
+         {:ok, client_auth_binding} <- AuthorizationProfile.bind(profile, client_id, issuer, opts),
+         {:ok, dpop_jkt} <- dpop_thumbprint(opts),
+         :ok <- AuthorizationProfile.require_dpop(profile, dpop_jkt),
+         :ok <- AuthorizationProfile.dpop_policy(profile, opts),
          {:ok, browser_binding} <- required_string(opts, :browser_binding),
          {:ok, redirect_uri} <- redirect_uri(opts),
-         {:ok, scopes} <- scopes(opts),
+         {:ok, scopes} <- scopes(opts, protocol),
+         :ok <- profile_scope(profile, scopes),
          {:ok, extra_params} <- authorization_params(opts),
          {:ok, ttl_ms} <- positive_integer(opts, :transaction_ttl_ms, default_ttl_ms),
-         {:ok, id_token_alg} <- id_token_alg(opts),
+         {:ok, requested_id_token_alg} <- protocol_id_token_alg(opts, protocol, profile),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
-         :ok <- metadata_supports_alg(metadata, id_token_alg),
+         :ok <- validate_endpoint_queries(metadata),
+         :ok <- AuthorizationProfile.metadata(client_auth_binding, metadata),
+         {:ok, id_token_alg} <- resolved_id_token_alg(metadata, requested_id_token_alg),
+         :ok <- protocol_supports_alg(metadata, id_token_alg, protocol),
+         {:ok, par?} <- use_par(metadata, opts, profile != :generic),
          {:ok, max_age} <- max_age(extra_params),
-         {:ok, state, transaction} <-
+         {:ok, state, transaction, deadline} <-
            store_transaction(
              store,
              %{
@@ -76,7 +123,12 @@ defmodule AttestoClient.AuthorizationCode do
                metadata: metadata,
                id_token_alg: id_token_alg,
                browser_binding: browser_binding,
-               max_age: max_age
+               max_age: max_age,
+               protocol: protocol,
+               dpop_jkt: dpop_jkt,
+               require_response_issuer: profile != :generic,
+               profile: profile,
+               client_auth_binding: client_auth_binding
              },
              ttl_ms
            ) do
@@ -85,19 +137,15 @@ defmodule AttestoClient.AuthorizationCode do
           "client_id" => client_id,
           "redirect_uri" => redirect_uri,
           "response_type" => "code",
-          "scope" => Enum.join(scopes, " "),
           "state" => state,
-          "nonce" => transaction.nonce,
           "code_challenge" => code_challenge!(transaction.code_verifier),
           "code_challenge_method" => "S256"
         })
+        |> put_optional("scope", if(scopes == [], do: nil, else: Enum.join(scopes, " ")))
+        |> put_optional("nonce", if(protocol == :oidc, do: transaction.nonce))
+        |> put_optional("dpop_jkt", dpop_jkt)
 
-      {:ok,
-       %{
-         url: put_query(metadata["authorization_endpoint"], params),
-         state: state,
-         expires_in: div(ttl_ms + 999, 1_000)
-       }}
+      finish_start(store, state, transaction, params, par?, deadline, opts)
     end
   end
 
@@ -131,7 +179,7 @@ defmodule AttestoClient.AuthorizationCode do
   not retry an authorization code.
   """
   @spec callback(store(), map() | String.t(), keyword()) ::
-          {:ok, %{tokens: TokenSet.t(), id_token_claims: map()}} | {:error, term()}
+          {:ok, %{tokens: TokenSet.t(), id_token_claims: map() | nil}} | {:error, term()}
   def callback(store, response, opts \\ [])
 
   def callback(store, response, opts) when is_binary(response) and is_list(opts) do
@@ -144,6 +192,16 @@ defmodule AttestoClient.AuthorizationCode do
     with {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state),
          :ok <- check_browser_binding(transaction, opts),
+         :ok <-
+           AuthorizationProfile.check(
+             transaction_profile(transaction),
+             Map.get(transaction, :client_auth_binding),
+             transaction.client_id,
+             transaction.issuer,
+             opts
+           ),
+         :ok <- check_dpop_binding(transaction, opts),
+         :ok <- AuthorizationProfile.dpop_policy(transaction_profile(transaction), opts),
          :ok <- check_response_issuer(params, transaction),
          {:ok, code} <- callback_code(params),
          {:ok, timeout_ms} <- positive_integer(opts, :timeout, @default_timeout_ms) do
@@ -168,6 +226,9 @@ defmodule AttestoClient.AuthorizationCode do
   # map. Code-flow responses never use the URI fragment.
   defp callback_query(response) do
     cond do
+      Regex.match?(~r/\A[^&=?#\/:]+=/, response) ->
+        {:ok, response}
+
       String.contains?(response, "?") ->
         case URI.new(response) do
           {:ok, %URI{query: query, fragment: nil}} when is_binary(query) -> {:ok, query}
@@ -223,8 +284,10 @@ defmodule AttestoClient.AuthorizationCode do
           })
         )
 
+      deadline = System.monotonic_time(:millisecond) + ttl_ms
+
       case Store.put_new(store, state, transaction, ttl_ms) do
-        :ok -> {:halt, {:ok, state, transaction}}
+        :ok -> {:halt, {:ok, state, transaction, deadline}}
         {:error, :already_exists} -> {:cont, {:error, :state_collision}}
         {:error, reason} -> {:halt, {:error, {:transaction_store, reason}}}
       end
@@ -246,23 +309,9 @@ defmodule AttestoClient.AuthorizationCode do
       "code_verifier" => transaction.code_verifier
     }
 
-    http_opts =
-      opts
-      |> Keyword.take([
-        :client_auth,
-        :req_options,
-        :timeout,
-        :dpop,
-        :attestation_challenge_received
-      ])
-      |> Keyword.put(:client_id, transaction.client_id)
-      |> Keyword.put(:issuer, transaction.issuer)
+    http_opts = http_options(transaction, opts)
 
-    with {:ok, jwks} <-
-           Verifier.resolve_jwks(
-             [metadata: transaction.metadata, req_options: Keyword.get(opts, :req_options, [])],
-             transaction.issuer
-           ),
+    with {:ok, jwks} <- verification_keys(transaction, opts),
          {:ok, response} <-
            AttestoClient.OAuthHTTP.post_form(
              transaction.metadata["token_endpoint"],
@@ -270,9 +319,174 @@ defmodule AttestoClient.AuthorizationCode do
              http_opts
            ),
          {:ok, tokens} <- TokenSet.from_response(response, nil),
-         {:ok, id_token} <- require_id_token(tokens),
-         {:ok, claims} <- verify_id_token(id_token, tokens, transaction, jwks, code) do
+         {:ok, tokens} <- bind_token_dpop(tokens, opts),
+         {:ok, tokens} <- bind_token_profile(tokens, transaction),
+         {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code) do
       {:ok, %{tokens: tokens, id_token_claims: claims}}
+    end
+  end
+
+  defp verification_keys(%AuthorizationTransaction{protocol: :oauth}, _opts), do: {:ok, nil}
+
+  defp verification_keys(transaction, opts) do
+    Verifier.resolve_jwks(
+      [metadata: transaction.metadata, req_options: Keyword.get(opts, :req_options, [])],
+      transaction.issuer
+    )
+  end
+
+  defp protocol_claims(_tokens, %AuthorizationTransaction{protocol: :oauth}, _jwks, _code),
+    do: {:ok, nil}
+
+  defp protocol_claims(tokens, transaction, jwks, code) do
+    with {:ok, id_token} <- require_id_token(tokens),
+         do: verify_id_token(id_token, tokens, transaction, jwks, code)
+  end
+
+  defp bind_token_dpop(tokens, opts) do
+    with {:ok, jkt} <- dpop_thumbprint(opts), do: TokenSet.bind_dpop(tokens, jkt)
+  end
+
+  defp bind_token_profile(tokens, transaction) do
+    {:ok,
+     %{
+       tokens
+       | profile: transaction_profile(transaction),
+         client_auth_binding: Map.get(transaction, :client_auth_binding),
+         client_id: transaction.client_id,
+         issuer: transaction.issuer,
+         id_token_alg: transaction.id_token_alg
+     }}
+  end
+
+  defp http_options(transaction, opts) do
+    opts
+    |> Keyword.take([
+      :client_auth,
+      :req_options,
+      :timeout,
+      :resolver,
+      :dpop,
+      :dpop_nonce,
+      :attestation_challenge_received
+    ])
+    |> Keyword.put(:client_id, transaction.client_id)
+    |> Keyword.put(:issuer, transaction.issuer)
+  end
+
+  defp finish_start(store, state, transaction, params, par?, deadline, opts) do
+    result =
+      with {:ok, remaining} <- remaining_lifetime(deadline),
+           {:ok, url, par_lifetime} <-
+             bounded_authorization_url(transaction, params, par?, remaining, opts),
+           {:ok, remaining} <- remaining_lifetime(deadline) do
+        ttl_ms = if par_lifetime, do: min(remaining, par_lifetime), else: remaining
+        {:ok, %{url: url, state: state, expires_in: div(ttl_ms + 999, 1_000)}}
+      end
+
+    case result do
+      {:ok, _started} -> result
+      {:error, _reason} -> discard_start(store, state, deadline, result)
+    end
+  end
+
+  defp discard_start(store, state, deadline, error) do
+    Store.take(store, state)
+
+    if System.monotonic_time(:millisecond) >= deadline,
+      do: {:error, :authorization_transaction_expired},
+      else: error
+  end
+
+  defp remaining_lifetime(deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      remaining when remaining > 0 -> {:ok, remaining}
+      _expired -> {:error, :authorization_transaction_expired}
+    end
+  end
+
+  defp bounded_authorization_url(transaction, params, false, _remaining, opts),
+    do: authorization_url(transaction, params, false, opts)
+
+  defp bounded_authorization_url(transaction, params, true, remaining, opts) do
+    with {:ok, timeout} <- positive_integer(opts, :timeout, @default_timeout_ms) do
+      budget = min(timeout, remaining)
+      bounded_opts = Keyword.put(opts, :timeout, budget)
+      Deadline.run(fn -> authorization_url(transaction, params, true, bounded_opts) end, budget)
+    end
+  end
+
+  defp authorization_url(transaction, params, false, _opts),
+    do: {:ok, put_query(transaction.metadata["authorization_endpoint"], params), nil}
+
+  defp authorization_url(transaction, params, true, opts) do
+    endpoint = transaction.metadata["pushed_authorization_request_endpoint"]
+
+    http_opts = http_options(transaction, opts) |> Keyword.put(:expected_status, 201)
+
+    with {:ok, response} <-
+           AttestoClient.OAuthHTTP.post_form(endpoint, params, http_opts),
+         %{"request_uri" => request_uri, "expires_in" => lifetime}
+         when is_binary(request_uri) and request_uri != "" and is_integer(lifetime) and
+                lifetime > 0 <- response do
+      {:ok,
+       put_query(transaction.metadata["authorization_endpoint"], %{
+         "client_id" => transaction.client_id,
+         "request_uri" => request_uri
+       }), lifetime * 1_000}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_par_response}
+    end
+  end
+
+  defp use_par(metadata, opts, profile_required?) do
+    advertised = Map.get(metadata, "require_pushed_authorization_requests", false)
+
+    if is_boolean(advertised),
+      do: par_setting(metadata, Keyword.get(opts, :par, :auto), advertised or profile_required?),
+      else: {:error, :invalid_metadata}
+  end
+
+  defp par_setting(_metadata, false, true), do: {:error, :par_required}
+
+  defp par_setting(metadata, option, required?) when option in [true, false, :auto] do
+    enabled = option == true or required?
+
+    if enabled and not is_binary(metadata["pushed_authorization_request_endpoint"]),
+      do: {:error, :missing_par_endpoint},
+      else: {:ok, enabled}
+  end
+
+  defp par_setting(_metadata, _option, _required), do: {:error, :invalid_par_option}
+
+  defp profile_par_option(opts, required?) do
+    case Keyword.get(opts, :par, :auto) do
+      false when required? -> {:error, :par_required}
+      option when option in [true, false, :auto] -> :ok
+      _invalid -> {:error, :invalid_par_option}
+    end
+  end
+
+  defp dpop_thumbprint(opts), do: TokenSet.dpop_thumbprint(opts)
+
+  defp check_dpop_binding(%AuthorizationTransaction{dpop_jkt: nil}, opts) do
+    with {:ok, _jkt} <- dpop_thumbprint(opts), do: :ok
+  end
+
+  defp check_dpop_binding(transaction, opts) do
+    with {:ok, presented} when is_binary(presented) <- dpop_thumbprint(opts),
+         true <- SecureCompare.equal?(transaction.dpop_jkt, presented) do
+      :ok
+    else
+      _other -> {:error, :dpop_key_mismatch}
+    end
+  end
+
+  defp protocol(opts) do
+    case Keyword.get(opts, :protocol, :oidc) do
+      value when value in [:oidc, :oauth] -> {:ok, value}
+      _other -> {:error, :invalid_protocol}
     end
   end
 
@@ -286,7 +500,8 @@ defmodule AttestoClient.AuthorizationCode do
       code: code,
       require_c_hash: false,
       max_age: transaction.max_age,
-      accepted_algs: [transaction.id_token_alg]
+      accepted_algs: [transaction.id_token_alg],
+      enforce_fapi_alg_policy: transaction_profile(transaction) == :fapi
     ]
 
     IDToken.verify(id_token, verify_opts)
@@ -311,7 +526,9 @@ defmodule AttestoClient.AuthorizationCode do
   defp callback_code(_params), do: {:error, :missing_code}
 
   defp check_response_issuer(params, transaction) do
-    required? = transaction.metadata["authorization_response_iss_parameter_supported"] == true
+    required? =
+      Map.get(transaction, :require_response_issuer, false) or
+        transaction.metadata["authorization_response_iss_parameter_supported"] == true
 
     case Map.fetch(params, "iss") do
       {:ok, issuer} when issuer == transaction.issuer -> :ok
@@ -333,12 +550,27 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
-  defp scopes(opts) do
-    case Keyword.get(opts, :scopes, ["openid"]) do
-      scopes when is_list(scopes) and scopes != [] ->
-        if Enum.all?(scopes, &(is_binary(&1) and &1 != "")) and "openid" in scopes,
-          do: {:ok, Enum.uniq(scopes)},
-          else: {:error, :invalid_scopes}
+  defp transaction_profile(transaction) do
+    case Map.fetch(transaction, :profile) do
+      {:ok, profile} ->
+        profile
+
+      :error ->
+        if Map.get(transaction, :require_response_issuer, false),
+          do: :legacy_profile,
+          else: :generic
+    end
+  end
+
+  defp scopes(opts, protocol) do
+    default = if protocol == :oidc, do: ["openid"], else: []
+
+    case Keyword.get(opts, :scopes, default) do
+      scopes when is_list(scopes) ->
+        if Enum.all?(scopes, &(is_binary(&1) and &1 != "")) and
+             (protocol == :oauth or "openid" in scopes),
+           do: {:ok, Enum.uniq(scopes)},
+           else: {:error, :invalid_scopes}
 
       _invalid ->
         {:error, :invalid_scopes}
@@ -350,7 +582,8 @@ defmodule AttestoClient.AuthorizationCode do
       %{} = params ->
         valid? =
           Enum.all?(params, fn {key, value} ->
-            is_binary(key) and key not in @reserved_params and scalar_authorization_value?(value)
+            is_binary(key) and parameter_root(key) not in @reserved_params and
+              scalar_authorization_value?(value)
           end)
 
         if valid?, do: {:ok, params}, else: {:error, :invalid_authorization_params}
@@ -400,6 +633,34 @@ defmodule AttestoClient.AuthorizationCode do
     alg = Keyword.get(opts, :id_token_alg, "RS256")
     if alg in SigningAlg.allowed(), do: {:ok, alg}, else: {:error, :unsupported_alg}
   end
+
+  defp protocol_id_token_alg(_opts, :oauth, _profile), do: {:ok, nil}
+
+  defp protocol_id_token_alg(opts, :oidc, :fapi) do
+    case Keyword.fetch(opts, :id_token_alg) do
+      :error ->
+        {:ok, :fapi_default}
+
+      {:ok, alg} ->
+        if alg in SigningAlg.fapi_algs(), do: {:ok, alg}, else: {:error, :unsupported_alg}
+    end
+  end
+
+  defp protocol_id_token_alg(opts, :oidc, _profile), do: id_token_alg(opts)
+
+  defp resolved_id_token_alg(metadata, :fapi_default) do
+    supported = metadata["id_token_signing_alg_values_supported"]
+    alg = Enum.find(~w(ES256 PS256 Ed25519 EdDSA), &(&1 in supported))
+    if alg, do: {:ok, alg}, else: {:error, :unsupported_alg}
+  end
+
+  defp resolved_id_token_alg(_metadata, alg), do: {:ok, alg}
+
+  defp profile_scope(:haip, []), do: {:error, :profile_scope_required}
+  defp profile_scope(_profile, _scopes), do: :ok
+
+  defp protocol_supports_alg(_metadata, _alg, :oauth), do: :ok
+  defp protocol_supports_alg(metadata, alg, :oidc), do: metadata_supports_alg(metadata, alg)
 
   defp metadata_supports_alg(metadata, alg) do
     if alg in metadata["id_token_signing_alg_values_supported"],
@@ -456,9 +717,30 @@ defmodule AttestoClient.AuthorizationCode do
     challenge
   end
 
+  defp put_optional(params, _key, nil), do: params
+  defp put_optional(params, key, value), do: Map.put(params, key, value)
+
   defp put_query(endpoint, params) do
     uri = URI.parse(endpoint)
     existing = if uri.query, do: URI.decode_query(uri.query), else: %{}
     %{uri | query: URI.encode_query(Map.merge(existing, params))} |> URI.to_string()
   end
+
+  defp validate_endpoint_queries(metadata) do
+    Enum.reduce_while(
+      ~w(authorization_endpoint pushed_authorization_request_endpoint token_endpoint),
+      :ok,
+      fn name, :ok ->
+        case validate_endpoint_query(metadata[name]) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end
+    )
+  end
+
+  defp validate_endpoint_query(nil), do: :ok
+
+  defp validate_endpoint_query(endpoint),
+    do: AttestoClient.OAuthHTTP.validate_endpoint_query(endpoint, @reserved_params)
 end

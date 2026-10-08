@@ -66,6 +66,7 @@ defmodule AttestoClient.IDToken do
           | {:require_c_hash, boolean()}
           | {:state, String.t()}
           | {:accepted_algs, [SigningAlg.alg()]}
+          | {:enforce_fapi_alg_policy, boolean()}
           | {:allow_unsigned, boolean()}
           | {:now, integer() | DateTime.t()}
           | {:req_options, keyword()}
@@ -177,7 +178,12 @@ defmodule AttestoClient.IDToken do
     else
       with {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
            {:ok, algs} <- Verifier.accepted_algs(opts) do
-        Verifier.verify_signature(id_token, jwks, algs)
+        Verifier.verify_signature(
+          id_token,
+          jwks,
+          algs,
+          Keyword.take(opts, [:enforce_fapi_alg_policy])
+        )
       end
     end
   end

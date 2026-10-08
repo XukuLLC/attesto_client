@@ -67,6 +67,9 @@ defmodule AttestoClient.TokenTest do
                 tokens: %TokenSet{
                   access_token: "access-new",
                   token_type: "Bearer",
+                  client_id: "client",
+                  issuer: @issuer,
+                  id_token_alg: "RS256",
                   refresh_token: "refresh-new"
                 }
               }}

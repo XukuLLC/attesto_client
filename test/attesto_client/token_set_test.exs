@@ -38,4 +38,11 @@ defmodule AttestoClient.TokenSetTest do
     assert tokens.authorization_expires_in == nil
     assert tokens.extra == %{"extension" => "value"}
   end
+
+  test "wire thumbprints cannot supply local DPoP provenance" do
+    response = Map.put(@response, "dpop_jkt", "untrusted-thumbprint")
+    assert {:ok, tokens} = TokenSet.from_response(response, nil)
+    assert tokens.dpop_jkt == nil
+    assert tokens.extra["dpop_jkt"] == "untrusted-thumbprint"
+  end
 end

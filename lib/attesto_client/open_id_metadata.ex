@@ -9,7 +9,7 @@ defmodule AttestoClient.OpenIDMetadata do
   def resolve(issuer, opts) do
     with :ok <- Discovery.validate_issuer_identifier(issuer),
          {:ok, metadata} <- fetch_or_use(issuer, opts),
-         :ok <- validate(metadata, issuer) do
+         :ok <- validate_protocol(metadata, issuer, Keyword.get(opts, :protocol, :oidc), opts) do
       {:ok, metadata}
     end
   end
@@ -17,17 +17,57 @@ defmodule AttestoClient.OpenIDMetadata do
   @spec validate(map(), String.t()) ::
           :ok | {:error, :invalid_metadata | :issuer_mismatch | term()}
   def validate(%{"issuer" => issuer} = metadata, issuer) do
-    with :ok <- validate_required_strings(metadata),
-         :ok <- validate_endpoints(metadata),
-         :ok <- validate_string_list(metadata, "response_types_supported", "code"),
-         :ok <- validate_string_list(metadata, "subject_types_supported"),
-         :ok <- validate_string_list(metadata, "id_token_signing_alg_values_supported", "RS256") do
-      validate_pkce(metadata)
-    end
+    validate_oidc(metadata, "RS256")
   end
 
   def validate(%{"issuer" => _other}, _issuer), do: {:error, :issuer_mismatch}
   def validate(_metadata, _issuer), do: {:error, :invalid_metadata}
+
+  defp validate_oidc(metadata, required_alg) do
+    with :ok <- validate_required_strings(metadata),
+         :ok <- validate_endpoints(metadata),
+         :ok <- validate_string_list(metadata, "response_types_supported", "code"),
+         :ok <- validate_string_list(metadata, "subject_types_supported"),
+         :ok <-
+           validate_string_list(metadata, "id_token_signing_alg_values_supported", required_alg) do
+      validate_pkce(metadata)
+    end
+  end
+
+  defp validate_protocol(%{"issuer" => issuer} = metadata, issuer, :oidc, opts) do
+    required_alg = if Keyword.get(opts, :fapi?) == true, do: nil, else: "RS256"
+    validate_oidc(metadata, required_alg)
+  end
+
+  defp validate_protocol(metadata, issuer, :oidc, _opts), do: validate(metadata, issuer)
+
+  defp validate_protocol(%{"issuer" => issuer} = metadata, issuer, :oauth, _opts) do
+    with true <-
+           Enum.all?(
+             ~w(authorization_endpoint token_endpoint),
+             &non_empty_string?(Map.get(metadata, &1))
+           ),
+         :ok <- validate_endpoints(metadata),
+         :ok <- optional_string_list(metadata, "response_types_supported", "code"),
+         :ok <- optional_string_list(metadata, "grant_types_supported", "authorization_code"),
+         :ok <- validate_pkce(metadata) do
+      :ok
+    else
+      false -> {:error, :invalid_metadata}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_protocol(%{"issuer" => _other}, _issuer, :oauth, _opts),
+    do: {:error, :issuer_mismatch}
+
+  defp validate_protocol(_metadata, _issuer, _protocol, _opts), do: {:error, :invalid_metadata}
+
+  defp optional_string_list(metadata, field, required) do
+    if Map.has_key?(metadata, field),
+      do: validate_string_list(metadata, field, required),
+      else: :ok
+  end
 
   defp fetch_or_use(issuer, opts) do
     case Keyword.fetch(opts, :metadata) do
@@ -47,6 +87,13 @@ defmodule AttestoClient.OpenIDMetadata do
             :max_response_bytes,
             :timeout
           ])
+          |> Keyword.put_new(
+            :well_known,
+            if(Keyword.get(opts, :protocol) == :oauth,
+              do: :oauth_authorization_server,
+              else: :openid_configuration
+            )
+          )
         )
     end
   end
@@ -63,7 +110,8 @@ defmodule AttestoClient.OpenIDMetadata do
       {"end_session_endpoint", :browser},
       {"token_endpoint", :server},
       {"jwks_uri", :server},
-      {"revocation_endpoint", :server}
+      {"revocation_endpoint", :server},
+      {"pushed_authorization_request_endpoint", :server}
     ]
 
     Enum.reduce_while(fields, :ok, fn {field, endpoint_kind}, :ok ->
