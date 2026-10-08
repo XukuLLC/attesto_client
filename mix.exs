@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.6.1"
+  @version "2.7.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -115,6 +115,7 @@ defmodule AttestoClient.MixProject do
         "README.md",
         "guides/authorization-code.md",
         "guides/resource-server.md",
+        "guides/credential-wallet.md",
         "guides/digital_wallet.livemd",
         "CHANGELOG.md",
         "CONTRIBUTING.md",

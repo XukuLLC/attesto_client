@@ -2,8 +2,8 @@
 
 ```elixir
 Mix.install([
-  {:attesto, ">= 1.13.0 and < 3.0.0"},
-  {:attesto_client, "~> 2.6"},
+  {:attesto, "~> 2.3"},
+  {:attesto_client, "~> 2.7"},
   {:kino, "~> 0.14"},
   {:eqrcode, "~> 0.2"}
 ])
@@ -28,9 +28,12 @@ The issuer signs a credential once, bound to the wallet's key. The verifier asks
 for *specific* claims. The wallet reveals only those — everything else never
 leaves the device. That's **selective disclosure**.
 
-Everything below runs on the published [`attesto`](https://hex.pm/packages/attesto)
+Everything below runs locally on [`attesto`](https://hex.pm/packages/attesto)
 (issuer/verifier core) and [`attesto_client`](https://hex.pm/packages/attesto_client)
-(the wallet) libraries — no servers, no mocks.
+(the wallet) — no HTTP servers or mock transports. The encrypted example
+requires Attesto 2.3 and AttestoClient 2.7. See the
+[Credential wallet guide](credential-wallet.md) to connect this local exercise
+to real issuance, authorization, trust and consent flows.
 
 ## Keys
 
@@ -131,6 +134,11 @@ request = %AttestoClient.Wallet.PresentationRequest{
   nonce: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false),
   response_uri: "https://bar.example/present",
   response_mode: "direct_post",
+  client_metadata: %{
+    "vp_formats_supported" => %{
+      "dc+sd-jwt" => %{"sd-jwt_alg_values" => ["ES256"], "kb-jwt_alg_values" => ["ES256"]}
+    }
+  },
   dcql_query: %{"credentials" => []}
 }
 
@@ -183,7 +191,8 @@ Kino.listen(form, fn %{data: data} ->
         )
 
       # Take just the PID data fields (ignore JWT metadata like iat/iss/vct).
-      seen = Map.take(results["pid"].claims, pid_fields)
+      [verified_pid] = results["pid"]
+      seen = Map.take(verified_pid.claims, pid_fields)
       hidden = pid_fields -- Map.keys(seen)
 
       seen_rows =
@@ -211,6 +220,90 @@ end)
 Kino.Layout.grid([form, frame], boxed: true, gap: 16)
 ```
 
+## 4. 🔐 Encrypt the presentation for its recipient
+
+Selective disclosure limits what the verifier receives. Encryption protects
+the response on its way there. In `direct_post.jwt`, both the credential and
+the correlation state go inside the encrypted response.
+
+The following example plays both roles locally. In a real wallet, the verifier's
+public encryption key comes from the authenticated request metadata; the wallet
+never receives the verifier's private key. Always verify that request and obtain
+consent before building the response.
+
+```elixir
+recipient_key = JOSE.JWK.generate_key({:ec, "P-256"})
+{_type, recipient_public} = JOSE.JWK.to_public_map(recipient_key)
+recipient_public = Map.merge(recipient_public, %{"alg" => "ECDH-ES", "kid" => "demo-recipient"})
+
+encrypted_request = %{
+  request
+  | response_mode: "direct_post.jwt",
+    state: "demo-correlation-state",
+    client_metadata: %{
+      "vp_formats_supported" => request.client_metadata["vp_formats_supported"],
+      "jwks" => %{"keys" => [recipient_public]},
+      "encrypted_response_enc_values_supported" => ["A256GCM", "A128GCM"]
+    },
+    dcql_query: %{
+      "credentials" => [
+        %{
+          "id" => "pid",
+          "format" => "dc+sd-jwt",
+          "meta" => %{"vct_values" => ["urn:eudi:pid:1"]},
+          "claims" => [%{"path" => ["age_over_21"]}]
+        }
+      ]
+    }
+}
+
+{:ok, encrypted_vp_token} =
+  AttestoClient.Wallet.Presentation.build_vp_token(%{"pid" => held}, encrypted_request,
+    holder_keys: %{"pid" => holder_jwk}
+  )
+
+{:ok, encrypted_form} =
+  AttestoClient.Wallet.Presentation.build_response(encrypted_request, encrypted_vp_token)
+
+# This is the only form field that would be posted. It contains a compact JWE.
+Map.keys(encrypted_form)
+```
+
+Now act as the verifier: decrypt with its private key, check the returned state,
+and verify the presentation's issuer signature, holder binding and nonce.
+
+```elixir
+{:ok, decrypted_bytes, protected_header} =
+  Attesto.JWE.decrypt(recipient_key, encrypted_form["response"])
+
+decrypted_response = JSON.decode!(decrypted_bytes)
+true = decrypted_response["state"] == encrypted_request.state
+
+# Final OID4VP responses contain an array of presentations in both modes.
+[received_presentation] = decrypted_response["vp_token"]["pid"]
+
+{:ok, verified_response} =
+  Attesto.VpToken.verify(%{"pid" => [received_presentation]},
+    nonce: encrypted_request.nonce,
+    audience: encrypted_request.client_id,
+    expected_query_ids: ["pid"],
+    issuer_jwks: issuer_public
+  )
+
+Kino.Layout.grid([
+  Kino.Markdown.new("**Credential format:** `dc+sd-jwt` · **Encryption:** `#{protected_header["enc"]}`"),
+  Kino.DataTable.new(
+    for({claim, value} <- Map.take(hd(verified_response["pid"]).claims, pid_fields),
+      do: %{"disclosed claim" => claim, "value" => inspect(value)}),
+    name: "Decrypted and verified contents"
+  )
+])
+```
+
+The holder signature and nonce checks are still necessary after decryption.
+Encryption authenticates the ciphertext to its recipient; it does not replace
+credential issuer trust or the user's disclosure decision.
+
 ## What just happened
 
 * The **issuer** signed the credential once, binding it to the wallet's key.
@@ -220,6 +313,8 @@ Kino.Layout.grid([form, frame], boxed: true, gap: 16)
   so a captured presentation can't be reused elsewhere.
 * The **verifier** checked the issuer signature, the holder binding, and the
   nonce, and saw nothing beyond what it asked for.
+* The encrypted example delivered the presentation and state as one JWE and
+  verified the disclosed contents after decryption.
 
 That privacy model — prove a fact without handing over the document — is the
 whole point of the EU Digital Identity Wallet, and here it's a few dozen lines
@@ -227,5 +322,11 @@ of Elixir.
 
 The same libraries also do ISO **mdoc** (mobile driving licence), DPoP
 sender-constrained issuance, batch issuance, key/wallet attestation, and the
-full OID4VCI issuer + OID4VP verifier HTTP surface via
+encrypted credential exchanges and bounded deferred polling. The full OID4VCI
+issuer + OID4VP verifier HTTP surface is available via
 [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix).
+
+Continue with the [Credential wallet guide](credential-wallet.md) for real
+offers, OAuth/PAR callbacks, HAIP certificates and attestation providers. The
+existing issuer/verifier and OIDC RP certifications cover their listed roles;
+wallet certification requires its own conformance run and submission.

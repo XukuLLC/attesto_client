@@ -4,6 +4,133 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - Unreleased
+
+### Fixed
+
+- Retain the selected ID Token algorithm in `TokenSet` through authorization
+  and successive refreshes, including responses without an ID Token. FAPI's
+  default ES256 selection now refreshes without repeating `id_token_alg`.
+  Reject conflicting explicit algorithms before HTTP and reject shared refresh
+  results that do not match the caller's retained algorithm.
+
+### Security
+
+- Require Attesto 2.3.1 or later for exact JWA PSS verification and fail-closed
+  algorithm policies, including mixed allowlists. Upgrade core and client together.
+- Require authenticated PAR and token requests plus locally bound DPoP in
+  HAIP/FAPI flows. Persist profile, client/issuer identity and authentication
+  binding through callback and refresh; reject changed or omitted material.
+  FAPI supports private-key JWT authentication here; unverified mTLS claims
+  cannot substitute for a DPoP key.
+- Reject unsolicited DPoP token responses when no local signing key exists,
+  including pre-authorized, authorization-code and refresh exchanges.
+- Require a bounded certificate chain in `x5c` for HAIP client-attestation
+  authentication. Bind the stable client and instance-key identity while
+  permitting renewed attestations at callback and refresh.
+  Authorization servers remain responsible for attester signature and trust.
+- Require the complete profile-bound `TokenSet` for externally supplied HAIP
+  credential access tokens. Pass `access_token: tokens` with the retained
+  DPoP key; a bare token string cannot establish the required binding.
+- Reject reserved parameters, bracket aliases and duplicate roots in discovered
+  authorization/PAR/token endpoint queries before performing HTTP requests.
+- Require signed HAIP verifier metadata to advertise both A128GCM and A256GCM;
+  retain this profile when building or submitting presentation responses.
+- Require `digitalSignature` when a signing certificate declares KeyUsage.
+  Reject RSA-PSS-constrained SubjectPublicKeyInfo throughout the selected
+  certificate path, including the used trust anchor, until its algorithm
+  restrictions can be preserved and enforced. Reject non-NULL
+  `rsaEncryption` parameters; absent parameters remain accepted for
+  interoperability. Additional ecosystem EKU and
+  revocation checks remain application-owned.
+- Reject empty, invalid and weak wallet algorithm allowlists. HAIP and
+  explicitly selected FAPI policy cannot be weakened through caller options.
+- Require a DPoP token response whenever pre-authorized issuance requests DPoP,
+  before contacting nonce or credential endpoints. HAIP/FAPI authorization-code
+  transactions require response `iss` even when discovery omits its support
+  flag; the policy is pinned at start and cannot be weakened at callback.
+- Preserve DPoP across refresh: require signing material before any network
+  request, reject Bearer responses, and compare any locally retained binding
+  thumbprint. Legacy manually constructed token sets lack historic key
+  provenance and acquire a binding after a successful DPoP refresh.
+- Require PAR in HAIP/FAPI authorization-code flows, reject contradictory
+  options before discovery, and reject bracketed aliases of protected extra
+  authorization/PAR parameters.
+- Require verifier format metadata and enforce advertised issuer and holder
+  algorithms during presentation generation and caller-built submission.
+  Registered authoritative `verifier_metadata` overrides signed fields;
+  certificate-bound requests require metadata in their signed request.
+- Strip caller cookies, authentication, custom headers and routing options
+  from unauthenticated by-reference request and credential-offer fetching.
+- Enforce OID4VP request typing, required response mode, URL-safe nonce/state,
+  unique nonempty bounded encryption-key IDs, and aggregate response bounds.
+  Request URI responses require the request-object media type. Presentation
+  response endpoints must return HTTP 200 and a JSON object with the JSON
+  media type; malformed or duplicate JSON is rejected.
+
+### Added
+
+- Add plain OAuth authorization-code transactions with S256 PKCE using
+  `protocol: :oauth`, RFC 8414 discovery, and no ID Token requirement. Keep
+  issuer, browser-session, and one-time state checks; pin the selected protocol
+  and any initiating DPoP key in the transaction.
+- Support Pushed Authorization Requests with client authentication and DPoP.
+  Honor servers requiring PAR, reject explicit downgrades, and remove stored
+  transactions when PAR fails or state expires during the operation. Require
+  HTTP 201 and cap the returned redirect lifetime to the remaining state and
+  PAR lifetimes. Authorization redirects carry only the client identifier and
+  returned request URI.
+- Add encrypted OID4VCI credential exchanges, bounded deferred issuance
+  polling, and encrypted OID4VP `direct_post.jwt` responses. These encrypted
+  wallet features require Attesto 2.3.1 or later.
+- Verify HAIP `x509_hash` presentation requests against explicit DER
+  certificate anchors, bind outer client identities and POST wallet nonces,
+  and use the response encryption key in the mdoc session transcript.
+- Add opt-in `haip: true` issuer-chain verification for SD-JWT VC and mdoc
+  credentials using explicit `trusted_certificates`. Verify credentials with
+  the validated leaf key and attach only verified issuer-chain provenance.
+  Recognize the critical mdoc document-signer usage only for mdoc issuer
+  certificates; retain rejection of unknown critical extensions.
+  Fixed-key trust remains the default. Status and revocation policy remain
+  application-owned.
+- Reject undersized PS256 issuer keys in HAIP issuance and accept a missing
+  SD-JWT issuer claim only after verifying certificate identity with Attesto
+  2.3.1 or later.
+- Evaluate DCQL nested paths, claim alternatives, credential sets and trusted
+  authority constraints before disclosure; validate explicit selections too.
+- Add a pure `Wallet.Presentation.build_response/3` for consent previews and
+  application-owned transports, a progressive credential-wallet guide and an
+  encrypted presentation example in the interactive Livebook.
+- Allow Client Attestations to include the trusted attester's `issuer:` claim.
+- Add `WalletAttestation.fetch_challenge/2` for proactive attestation
+  challenges and preserve an optional DPoP nonce for subsequent PAR and token
+  requests.
+
+### Changed
+
+- When a DCQL query omits `claims`, disclose only mandatory presentation
+  contents, as required by final OID4VP §6.4.1. Selectively disclosable claims
+  require an explicit query.
+- Ignore `iss` in all signed presentation requests as required by final
+  OID4VP; retain audience, client identity, signature and certificate checks.
+- Parse encoded OAuth callbacks containing an issuer URL as form bodies,
+  while retaining duplicate-parameter detection and callback URI checks.
+- Reject bearer token responses when an authorization-code exchange requests
+  DPoP, and reject a changed or omitted DPoP key when the transaction started
+  with one.
+- Bind the requested credential format and returned SD-JWT `vct` or mdoc
+  document type to the selected configuration when Credential Issuer
+  configuration metadata is supplied.
+- Return `:unsupported_mdoc` when the optional CBOR dependency is absent,
+  including before issuance makes network requests.
+- Use nonempty presentation arrays in both final OID4VP response modes;
+  scalar plaintext inputs are rejected. Deferred credential responses require
+  HTTP 202 and a positive integer interval; reject duplicate response JSON,
+  ambiguous encryption keys, and invalid batch holder bindings.
+- Use advertised optional credential encryption under `credential_encryption:
+  :auto`; unsupported or malformed advertisements fail closed. `:disabled`
+  remains an explicit opt-out only when the issuer permits plaintext.
+
 ## [2.6.1] - 2026-10-04
 
 ### Security
