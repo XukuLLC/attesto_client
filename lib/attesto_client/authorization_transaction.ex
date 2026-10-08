@@ -1,6 +1,6 @@
 defmodule AttestoClient.AuthorizationTransaction do
   @moduledoc """
-  One-time state for an OpenID Connect authorization transaction.
+  One-time state for an OAuth or OpenID Connect authorization transaction.
 
   Transactions bind the callback to the issuer, client, redirect URI, nonce,
   PKCE verifier, and opaque initiating browser-session value that created it.
@@ -9,6 +9,13 @@ defmodule AttestoClient.AuthorizationTransaction do
   choose storage appropriate to their topology. The included ETS store is
   suitable for a single node; clustered deployments should provide a store
   with equivalent atomic `put_new` and `take` semantics.
+
+  Optional DPoP provenance pins the initiating public-key thumbprint; callback
+  must use the same signing key. The explicit generic, HAIP, or FAPI profile
+  and its authentication identity are pinned at start; callback options cannot
+  weaken them. HAIP/FAPI require authenticated PAR and a DPoP private key.
+  Authentication bindings retain public key identity or a secret digest rather
+  than private keys or attestation JWTs.
 
   A transaction contains protocol secrets, especially the PKCE verifier and
   browser binding. Never send it to the browser or log it.
@@ -26,7 +33,14 @@ defmodule AttestoClient.AuthorizationTransaction do
     :browser_binding,
     :max_age
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++
+              [
+                protocol: :oidc,
+                dpop_jkt: nil,
+                require_response_issuer: false,
+                profile: :generic,
+                client_auth_binding: nil
+              ]
 
   @type t :: %__MODULE__{
           state: String.t(),
@@ -36,8 +50,13 @@ defmodule AttestoClient.AuthorizationTransaction do
           client_id: String.t(),
           redirect_uri: String.t(),
           metadata: map(),
-          id_token_alg: String.t(),
+          id_token_alg: String.t() | nil,
           browser_binding: String.t(),
-          max_age: non_neg_integer() | nil
+          max_age: non_neg_integer() | nil,
+          protocol: :oidc | :oauth,
+          dpop_jkt: String.t() | nil,
+          require_response_issuer: boolean(),
+          profile: :generic | :haip | :fapi,
+          client_auth_binding: map() | nil
         }
 end

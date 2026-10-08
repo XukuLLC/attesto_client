@@ -392,9 +392,9 @@ defmodule AttestoClient.AuthorizationCodeTest do
                %{"state" => required_issuer.state, "code" => "code"}
              )
 
-    assert {:ok, expired} = start_flow(store, transaction_ttl_ms: 1)
+    assert {:ok, expired} = start_flow(store, transaction_ttl_ms: 100)
     assert expired.expires_in == 1
-    Process.sleep(5)
+    Process.sleep(110)
 
     assert {:error, {:invalid_state, :expired}} =
              callback(

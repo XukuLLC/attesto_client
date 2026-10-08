@@ -12,7 +12,9 @@ defmodule AttestoClient.Token do
   policy.
   """
 
+  alias Attesto.SecureCompare
   alias Attesto.SigningAlg
+  alias AttestoClient.AuthorizationProfile
   alias AttestoClient.IDToken
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.RefreshCoordinator
@@ -44,7 +46,11 @@ defmodule AttestoClient.Token do
           {:ok, TokenSet.t()} | {:error, term()}
   def exchange_pre_authorized_code(pre_authorized_code, opts)
       when is_binary(pre_authorized_code) and pre_authorized_code != "" and is_list(opts) do
-    with {:ok, endpoint} <- required_string(opts, :token_endpoint) do
+    with {:ok, endpoint} <- required_string(opts, :token_endpoint),
+         {:ok, profile} <- new_profile(opts),
+         {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
+         :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
+         :ok <- AuthorizationProfile.dpop_policy(profile.profile, opts) do
       form =
         %{
           "grant_type" => @pre_authorized_code_grant_type,
@@ -52,8 +58,10 @@ defmodule AttestoClient.Token do
         }
         |> maybe_put("tx_code", Keyword.get(opts, :tx_code))
 
-      with {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts) do
-        TokenSet.from_response(response, nil)
+      with {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts),
+           {:ok, tokens} <- TokenSet.from_response(response, nil),
+           {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt) do
+        {:ok, Map.merge(tokens, profile)}
       end
     end
   end
@@ -74,6 +82,21 @@ defmodule AttestoClient.Token do
   `:client_auth` also accepts
   `{:private_key_jwt, jwk, assertion_opts}` for an explicitly registered
   assertion algorithm, key id, audience, lifetime, time, or JWT id.
+
+  A prior DPoP token set requires `:dpop` signing material before any network
+  request. Persisted `tokens.dpop_jkt` must match that key; a missing or changed
+  key is rejected locally. A requested or prior DPoP token cannot accept a
+  Bearer response. Shared results are also checked against each caller's key
+  before adoption. Legacy token sets without a thumbprint require a key, but
+  their historical key continuity cannot be checked; a successful DPoP response
+  records the supplied key for subsequent refreshes.
+
+  The locally retained `tokens.id_token_alg` selects the ID Token verification
+  algorithm. An explicit `:id_token_alg` must match it; mismatches fail before
+  HTTP. The algorithm survives refreshes even when the response omits an ID
+  Token, and shared results must match each caller's policy. Legacy token sets
+  without this field use the explicit option or the existing default (PS256 for
+  FAPI, RS256 otherwise), then retain that selection for subsequent refreshes.
   """
   @spec refresh(GenServer.server(), term(), TokenSet.t(), keyword()) ::
           {:ok, RefreshResult.t()} | {:error, term()}
@@ -85,13 +108,22 @@ defmodule AttestoClient.Token do
          :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
          {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, _subject} <- required_string(opts, :subject),
-         {:ok, _id_token_alg} <- id_token_alg(opts) do
+         {:ok, profile} <- refresh_profile(tokens, opts),
+         opts = Keyword.put(opts, :retained_authorization_profile, profile.profile),
+         {:ok, id_token_alg} <- retained_id_token_alg(tokens, opts),
+         opts = Keyword.put(opts, :id_token_alg, id_token_alg),
+         {:ok, dpop_jkt} <- refresh_dpop_binding(tokens, opts),
+         :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
+         :ok <- AuthorizationProfile.dpop_policy(profile.profile, opts) do
       RefreshCoordinator.run(
         coordinator,
         key,
-        fn -> do_refresh(tokens, opts) end,
+        fn -> do_refresh(tokens, dpop_jkt, profile, opts) end,
         timeout_ms
       )
+      |> check_refresh_result_binding(dpop_jkt)
+      |> check_refresh_profile(profile)
+      |> check_refresh_id_token_alg(id_token_alg)
     end
   end
 
@@ -119,7 +151,12 @@ defmodule AttestoClient.Token do
 
   def revoke(_token, _opts), do: {:error, :invalid_token}
 
-  defp do_refresh(%TokenSet{refresh_token: refresh_token, scope: old_scope}, opts) do
+  defp do_refresh(
+         %TokenSet{refresh_token: refresh_token, scope: old_scope},
+         dpop_jkt,
+         profile,
+         opts
+       ) do
     with {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
@@ -130,10 +167,115 @@ defmodule AttestoClient.Token do
              opts
            ),
          {:ok, tokens} <- TokenSet.from_response(response, refresh_token, old_scope),
+         {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
          {:ok, claims} <- verify_refresh_id_token(tokens, Keyword.put(opts, :jwks, jwks)) do
+      tokens =
+        tokens
+        |> Map.merge(profile)
+        |> Map.put(:id_token_alg, Keyword.fetch!(opts, :id_token_alg))
+
       {:ok, %RefreshResult{tokens: tokens, id_token_claims: claims}}
     end
   end
+
+  defp new_profile(opts) do
+    with {:ok, profile} <- AuthorizationProfile.select(opts) do
+      profile_binding(profile, opts)
+    end
+  end
+
+  defp profile_binding(:generic, opts) do
+    {:ok,
+     %{
+       profile: :generic,
+       client_auth_binding: nil,
+       client_id: Keyword.get(opts, :client_id),
+       issuer: Keyword.get(opts, :issuer)
+     }}
+  end
+
+  defp profile_binding(profile, opts) do
+    with {:ok, client_id} <- required_string(opts, :client_id),
+         {:ok, issuer} <- required_string(opts, :issuer),
+         :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
+         {:ok, binding} <- AuthorizationProfile.bind(profile, client_id, issuer, opts) do
+      {:ok,
+       %{profile: profile, client_auth_binding: binding, client_id: client_id, issuer: issuer}}
+    end
+  end
+
+  defp refresh_profile(tokens, opts) do
+    stored = Map.get(tokens, :profile, :generic)
+
+    with {:ok, selected} <- AuthorizationProfile.select(opts),
+         true <- stored in [:generic, :haip, :fapi],
+         true <- stored == :generic or selected in [:generic, stored] do
+      retained_profile(stored, selected, tokens, opts)
+    else
+      false -> {:error, :profile_mismatch}
+      error -> error
+    end
+  end
+
+  defp retained_profile(:generic, selected, _tokens, opts), do: profile_binding(selected, opts)
+
+  defp retained_profile(stored, _selected, tokens, opts) do
+    with :ok <-
+           AuthorizationProfile.check(
+             stored,
+             tokens.client_auth_binding,
+             tokens.client_id,
+             tokens.issuer,
+             opts
+           ) do
+      {:ok, Map.take(tokens, [:profile, :client_auth_binding, :client_id, :issuer])}
+    end
+  end
+
+  defp check_refresh_profile({:ok, %RefreshResult{tokens: tokens}} = result, profile) do
+    if Map.take(tokens, Map.keys(profile)) == profile,
+      do: result,
+      else: {:error, :client_auth_mismatch}
+  end
+
+  defp check_refresh_profile(error, _profile), do: error
+
+  defp refresh_dpop_binding(tokens, opts) do
+    stored_jkt = Map.get(tokens, :dpop_jkt)
+    required? = TokenSet.dpop?(tokens.token_type) or not is_nil(stored_jkt)
+
+    with {:ok, presented_jkt} <- TokenSet.dpop_thumbprint(opts),
+         :ok <- require_dpop_key(required?, presented_jkt),
+         :ok <- same_dpop_key(stored_jkt, presented_jkt) do
+      {:ok, presented_jkt}
+    end
+  end
+
+  defp require_dpop_key(true, nil), do: {:error, :missing_dpop_key}
+  defp require_dpop_key(_required, _presented), do: :ok
+
+  defp same_dpop_key(nil, _presented), do: :ok
+
+  defp same_dpop_key(stored, presented) when is_binary(stored) and is_binary(presented) do
+    if SecureCompare.equal?(stored, presented), do: :ok, else: {:error, :dpop_key_mismatch}
+  end
+
+  defp same_dpop_key(_stored, _presented), do: {:error, :dpop_key_mismatch}
+
+  defp check_refresh_result_binding({:ok, %RefreshResult{tokens: tokens}} = result, presented) do
+    with :ok <- same_result_dpop_key(presented, Map.get(tokens, :dpop_jkt)), do: result
+  end
+
+  defp check_refresh_result_binding(error, _presented), do: error
+
+  defp same_result_dpop_key(nil, nil), do: :ok
+
+  defp same_result_dpop_key(presented, returned)
+       when is_binary(presented) and is_binary(returned) do
+    same_dpop_key(presented, returned)
+  end
+
+  defp same_result_dpop_key(_presented, _returned), do: {:error, :dpop_key_mismatch}
 
   defp verify_refresh_id_token(%TokenSet{id_token: nil}, _opts), do: {:ok, nil}
 
@@ -150,6 +292,7 @@ defmodule AttestoClient.Token do
           jwks: Keyword.get(opts, :jwks),
           access_token: tokens.access_token,
           accepted_algs: [id_token_alg],
+          enforce_fapi_alg_policy: Keyword.get(opts, :retained_authorization_profile) == :fapi,
           req_options: Keyword.get(opts, :req_options, [])
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -159,9 +302,35 @@ defmodule AttestoClient.Token do
   end
 
   defp id_token_alg(opts) do
-    alg = Keyword.get(opts, :id_token_alg, "RS256")
-    if alg in SigningAlg.allowed(), do: {:ok, alg}, else: {:error, :unsupported_alg}
+    fapi = Keyword.get(opts, :retained_authorization_profile) == :fapi
+    alg = Keyword.get(opts, :id_token_alg, if(fapi, do: "PS256", else: "RS256"))
+    allowed = if fapi, do: SigningAlg.fapi_algs(), else: SigningAlg.allowed()
+    if alg in allowed, do: {:ok, alg}, else: {:error, :unsupported_alg}
   end
+
+  defp retained_id_token_alg(tokens, opts) do
+    case Map.get(tokens, :id_token_alg) do
+      nil ->
+        id_token_alg(opts)
+
+      retained ->
+        case Keyword.fetch(opts, :id_token_alg) do
+          {:ok, requested} when requested != retained ->
+            {:error, :id_token_alg_mismatch}
+
+          _matching_or_omitted ->
+            id_token_alg(Keyword.put(opts, :id_token_alg, retained))
+        end
+    end
+  end
+
+  defp check_refresh_id_token_alg({:ok, %RefreshResult{tokens: tokens}} = result, expected) do
+    if Map.get(tokens, :id_token_alg) == expected,
+      do: result,
+      else: {:error, :id_token_alg_mismatch}
+  end
+
+  defp check_refresh_id_token_alg(error, _expected), do: error
 
   defp timeout(opts) do
     case Keyword.get(opts, :timeout, @default_timeout_ms) do
