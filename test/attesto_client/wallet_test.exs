@@ -220,7 +220,11 @@ defmodule AttestoClient.WalletTest do
             json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
 
           {"POST", "/credential"} ->
-            json(conn, 200, %{"transaction_id" => "txn-1", "notification_id" => "notif-1"})
+            json(conn, 202, %{
+              "transaction_id" => "txn-1",
+              "interval" => 1,
+              "notification_id" => "notif-1"
+            })
         end
       end
 
@@ -242,14 +246,14 @@ defmodule AttestoClient.WalletTest do
     # The token endpoint binds the access token to the DPoP key's jkt; the
     # credential endpoint checks a fresh proof carrying the token's ath. One
     # `:dpop` key threads through both legs.
-    defp dpop_capturing_plug(issuer_pem, test_pid) do
+    defp dpop_capturing_plug(issuer_pem, test_pid, token_type \\ "DPoP") do
       fn conn ->
         dpop = Plug.Conn.get_req_header(conn, "dpop")
 
         case {conn.method, conn.request_path} do
           {"POST", "/token"} ->
             send(test_pid, {:token_dpop, dpop})
-            json(conn, 200, %{"access_token" => @access_token, "token_type" => "DPoP"})
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => token_type})
 
           {"POST", "/nonce"} ->
             json(conn, 200, %{"c_nonce" => @c_nonce})
@@ -314,6 +318,56 @@ defmodule AttestoClient.WalletTest do
                )
 
       assert ath == Attesto.DPoP.compute_ath(@access_token)
+    end
+
+    for {token_type, error} <- [{"Bearer", :invalid_token_type}, {nil, :invalid_token_response}] do
+      test "rejects #{inspect(token_type)} token type before contacting credential resources" do
+        owner = self()
+
+        plug = fn conn ->
+          send(owner, {:contacted_endpoint, conn.request_path})
+
+          response =
+            if is_nil(unquote(token_type)),
+              do: %{"access_token" => @access_token},
+              else: %{"access_token" => @access_token, "token_type" => unquote(token_type)}
+
+          json(conn, 200, response)
+        end
+
+        assert {:error, unquote(error)} =
+                 Wallet.request_credential(offer(), holder_key(),
+                   token_endpoint: "#{@issuer}/token",
+                   nonce_endpoint: "#{@issuer}/nonce",
+                   credential_endpoint: "#{@issuer}/credential",
+                   client_id: @client_id,
+                   format: "vc+sd-jwt",
+                   trusted: @trusted_placeholder,
+                   dpop: holder_key(),
+                   req_options: [plug: plug]
+                 )
+
+        assert_receive {:contacted_endpoint, "/token"}
+        refute_receive {:contacted_endpoint, _resource}
+      end
+    end
+
+    test "accepts a case-insensitive DPoP token type and verifies the issued credential" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+
+      assert {:ok, %{credentials: [held]}} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 nonce_endpoint: "#{@issuer}/nonce",
+                 credential_endpoint: "#{@issuer}/credential",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 dpop: holder_key(),
+                 req_options: [plug: dpop_capturing_plug(issuer_pem, self(), "dPoP")]
+               )
+
+      assert held.claims["given_name"] == "Jane"
     end
   end
 
@@ -516,7 +570,7 @@ defmodule AttestoClient.WalletTest do
                )
     end
 
-    test "rejects a batch response whose credential count differs from the proofs" do
+    test "accepts fewer credentials than proofs when every returned holder binding is requested" do
       {issuer_pem, issuer_jwk} = issuer_keypair()
 
       plug = fn conn ->
@@ -540,7 +594,7 @@ defmodule AttestoClient.WalletTest do
         end
       end
 
-      assert {:error, :credential_count_mismatch} =
+      assert {:ok, %{credentials: [_held]}} =
                Wallet.request_credential(offer(), [holder_key(), holder_key()],
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
