@@ -23,6 +23,8 @@ defmodule AttestoClient.JARM do
       (`:client_id`); a mixed-type `aud` array is malformed.
     * `iat`, when present, is a non-negative NumericDate not meaningfully in the
       future (a 60-second clock-skew tolerance).
+    * `nbf`, when present, is a non-negative NumericDate no later than the same
+      clock-skew window.
     * `exp` is present and in the future.
 
   On success it returns `{:ok, claims}`, the full claim set - the caller reads
@@ -59,6 +61,7 @@ defmodule AttestoClient.JARM do
           | :invalid_issuer
           | :invalid_audience
           | :invalid_iat
+          | :invalid_nbf
           | :not_yet_valid
           | :missing_exp
           | :expired
@@ -89,6 +92,7 @@ defmodule AttestoClient.JARM do
          :ok <- check_issuer(claims, issuer),
          :ok <- check_audience(claims, client_id),
          :ok <- check_issued_at(claims, now),
+         :ok <- check_not_before(claims, now),
          :ok <- check_expiry(claims, now) do
       {:ok, claims}
     end
@@ -150,6 +154,13 @@ defmodule AttestoClient.JARM do
   defp within_skew(iat, now) do
     if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
   end
+
+  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
+    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+  end
+
+  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
+  defp check_not_before(_claims, _now), do: :ok
 
   defp check_expiry(claims, now) do
     case Map.get(claims, "exp") do

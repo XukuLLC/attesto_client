@@ -40,6 +40,10 @@ defmodule AttestoClient.Wallet.Proof do
   @type error ::
           :invalid_key
           | :invalid_credential_issuer
+          | :invalid_nonce
+          | :invalid_client_id
+          | :invalid_key_attestation
+          | :invalid_kid
           | :invalid_time
           | :unsupported_alg
           | :unsupported_key
@@ -62,19 +66,32 @@ defmodule AttestoClient.Wallet.Proof do
     with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
          {:ok, credential_issuer} <-
            Builder.require_string(opts, :credential_issuer, :invalid_credential_issuer),
+         {:ok, nonce} <- optional_string(opts, :nonce, :invalid_nonce),
+         {:ok, client_id} <- optional_string(opts, :client_id, :invalid_client_id),
+         {:ok, key_attestation} <-
+           optional_string(opts, :key_attestation, :invalid_key_attestation),
          {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
         %{"aud" => credential_issuer, "iat" => now}
-        |> put_optional("nonce", Keyword.get(opts, :nonce))
-        |> put_optional("iss", Keyword.get(opts, :client_id))
+        |> put_optional("nonce", nonce)
+        |> put_optional("iss", client_id)
 
       header =
         %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
-        |> put_optional("key_attestation", Keyword.get(opts, :key_attestation))
-        |> Builder.put_kid(jose_jwk, opts)
+        |> put_optional("key_attestation", key_attestation)
+        |> Builder.put_kid(kid)
 
       Builder.sign(jose_jwk, header, claims)
+    end
+  end
+
+  defp optional_string(opts, key, error) do
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, nil}
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      {:ok, _invalid} -> {:error, error}
     end
   end
 

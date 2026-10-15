@@ -59,18 +59,60 @@ defmodule AttestoClient.DPoPTest do
       assert claims(jwt)["jti"] == "dpop-1"
       assert header(jwt)["kid"] == "key-9"
     end
+
+    test "uses an RSA JWK's declared signing algorithm when none is explicitly supplied" do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+      {_type, private_jwk} = JOSE.JWK.to_map(key)
+      configured = Map.merge(private_jwk, %{"alg" => "PS256", "kid" => "rsa-dpop"})
+
+      assert {:ok, jwt} = DPoP.proof(configured, "POST", @htu, now: 1_700_000_000)
+      assert %{"alg" => "PS256", "kid" => "rsa-dpop"} = header(jwt)
+    end
+
+    test "rejects an explicit algorithm that conflicts with the JWK declaration" do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+      {_type, private_jwk} = JOSE.JWK.to_map(key)
+      configured = Map.put(private_jwk, "alg", "RS256")
+
+      assert {:error, :unsupported_alg} =
+               DPoP.proof(configured, "POST", @htu, alg: "PS256", now: 1_700_000_000)
+    end
+
+    test "rejects a present null kid embedded in the JWK" do
+      key = es256_key()
+      {_type, private_jwk} = JOSE.JWK.to_map(key)
+      configured = JOSE.JWK.from_map(Map.put(private_jwk, "kid", nil))
+
+      assert {:error, :invalid_kid} = DPoP.proof(configured, "POST", @htu)
+    end
   end
 
   describe "proof/4 rejects invalid input (fail fast)" do
-    test "bad htm, htu, time, alg, jti, and key" do
+    test "bad htm, htu, access token, time, alg, jti, and key" do
       key = es256_key()
 
       assert {:error, :invalid_htm} = DPoP.proof(key, "  ", @htu)
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "not-a-url")
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "/relative/only")
+      assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "ftp://issuer.example.com/token")
+      assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "https:///token")
+
+      for access_token <- [nil, "", 123] do
+        assert {:error, :invalid_access_token} =
+                 DPoP.proof(key, "POST", @htu, access_token: access_token)
+      end
+
+      for nonce <- [nil, "", 123, String.duplicate("n", 4_097)] do
+        assert {:error, :invalid_nonce} = DPoP.proof(key, "POST", @htu, nonce: nonce)
+      end
+
       assert {:error, :invalid_time} = DPoP.proof(key, "POST", @htu, now: -1)
       assert {:error, :unsupported_alg} = DPoP.proof(key, "POST", @htu, alg: "none")
       assert {:error, :invalid_jti} = DPoP.proof(key, "POST", @htu, jti: "")
+
+      for kid <- [nil, "", 42] do
+        assert {:error, :invalid_kid} = DPoP.proof(key, "POST", @htu, kid: kid)
+      end
 
       assert {:error, :unsupported_key} =
                DPoP.proof(JOSE.JWK.generate_key({:oct, 32}), "POST", @htu)

@@ -105,6 +105,9 @@ defmodule AttestoClient.SignedIntrospectionTest do
                verify(sign(claims(%{"token_introspection" => %{"active" => "true"}})))
 
       assert {:error, :not_yet_valid} = verify(sign(claims(%{"iat" => @now + 120})))
+      assert {:error, :not_yet_valid} = verify(sign(claims(%{"nbf" => @now + 120})))
+      assert {:error, :invalid_nbf} = verify(sign(claims(%{"nbf" => -1})))
+      assert {:error, :invalid_nbf} = verify(sign(claims(%{"nbf" => "later"})))
       assert {:error, :expired} = verify(sign(claims(%{"exp" => @now - 1})))
     end
 

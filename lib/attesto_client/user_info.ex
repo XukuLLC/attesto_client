@@ -46,6 +46,7 @@ defmodule AttestoClient.UserInfo do
           | :sub_mismatch
           | :expired
           | :invalid_iat
+          | :invalid_nbf
           | :not_yet_valid
           | AttestoClient.Discovery.error()
 
@@ -69,14 +70,18 @@ defmodule AttestoClient.UserInfo do
          :ok <- check_audience(claims, client_id),
          :ok <- check_subject(claims, Keyword.get(opts, :id_token_sub)),
          :ok <- check_expiry(claims, now),
-         :ok <- check_issued_at(claims, now) do
+         :ok <- check_issued_at(claims, now),
+         :ok <- check_not_before(claims, now) do
       {:ok, claims}
     end
   end
 
   def verify(_jwt, _opts), do: {:error, :invalid_token}
 
-  defp check_typ(%{"typ" => "JWT"}), do: :ok
+  defp check_typ(%{"typ" => typ}) when is_binary(typ) do
+    if String.downcase(typ) == "jwt", do: :ok, else: {:error, :unexpected_typ}
+  end
+
   defp check_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
   defp check_typ(_header), do: :ok
 
@@ -119,4 +124,11 @@ defmodule AttestoClient.UserInfo do
 
   defp check_issued_at(%{"iat" => _bad}, _now), do: {:error, :invalid_iat}
   defp check_issued_at(_claims, _now), do: :ok
+
+  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
+    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+  end
+
+  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
+  defp check_not_before(_claims, _now), do: :ok
 end

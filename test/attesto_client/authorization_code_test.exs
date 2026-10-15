@@ -103,6 +103,16 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert byte_size(params["code_challenge"]) == 43
   end
 
+  test "accepts RS256-free metadata only when the selected ID-token algorithm is advertised" do
+    store = start_supervised!(ETS)
+    es256_only = metadata(%{"id_token_signing_alg_values_supported" => ["ES256"]})
+
+    assert {:ok, _started} =
+             start_flow(store, metadata: es256_only, id_token_alg: "ES256")
+
+    assert {:error, :unsupported_alg} = start_flow(store, metadata: es256_only)
+  end
+
   test "rejects reserved overrides and malformed discovery" do
     store = start_supervised!(ETS)
 
@@ -254,6 +264,55 @@ defmodule AttestoClient.AuthorizationCodeTest do
                {ETS, store},
                %{"state" => started.state, "code" => "code-1"},
                req_options: [plug: plug]
+             )
+  end
+
+  test "forwards the callback resolver to the stored metadata's JWKS fetch" do
+    store = start_supervised!(ETS)
+    assert {:ok, started} = start_flow(store)
+    parent = self()
+
+    resolver = fn host, family ->
+      send(parent, {:resolved, List.to_string(host), family})
+      {:ok, [{127, 0, 0, 1}]}
+    end
+
+    assert {:error, :blocked_host} =
+             callback(
+               {ETS, store},
+               %{"state" => started.state, "code" => "code"},
+               resolver: resolver,
+               timeout: 1_000
+             )
+
+    assert_receive {:resolved, "op.example.com", :inet}
+    assert_receive {:resolved, "op.example.com", :inet6}
+  end
+
+  test "forwards the callback response-size bound to the stored JWKS fetch" do
+    store = start_supervised!(ETS)
+    assert {:ok, started} = start_flow(store)
+
+    plug = fn conn ->
+      case conn.request_path do
+        "/jwks" ->
+          body = Map.put(public_jwks(), "padding", String.duplicate("x", 256))
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(body))
+
+        "/token" ->
+          flunk("the token request must not run after an oversized JWKS response")
+      end
+    end
+
+    assert {:error, :response_too_large} =
+             callback(
+               {ETS, store},
+               %{"state" => started.state, "code" => "code"},
+               req_options: [plug: plug],
+               max_response_bytes: 64
              )
   end
 

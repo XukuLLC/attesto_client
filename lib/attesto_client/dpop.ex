@@ -40,9 +40,13 @@ defmodule AttestoClient.DPoP do
 
   @type error ::
           :invalid_key
+          | :invalid_kid
           | :invalid_htm
           | :invalid_htu
+          | :invalid_access_token
+          | :invalid_nonce
           | :invalid_time
+          | :invalid_jti
           | :unsupported_alg
           | :unsupported_key
           | {:signing_failed, String.t()}
@@ -65,18 +69,29 @@ defmodule AttestoClient.DPoP do
          {:ok, uri} <- normalize_htu(htu),
          {:ok, now} <- Builder.validate_now(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
-         {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
+         {:ok, alg} <- resolve_alg(jose_jwk, opts),
+         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
+         {:ok, access_token_hash} <- access_token_hash(opts),
+         {:ok, nonce} <- nonce(opts) do
       claims =
         %{"htm" => method, "htu" => uri, "iat" => now, "jti" => jti}
-        |> put_optional("ath", ath(Keyword.get(opts, :access_token)))
-        |> put_optional("nonce", Keyword.get(opts, :nonce))
+        |> put_optional("ath", access_token_hash)
+        |> put_optional("nonce", nonce)
 
       header =
         %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
-        |> Builder.put_kid(jose_jwk, opts)
+        |> Builder.put_kid(kid)
 
       Builder.sign(jose_jwk, header, claims)
     end
+  end
+
+  @doc false
+  @spec resolve_alg(JOSE.JWK.t(), keyword()) ::
+          {:ok, String.t()}
+          | {:error, :unsupported_alg | :unsupported_key | {:signing_failed, String.t()}}
+  def resolve_alg(%JOSE.JWK{} = jose_jwk, opts) when is_list(opts) do
+    Builder.resolve_alg(jose_jwk, opts)
   end
 
   defp normalize_htm(htm) do
@@ -90,7 +105,7 @@ defmodule AttestoClient.DPoP do
   defp normalize_htu(htu) do
     case URI.new(htu) do
       {:ok, %URI{scheme: scheme, host: host} = uri}
-      when is_binary(scheme) and is_binary(host) ->
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
         {:ok, URI.to_string(%{uri | query: nil, fragment: nil})}
 
       _ ->
@@ -99,13 +114,28 @@ defmodule AttestoClient.DPoP do
   end
 
   # Reuse the verifier's `ath` computation so client and server agree on the
-  # exact SHA-256/base64url encoding.
-  defp ath(nil), do: nil
+  # exact SHA-256/base64url encoding. An explicitly supplied invalid token is a
+  # caller error; silently dropping it would produce an unbound resource proof.
+  defp access_token_hash(opts) do
+    case Keyword.fetch(opts, :access_token) do
+      :error ->
+        {:ok, nil}
 
-  defp ath(access_token) when is_binary(access_token) and access_token != "",
-    do: Verify.compute_ath(access_token)
+      {:ok, access_token} when is_binary(access_token) and access_token != "" ->
+        {:ok, Verify.compute_ath(access_token)}
 
-  defp ath(_invalid), do: nil
+      {:ok, _invalid} ->
+        {:error, :invalid_access_token}
+    end
+  end
+
+  defp nonce(opts) do
+    case Keyword.fetch(opts, :nonce) do
+      :error -> {:ok, nil}
+      {:ok, nonce} when is_binary(nonce) and byte_size(nonce) in 1..4_096 -> {:ok, nonce}
+      {:ok, _invalid} -> {:error, :invalid_nonce}
+    end
+  end
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)

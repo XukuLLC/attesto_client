@@ -64,6 +64,8 @@ defmodule AttestoClient.AuthorizationCode do
   PAR when the server or selected profile requires it. `par: false` cannot
   override a required PAR policy. DPoP keys supplied at start are bound to the transaction and
   must also be supplied at callback; their thumbprint is sent as `dpop_jkt`.
+  `:alg`, `:kid`, and `:now` configure the DPoP proofs and must remain
+  compatible with the retained key and selected profile.
 
   Set exactly one of `haip: true` or `fapi?: true` to select the stored profile.
   Both require authenticated PAR, the authorization response's `iss`, and a
@@ -329,10 +331,12 @@ defmodule AttestoClient.AuthorizationCode do
   defp verification_keys(%AuthorizationTransaction{protocol: :oauth}, _opts), do: {:ok, nil}
 
   defp verification_keys(transaction, opts) do
-    Verifier.resolve_jwks(
-      [metadata: transaction.metadata, req_options: Keyword.get(opts, :req_options, [])],
-      transaction.issuer
-    )
+    verify_opts =
+      opts
+      |> Keyword.take([:req_options, :resolver, :max_response_bytes, :timeout])
+      |> Keyword.put(:metadata, transaction.metadata)
+
+    Verifier.resolve_jwks(verify_opts, transaction.issuer)
   end
 
   defp protocol_claims(_tokens, %AuthorizationTransaction{protocol: :oauth}, _jwks, _code),
@@ -368,6 +372,9 @@ defmodule AttestoClient.AuthorizationCode do
       :resolver,
       :dpop,
       :dpop_nonce,
+      :alg,
+      :kid,
+      :now,
       :attestation_challenge_received
     ])
     |> Keyword.put(:client_id, transaction.client_id)

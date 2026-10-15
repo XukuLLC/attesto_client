@@ -62,6 +62,7 @@ defmodule AttestoClient.RequestObject do
           | :invalid_lifetime
           | :invalid_time
           | :invalid_jti
+          | :invalid_kid
           | :unsupported_alg
           | :unsupported_key
           | {:signing_failed, String.t()}
@@ -87,6 +88,7 @@ defmodule AttestoClient.RequestObject do
            Builder.validate_lifetime(opts, @default_lifetime_seconds, @max_lifetime_seconds),
          {:ok, now} <- Builder.validate_now(opts),
          {:ok, jti} <- Builder.validate_jti(opts),
+         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
         Map.merge(params, %{
@@ -98,7 +100,7 @@ defmodule AttestoClient.RequestObject do
           "jti" => jti
         })
 
-      header = Builder.put_kid(%{"alg" => alg, "typ" => typ}, jose_jwk, opts)
+      header = Builder.put_kid(%{"alg" => alg, "typ" => typ}, kid)
       Builder.sign(jose_jwk, header, claims)
     end
   end

@@ -33,9 +33,11 @@ defmodule AttestoClient.Token do
 
   Required option: `:token_endpoint`. Private-key JWT authentication also
   uses `:issuer` from trusted discovery when supplied. An omitted issuer
-  retains the deprecated endpoint-audience fallback in 2.x. `:client_id`, `:client_auth`, and
-  `:req_options` behave as for `refresh/4` - the pre-authorized_code grant
-  still authenticates the wallet the same way any other grant does. Pass
+  retains the deprecated endpoint-audience fallback in 2.x. `:client_id` may
+  be omitted only with `client_auth: :none`, as permitted for anonymous
+  pre-authorized-code flows; authenticated methods still require it.
+  `:client_auth` and `:req_options` otherwise behave as for `refresh/4`.
+  `:alg`, `:kid`, and `:now` configure DPoP proofs when `:dpop` is supplied. Pass
   `:tx_code` when the offer's grant carried a `tx_code` object, i.e. the end
   user must key in the transaction code the issuer displayed out of band.
 
@@ -91,6 +93,9 @@ defmodule AttestoClient.Token do
   their historical key continuity cannot be checked; a successful DPoP response
   records the supplied key for subsequent refreshes.
 
+  `:alg`, `:kid`, and `:now` configure each DPoP proof and are retained across
+  the one permitted nonce retry.
+
   The locally retained `tokens.id_token_alg` selects the ID Token verification
   algorithm. An explicit `:id_token_alg` must match it; mismatches fail before
   HTTP. The algorithm survives refreshes even when the response omits an ID
@@ -143,6 +148,7 @@ defmodule AttestoClient.Token do
   @spec revoke(String.t(), keyword()) :: :ok | {:error, term()}
   def revoke(token, opts) when is_binary(token) and token != "" and is_list(opts) do
     with {:ok, endpoint} <- required_string(opts, :revocation_endpoint),
+         {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, hint} <- token_type_hint(opts) do
       form = %{"token" => token} |> maybe_put("token_type_hint", hint)
       OAuthHTTP.post_form_unit(endpoint, form, opts)

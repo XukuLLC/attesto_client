@@ -217,10 +217,14 @@ defmodule AttestoClient.PinnedRequest do
     |> String.downcase()
   end
 
-  defp unique_keyword?(options) do
+  @doc false
+  @spec unique_keyword?(term()) :: boolean()
+  def unique_keyword?(options) when is_list(options) do
     Keyword.keyword?(options) and
       options |> Keyword.keys() |> Enum.uniq() |> length() == length(options)
   end
+
+  def unique_keyword?(_options), do: false
 
   defp active?(value), do: value not in [nil, false]
 end

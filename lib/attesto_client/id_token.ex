@@ -188,7 +188,12 @@ defmodule AttestoClient.IDToken do
     end
   end
 
-  defp check_header_typ(%{"typ" => @id_token_typ}), do: :ok
+  defp check_header_typ(%{"typ" => typ}) when is_binary(typ) do
+    if String.downcase(typ) == String.downcase(@id_token_typ),
+      do: :ok,
+      else: {:error, :unexpected_typ}
+  end
+
   defp check_header_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
   defp check_header_typ(_header), do: :ok
 

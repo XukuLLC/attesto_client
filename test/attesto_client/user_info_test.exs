@@ -71,6 +71,10 @@ defmodule AttestoClient.UserInfoTest do
       assert {:ok, _claims} = verify(jwt)
     end
 
+    test "compares JWT typ case-insensitively" do
+      assert {:ok, _claims} = verify(sign(claims(), %{"typ" => "jwt"}))
+    end
+
     test "rejects wrong issuer, audience, subject, typ, and time" do
       assert {:error, :invalid_issuer} = verify(sign(claims(%{"iss" => "https://evil.example"})))
       assert {:error, :invalid_audience} = verify(sign(claims(%{"aud" => "other"})))
@@ -78,6 +82,9 @@ defmodule AttestoClient.UserInfoTest do
       assert {:error, :unexpected_typ} = verify(sign(claims(), %{"typ" => "userinfo+jwt"}))
       assert {:error, :expired} = verify(sign(claims(%{"exp" => @now - 1})))
       assert {:error, :not_yet_valid} = verify(sign(claims(%{"iat" => @now + 120})))
+      assert {:error, :not_yet_valid} = verify(sign(claims(%{"nbf" => @now + 120})))
+      assert {:error, :invalid_nbf} = verify(sign(claims(%{"nbf" => -1})))
+      assert {:error, :invalid_nbf} = verify(sign(claims(%{"nbf" => "later"})))
     end
 
     test "rejects missing sub, bad signature, and missing options" do

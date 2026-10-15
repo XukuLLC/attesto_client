@@ -286,6 +286,7 @@ defmodule AttestoClient.IDTokenTest do
       {_, jwt} = other |> JOSE.JWT.sign(%{"alg" => "RS256"}, base_claims()) |> JOSE.JWS.compact()
 
       assert {:error, :invalid_signature} = verify(jwt)
+      assert {:ok, _claims} = verify(sign(base_claims(), %{"typ" => "jwt"}))
       assert {:error, :unexpected_typ} = verify(sign(base_claims(), %{"typ" => "at+jwt"}))
 
       assert {:error, :invalid_token} =
@@ -314,6 +315,18 @@ defmodule AttestoClient.IDTokenTest do
                    "keys" => [key |> Map.put("use", "sig") |> Map.put("key_ops", ["encrypt"])]
                  }
                )
+
+      for private_member <- ~w(d p q dp dq qi oth k) do
+        private_key = Map.put(key, private_member, "private-member")
+
+        assert {:error, :invalid_signature} =
+                 verify(jwt, jwks: %{"keys" => [private_key]})
+      end
+
+      # An ineligible private entry must not poison selection of an otherwise
+      # valid public key with the same kid.
+      private_key = Map.put(key, "d", "private-member")
+      assert {:ok, _claims} = verify(jwt, jwks: %{"keys" => [private_key, key]})
 
       weak = JOSE.JWK.generate_key({:rsa, 1024})
       {_, weak_public} = JOSE.JWK.to_public_map(weak)
@@ -409,7 +422,7 @@ defmodule AttestoClient.IDTokenTest do
     end
 
     test "rejected by default" do
-      assert {:error, :invalid_signature} = verify(unsigned(base_claims()))
+      assert {:error, :unsupported_alg} = verify(unsigned(base_claims()))
     end
 
     test "accepted with allow_unsigned: true (OIDC Core §3.1.3.7 code-flow case)" do

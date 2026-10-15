@@ -58,10 +58,12 @@ defmodule AttestoClient.Wallet.CredentialConfigurationTest do
     end
   end
 
-  test "an unadvertised selected configuration fails before HTTP", context do
-    assert {:error, :credential_configuration_not_advertised} =
+  test "an explicit configuration absent from the offer fails before HTTP without metadata",
+       context do
+    assert {:error, :invalid_credential_configuration_id} =
              request("dc+sd-jwt", "unused", context,
                credential_configuration_id: "UnknownCredential",
+               credential_issuer_metadata: :omit,
                req_options: [plug: fn _ -> flunk("unexpected HTTP") end]
              )
   end

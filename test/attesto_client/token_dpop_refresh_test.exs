@@ -159,6 +159,62 @@ defmodule AttestoClient.TokenDPoPRefreshTest do
     assert length(Agent.get(requests, & &1)) == 4
   end
 
+  test "refresh retains PS256 and kid across a DPoP nonce retry" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    key = JOSE.JWK.generate_key({:rsa, 2048})
+    {_, public} = JOSE.JWK.to_public_map(key)
+    bound = Map.put(token_set(), :dpop_jkt, thumbprint(key))
+    owner = self()
+    attempts = start_supervised!({Agent, fn -> 0 end})
+
+    plug = fn conn ->
+      [proof] = Plug.Conn.get_req_header(conn, "dpop")
+      assert {:ok, header} = Attesto.JWS.peek_json(proof, :protected)
+      assert {:ok, claims} = Attesto.JWS.peek_json(proof, :payload)
+      attempt = Agent.get_and_update(attempts, &{&1, &1 + 1})
+      send(owner, {:ps256_refresh_attempt, attempt, header, claims})
+
+      if attempt == 0 do
+        conn
+        |> Plug.Conn.put_resp_header("dpop-nonce", "refresh-nonce")
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{"error" => "use_dpop_nonce"})
+      else
+        Req.Test.json(conn, %{
+          "access_token" => "new",
+          "token_type" => "DPoP",
+          "refresh_token" => "rotated"
+        })
+      end
+    end
+
+    assert {:ok, result} =
+             Token.refresh(
+               coordinator,
+               :ps256,
+               bound,
+               options(
+                 dpop: key,
+                 alg: "PS256",
+                 kid: "dpop-rsa-1",
+                 jwks: %{"keys" => [public]},
+                 req_options: [plug: plug]
+               )
+             )
+
+    assert result.tokens.refresh_token == "rotated"
+    assert_receive {:ps256_refresh_attempt, 0, first_header, first_claims}
+    assert_receive {:ps256_refresh_attempt, 1, second_header, second_claims}
+    assert first_header["alg"] == "PS256"
+    assert second_header["alg"] == "PS256"
+    assert first_header["kid"] == "dpop-rsa-1"
+    assert second_header["kid"] == "dpop-rsa-1"
+    assert first_claims["nonce"] == nil
+    assert second_claims["nonce"] == "refresh-nonce"
+    refute first_claims["jti"] == second_claims["jti"]
+    assert Agent.get(attempts, & &1) == 2
+  end
+
   test "pre-authorized issuance stores locally verified DPoP provenance" do
     key = JOSE.JWK.generate_key({:ec, "P-256"})
     expected = thumbprint(key)

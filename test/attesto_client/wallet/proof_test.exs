@@ -70,6 +70,33 @@ defmodule AttestoClient.Wallet.ProofTest do
       assert {:error, :invalid_key} =
                Proof.build(%{"kty" => "bogus"}, credential_issuer: @credential_issuer)
     end
+
+    test "rejects malformed optional claims and kid" do
+      key = es256_key()
+      base = [credential_issuer: @credential_issuer]
+
+      for value <- ["", 42, []] do
+        assert {:error, :invalid_nonce} = Proof.build(key, base ++ [nonce: value])
+        assert {:error, :invalid_client_id} = Proof.build(key, base ++ [client_id: value])
+
+        assert {:error, :invalid_key_attestation} =
+                 Proof.build(key, base ++ [key_attestation: value])
+
+        assert {:error, :invalid_kid} = Proof.build(key, base ++ [kid: value])
+      end
+    end
+
+    test "rejects a signing algorithm that conflicts with the embedded JWK declaration" do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+      {_type, private_jwk} = JOSE.JWK.to_map(key)
+      configured = Map.put(private_jwk, "alg", "RS256")
+
+      assert {:error, :unsupported_alg} =
+               Proof.build(configured,
+                 credential_issuer: @credential_issuer,
+                 alg: "PS256"
+               )
+    end
   end
 
   describe "interop with Attesto.CredentialProof.verify_jwt/2" do

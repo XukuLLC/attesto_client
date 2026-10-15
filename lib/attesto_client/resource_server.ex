@@ -419,7 +419,7 @@ defmodule AttestoClient.ResourceServer do
   defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) and exp > now, do: :ok
   defp check_expiry(_claims, _now), do: {:error, :expired}
 
-  defp check_not_before(%{"nbf" => nbf}, now, skew) when is_integer(nbf) do
+  defp check_not_before(%{"nbf" => nbf}, now, skew) when is_integer(nbf) and nbf >= 0 do
     if nbf <= now + skew, do: :ok, else: {:error, :not_yet_valid}
   end
 

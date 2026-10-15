@@ -51,4 +51,17 @@ defmodule AttestoClient.LogoutTest do
                id_token_hint: "id-token"
              )
   end
+
+  test "builds logout for a provider that advertises only ES256 ID tokens" do
+    metadata = metadata(%{"id_token_signing_alg_values_supported" => ["ES256"]})
+
+    assert {:ok, url} =
+             Logout.url(
+               issuer: @issuer,
+               metadata: metadata,
+               logout_hint: "session-1"
+             )
+
+    assert URI.parse(url).path == "/logout"
+  end
 end

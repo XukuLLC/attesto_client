@@ -4,6 +4,75 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-10-15
+
+### Security
+
+- Send OID4VCI Nonce Endpoint requests through the unauthenticated open-POST
+  path. In split Credential Issuer and Authorization Server deployments this
+  prevents forwarding the AS client secret, private-key assertion, client
+  attestation, or DPoP proof to the Credential Issuer; endpoint screening,
+  pinning, response bounds, and the overall deadline still apply.
+- Reject malformed or duplicate `req_options` before network I/O with
+  `:unsafe_transport_options`, including nested connection and transport
+  options used by unauthenticated by-reference requests.
+- Reject private JWK members in verification keys and reject empty, malformed,
+  or struct-backed JWKS inputs. A malformed candidate no longer prevents a
+  separate valid public verification key from being selected.
+- Validate optional `nbf` claims in JARM, signed UserInfo, signed introspection,
+  and resource-server tokens, and compare registered JWT `typ` values
+  case-insensitively where required.
+- Validate wallet and attestation inputs before signing or network I/O,
+  including duplicate holder keys, malformed optional claims, protected-header
+  values, grant objects, credential issuer identifiers, notification IDs, and
+  symmetric keys. Key Attestation `certification` values are now limited to
+  absolute HTTP(S) URLs.
+
+### Added
+
+- Support anonymous OID4VCI pre-authorized-code redemption when
+  `client_auth: :none` by allowing `client_id` to be omitted. Authenticated
+  client methods continue to require a non-empty client identifier.
+- Propagate `:alg`, `:kid`, and `:now` through DPoP-enabled authorization-code,
+  token, credential, refresh, and nonce-retry paths. Each retry receives a
+  fresh `jti` while retaining the selected key algorithm and identifier.
+
+### Changed
+
+- Builders now honor a signing JWK's declared `alg` when `:alg` is omitted and
+  return `:unsupported_alg` when an explicit algorithm conflicts with that
+  declaration. This enables RSA DPoP keys declared for PS256 instead of
+  silently forcing RS256.
+- A present `kid` must be a non-empty string. Explicit `kid: nil`, other
+  malformed values, and malformed embedded JWK `kid` members now return
+  `:invalid_kid` instead of falling back to another identifier.
+- `Token.revoke/2` now requires `:client_id`. `Verifier.normalize_jwks/1`
+  returns `:invalid_jwks` for empty key sets, and protected algorithms outside
+  the accepted set return `:unsupported_alg` instead of `:invalid_signature`.
+- An explicit OID4VCI `credential_configuration_id` must be present in the
+  credential offer; a mismatch fails before metadata lookup or HTTP.
+- Stop requiring every OpenID Provider metadata document to advertise RS256.
+  The selected ID Token algorithm must still be advertised, allowing clients
+  configured for ES256, EdDSA, or another accepted algorithm to use providers
+  that intentionally omit RS256.
+
+### Fixed
+
+- Preserve callback JWKS resolver, timeout, and response-size options while
+  using the transaction's pinned issuer metadata.
+- Parse every `WWW-Authenticate` field and combined challenge, recognize the
+  DPoP scheme case-insensitively, and retry only for an exact
+  `error=use_dpop_nonce` parameter.
+- Derive canonical DPoP target URIs for IPv6 authorities and carry RSA PS256,
+  explicit `kid`, deterministic time, and nonce options through DPoP retries.
+- Compute SD-JWT Key Binding `sd_hash` with the issuer-selected `_sd_alg`,
+  restoring SHA-384 and SHA-512 interoperability with conforming verifiers.
+- Validate and expose `notification_id` consistently for immediate and
+  deferred credential responses, reject invalid credential-offer grant values,
+  and reject duplicate holder keys before issuing a request.
+- Return controlled errors for malformed builder inputs and symmetric
+  attestation or holder keys instead of backend exceptions.
+
 ## [2.7.0] - 2026-10-08
 
 ### Fixed

@@ -261,7 +261,7 @@ defmodule AttestoClient.EdwardsAlgorithmsTest do
       ed448_token = sign(ed448, "Ed448", jarm_claims(), "jarm-exact-ed448")
       ed448_jwks = jwks(ed448, "Ed448", "jarm-exact-ed448")
 
-      assert {:error, :invalid_signature} = JARM.verify(ed448_token, ed448_jwks, jarm_opts())
+      assert {:error, :unsupported_alg} = JARM.verify(ed448_token, ed448_jwks, jarm_opts())
 
       assert {:ok, _claims} =
                JARM.verify(ed448_token, ed448_jwks, jarm_opts(accepted_algs: ["Ed448"]))

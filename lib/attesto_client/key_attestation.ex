@@ -39,6 +39,12 @@ defmodule AttestoClient.KeyAttestation do
   @type error ::
           :invalid_key
           | :invalid_attested_keys
+          | :invalid_key_storage
+          | :invalid_user_authentication
+          | :invalid_certification
+          | :invalid_nonce
+          | :invalid_x5c
+          | :invalid_kid
           | :invalid_lifetime
           | :unsupported_alg
           | :unsupported_key
@@ -55,29 +61,36 @@ defmodule AttestoClient.KeyAttestation do
   embedded, and the proof's holder key must be among them.
 
   Optional: `:key_storage` / `:user_authentication` (attack-potential-resistance
-  string lists), `:certification` (a URL), `:nonce` (echo the issuer's
-  `c_nonce`), `:x5c` (base64 DER certificates for the header), `:lifetime`
-  (seconds to `exp`, default `#{@default_lifetime_seconds}`), and `:alg`, `:kid`,
-  `:now` as in `AttestoClient.Wallet.Proof.build/2`.
+  string lists), `:certification` (an absolute HTTP(S) URL), `:nonce` (echo the
+  issuer's `c_nonce`), `:x5c` (base64 DER certificates for the header),
+  `:lifetime` (seconds to `exp`, default `#{@default_lifetime_seconds}`), and
+  `:alg`, `:kid`, `:now` as in `AttestoClient.Wallet.Proof.build/2`.
   """
   @spec build(jwk(), [build_opt()]) :: {:ok, String.t()} | {:error, error()}
   def build(provider_key, opts) when is_list(opts) do
     with {:ok, provider_jwk} <- Builder.normalize_key(provider_key),
          {:ok, attested_keys} <- attested_public_keys(Keyword.get(opts, :attested_keys)),
+         {:ok, key_storage} <- optional_string_list(opts, :key_storage, :invalid_key_storage),
+         {:ok, user_authentication} <-
+           optional_string_list(opts, :user_authentication, :invalid_user_authentication),
+         {:ok, certification} <- optional_url(opts, :certification, :invalid_certification),
+         {:ok, nonce} <- optional_string(opts, :nonce, :invalid_nonce),
+         {:ok, x5c} <- Builder.validate_x5c(opts),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(provider_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(provider_jwk, opts) do
       claims =
         %{"iat" => now, "exp" => now + lifetime, "attested_keys" => attested_keys}
-        |> put_optional("key_storage", Keyword.get(opts, :key_storage))
-        |> put_optional("user_authentication", Keyword.get(opts, :user_authentication))
-        |> put_optional("certification", Keyword.get(opts, :certification))
-        |> put_optional("nonce", Keyword.get(opts, :nonce))
+        |> put_optional("key_storage", key_storage)
+        |> put_optional("user_authentication", user_authentication)
+        |> put_optional("certification", certification)
+        |> put_optional("nonce", nonce)
 
       header =
         %{"alg" => alg, "typ" => @typ}
-        |> Builder.put_x5c(Keyword.get(opts, :x5c))
-        |> Builder.put_kid(provider_jwk, opts)
+        |> Builder.put_x5c(x5c)
+        |> Builder.put_kid(kid)
 
       Builder.sign(provider_jwk, header, claims)
     end
@@ -85,12 +98,11 @@ defmodule AttestoClient.KeyAttestation do
 
   defp attested_public_keys([_ | _] = keys) do
     Enum.reduce_while(keys, {:ok, []}, fn key, {:ok, acc} ->
-      case Builder.normalize_key(key) do
-        {:ok, jwk} ->
-          {_type, public} = JOSE.JWK.to_public_map(jwk)
+      case attested_public_key(key) do
+        {:ok, public} ->
           {:cont, {:ok, [public | acc]}}
 
-        {:error, _reason} ->
+        {:error, :invalid_attested_keys} ->
           {:halt, {:error, :invalid_attested_keys}}
       end
     end)
@@ -101,6 +113,68 @@ defmodule AttestoClient.KeyAttestation do
   end
 
   defp attested_public_keys(_absent), do: {:error, :invalid_attested_keys}
+
+  defp attested_public_key(key) do
+    case Builder.normalize_key(key) do
+      {:ok, jwk} ->
+        {_type, public} = JOSE.JWK.to_public_map(jwk)
+        {:ok, public}
+
+      {:error, _reason} ->
+        {:error, :invalid_attested_keys}
+    end
+  rescue
+    _error -> {:error, :invalid_attested_keys}
+  catch
+    _kind, _reason -> {:error, :invalid_attested_keys}
+  end
+
+  defp optional_string_list(opts, key, error) do
+    case Keyword.fetch(opts, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, [_ | _] = values} ->
+        if Enum.all?(values, &(is_binary(&1) and &1 != "")),
+          do: {:ok, values},
+          else: {:error, error}
+
+      {:ok, _invalid} ->
+        {:error, error}
+    end
+  end
+
+  defp optional_string(opts, key, error) do
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, nil}
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      {:ok, _invalid} -> {:error, error}
+    end
+  end
+
+  defp optional_url(opts, key, error) do
+    with {:ok, value} <- optional_string(opts, key, error) do
+      validate_optional_url(value, error)
+    end
+  end
+
+  defp validate_optional_url(nil, _error), do: {:ok, nil}
+
+  defp validate_optional_url(value, error) do
+    case URI.new(value) do
+      {:ok, uri} ->
+        validate_certification_uri(uri, value, error)
+
+      _invalid ->
+        {:error, error}
+    end
+  end
+
+  defp validate_certification_uri(%URI{scheme: scheme, host: host}, value, _error)
+       when scheme in ["http", "https"] and is_binary(host) and host != "",
+       do: {:ok, value}
+
+  defp validate_certification_uri(_uri, _value, error), do: {:error, error}
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)

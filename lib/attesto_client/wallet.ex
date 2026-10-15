@@ -56,6 +56,7 @@ defmodule AttestoClient.Wallet do
         }
 
   @type result :: %{
+          notification_id: String.t() | nil,
           credentials: [held_credential() | pending_credential()],
           c_nonce: String.t() | nil
         }
@@ -91,6 +92,8 @@ defmodule AttestoClient.Wallet do
           | {:key_attestation,
              String.t() | ([map()], String.t() | nil -> {:ok, String.t()} | {:error, term()})}
           | {:dpop, Proof.jwk()}
+          | {:alg, String.t()}
+          | {:kid, String.t()}
           | {:now, integer()}
           | {:req_options, keyword()}
           | {:timeout, pos_integer()}
@@ -122,7 +125,9 @@ defmodule AttestoClient.Wallet do
   DPoP proofs. The one key is used at the token endpoint (binding the access
   token to its `jkt`) and at the Credential Endpoint (where the proof carries
   the `ath` binding to that token), and a `use_dpop_nonce` challenge is retried
-  once - see `AttestoClient.DPoP`.
+  once - see `AttestoClient.DPoP`. `:alg` and `:kid` select the DPoP proof's
+  signing algorithm and key identifier; `:proof_alg` and `:proof_kid` configure
+  the separate OID4VCI credential proof.
 
   HAIP requires DPoP and authenticated token acquisition. When supplying an
   existing token, pass `access_token: tokens` with the complete locally bound
@@ -166,6 +171,7 @@ defmodule AttestoClient.Wallet do
          {:ok, encryption} <- CredentialEncryption.prepare(opts),
          {:ok, holder_keys} <- holder_keys(holder_key),
          {:ok, holder_publics} <- holder_public_keys(holder_keys),
+         :ok <- distinct_holder_keys(holder_publics),
          :ok <- validate_trusted(opts),
          {:ok, format} <- required_format(opts),
          {:ok, configuration_id} <- configuration_id(offer, opts),
@@ -241,7 +247,9 @@ defmodule AttestoClient.Wallet do
   defp configuration_id(offer, opts) do
     case Keyword.get(opts, :credential_configuration_id) do
       id when is_binary(id) and id != "" ->
-        {:ok, id}
+        if id in offer.credential_configuration_ids,
+          do: {:ok, id},
+          else: {:error, :invalid_credential_configuration_id}
 
       nil ->
         case offer.credential_configuration_ids do
@@ -409,7 +417,7 @@ defmodule AttestoClient.Wallet do
   end
 
   defp request_nonce(endpoint, opts) do
-    case OAuthHTTP.post_form(endpoint, %{}, opts) do
+    case OAuthHTTP.post_form_open(endpoint, %{}, opts) do
       {:ok, %{"c_nonce" => c_nonce}} when is_binary(c_nonce) and c_nonce != "" -> {:ok, c_nonce}
       {:ok, _invalid} -> {:error, :invalid_nonce_response}
       {:error, reason} -> {:error, reason}
@@ -429,9 +437,8 @@ defmodule AttestoClient.Wallet do
   defp holder_public_keys(keys) do
     keys
     |> Enum.reduce_while({:ok, []}, fn key, {:ok, acc} ->
-      case Builder.normalize_key(key) do
-        {:ok, jwk} ->
-          {_type, public} = JOSE.JWK.to_public_map(jwk)
+      case holder_public_key(key) do
+        {:ok, public} ->
           {:cont, {:ok, [public | acc]}}
 
         {:error, reason} ->
@@ -441,6 +448,25 @@ defmodule AttestoClient.Wallet do
     |> case do
       {:ok, publics} -> {:ok, Enum.reverse(publics)}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp holder_public_key(key) do
+    with {:ok, jwk} <- Builder.normalize_key(key) do
+      {_type, public} = JOSE.JWK.to_public_map(jwk)
+      {:ok, public}
+    end
+  rescue
+    _error -> {:error, :invalid_key}
+  catch
+    _kind, _reason -> {:error, :invalid_key}
+  end
+
+  defp distinct_holder_keys(holder_publics) do
+    with {:ok, thumbprints} <- expected_thumbprints(holder_publics) do
+      if MapSet.size(thumbprints) == length(holder_publics),
+        do: :ok,
+        else: {:error, :duplicate_holder_key}
     end
   end
 
@@ -558,13 +584,20 @@ defmodule AttestoClient.Wallet do
          _type_binding
        )
        when is_binary(transaction_id) and transaction_id != "" do
-    pending = %{
-      status: :pending,
-      transaction_id: transaction_id,
-      notification_id: Map.get(response, "notification_id")
-    }
+    with {:ok, notification_id} <- notification_id(response) do
+      pending = %{
+        status: :pending,
+        transaction_id: transaction_id,
+        notification_id: notification_id
+      }
 
-    {:ok, %{credentials: [pending], c_nonce: c_nonce}}
+      {:ok,
+       %{
+         credentials: [pending],
+         c_nonce: c_nonce,
+         notification_id: notification_id
+       }}
+    end
   end
 
   defp finalize(
@@ -577,14 +610,15 @@ defmodule AttestoClient.Wallet do
          type_binding
        )
        when is_list(credentials) and credentials != [] do
-    with {:ok, held} <-
+    with {:ok, notification_id} <- notification_id(response),
+         {:ok, held} <-
            verify_credentials(credentials, format, holder_publics, opts, type_binding),
-         :ok <- maybe_notify(response, access_token, opts) do
+         :ok <- maybe_notify(notification_id, access_token, opts) do
       {:ok,
        %{
          credentials: held,
          c_nonce: c_nonce,
-         notification_id: Map.get(response, "notification_id")
+         notification_id: notification_id
        }}
     end
   end
@@ -600,12 +634,24 @@ defmodule AttestoClient.Wallet do
        ),
        do: {:error, :invalid_credential_response}
 
+  defp notification_id(response) do
+    case Map.fetch(response, "notification_id") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, notification_id} when is_binary(notification_id) and notification_id != "" ->
+        {:ok, notification_id}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_credential_response}
+    end
+  end
+
   # OID4VCI §10: when the caller supplies a `:notification_endpoint` and the
   # issuer returned a `notification_id`, POST a Notification acknowledging the
   # credential. No endpoint or no id means nothing to notify.
-  defp maybe_notify(response, access_token, opts) do
+  defp maybe_notify(notification_id, access_token, opts) do
     endpoint = Keyword.get(opts, :notification_endpoint)
-    notification_id = Map.get(response, "notification_id")
 
     if is_binary(endpoint) and endpoint != "" and is_binary(notification_id) and
          notification_id != "" do

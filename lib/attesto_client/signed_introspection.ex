@@ -44,6 +44,7 @@ defmodule AttestoClient.SignedIntrospection do
           | :invalid_audience
           | :invalid_claims
           | :invalid_iat
+          | :invalid_nbf
           | :not_yet_valid
           | :expired
           | AttestoClient.Discovery.error()
@@ -69,6 +70,7 @@ defmodule AttestoClient.SignedIntrospection do
          :ok <- check_audience(claims, audience),
          :ok <- check_claims(claims),
          :ok <- check_iat(claims, now),
+         :ok <- check_not_before(claims, now),
          :ok <- check_expiry(claims, now) do
       {:ok, claims}
     end
@@ -110,6 +112,13 @@ defmodule AttestoClient.SignedIntrospection do
   end
 
   defp check_iat(_claims, _now), do: {:error, :invalid_iat}
+
+  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
+    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+  end
+
+  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
+  defp check_not_before(_claims, _now), do: :ok
 
   defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) do
     if exp > now, do: :ok, else: {:error, :expired}

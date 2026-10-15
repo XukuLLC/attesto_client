@@ -154,13 +154,17 @@ defmodule AttestoClient.AuthorizationCodeProfileTest do
 
   test "authorization-code DPoP issuance retains the original local key thumbprint" do
     store = store()
-    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    key = JOSE.JWK.generate_key({:rsa, 2048})
     {_, public} = JOSE.JWK.to_public_map(key)
     {:ok, jkt} = Attesto.Thumbprint.of_jwk(public)
     assert {:ok, started} = AuthorizationCode.start(store, options(dpop: key))
 
     spy = fn conn ->
-      assert [_proof] = Plug.Conn.get_req_header(conn, "dpop")
+      assert [proof] = Plug.Conn.get_req_header(conn, "dpop")
+      header = proof |> JOSE.JWS.peek_protected() |> JSON.decode!()
+      claims = proof |> JOSE.JWS.peek_payload() |> JSON.decode!()
+      assert %{"alg" => "PS256", "kid" => "callback-dpop"} = header
+      assert claims["iat"] == 1_700_000_000
 
       Req.Test.json(conn, %{
         "access_token" => "access",
@@ -173,6 +177,9 @@ defmodule AttestoClient.AuthorizationCodeProfileTest do
              AuthorizationCode.callback(store, %{"state" => started.state, "code" => "code"},
                browser_binding: "browser-session",
                dpop: key,
+               alg: "PS256",
+               kid: "callback-dpop",
+               now: 1_700_000_000,
                req_options: [plug: spy]
              )
 

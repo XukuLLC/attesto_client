@@ -78,7 +78,10 @@ defmodule AttestoClient.WalletAttestation do
           | :invalid_audience
           | :invalid_challenge
           | :invalid_instance_key
+          | :invalid_x5c
+          | :invalid_kid
           | :invalid_lifetime
+          | :invalid_time
           | :invalid_jti
           | :unsupported_alg
           | :unsupported_key
@@ -191,9 +194,11 @@ defmodule AttestoClient.WalletAttestation do
          {:ok, client_id} <- Builder.require_string(opts, :client_id, :invalid_client_id),
          {:ok, issuer} <- attester_issuer(opts),
          {:ok, instance_public} <- instance_public_jwk(opts),
+         {:ok, x5c} <- Builder.validate_x5c(opts),
          {:ok, lifetime} <-
            Builder.validate_lifetime(opts, @default_attestation_lifetime_seconds),
          {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(provider_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(provider_jwk, opts) do
       claims = %{
         "sub" => client_id,
@@ -206,8 +211,8 @@ defmodule AttestoClient.WalletAttestation do
 
       header =
         %{"alg" => alg, "typ" => @attestation_typ}
-        |> Builder.put_x5c(Keyword.get(opts, :x5c))
-        |> Builder.put_kid(provider_jwk, opts)
+        |> Builder.put_x5c(x5c)
+        |> Builder.put_kid(kid)
 
       Builder.sign(provider_jwk, header, claims)
     end
@@ -245,6 +250,7 @@ defmodule AttestoClient.WalletAttestation do
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_pop_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),
          {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(instance_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(instance_jwk, opts) do
       claims =
         %{
@@ -256,20 +262,31 @@ defmodule AttestoClient.WalletAttestation do
         }
         |> put_optional("challenge", Keyword.get(opts, :challenge))
 
-      header = Builder.put_kid(%{"alg" => alg, "typ" => @pop_typ}, instance_jwk, opts)
+      header = Builder.put_kid(%{"alg" => alg, "typ" => @pop_typ}, kid)
       Builder.sign(instance_jwk, header, claims)
     end
   end
 
   defp instance_public_jwk(opts) do
-    with {:ok, instance_jwk} <- normalize_instance_key(Keyword.get(opts, :instance_key)) do
-      {_type, public} = JOSE.JWK.to_public_map(instance_jwk)
-      {:ok, public}
-    end
+    with {:ok, instance_jwk} <- normalize_instance_key(Keyword.get(opts, :instance_key)),
+         do: public_instance_key(instance_jwk)
+  end
+
+  defp public_instance_key(instance_jwk) do
+    {_type, public} = JOSE.JWK.to_public_map(instance_jwk)
+    {:ok, public}
+  rescue
+    _error -> {:error, :invalid_instance_key}
+  catch
+    _kind, _reason -> {:error, :invalid_instance_key}
   end
 
   defp validate_challenge(nil), do: :ok
-  defp validate_challenge(challenge) when is_binary(challenge), do: :ok
+
+  defp validate_challenge(challenge)
+       when is_binary(challenge) and byte_size(challenge) in 1..4_096,
+       do: :ok
+
   defp validate_challenge(_invalid), do: {:error, :invalid_challenge}
 
   defp normalize_instance_key(nil), do: {:error, :invalid_instance_key}

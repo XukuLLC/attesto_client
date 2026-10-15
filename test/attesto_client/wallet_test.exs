@@ -228,7 +228,7 @@ defmodule AttestoClient.WalletTest do
         end
       end
 
-      assert {:ok, %{credentials: [pending], c_nonce: nil}} =
+      assert {:ok, %{credentials: [pending], c_nonce: nil, notification_id: "notif-1"}} =
                Wallet.request_credential(offer(), key,
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
@@ -239,6 +239,36 @@ defmodule AttestoClient.WalletTest do
                )
 
       assert pending == %{status: :pending, transaction_id: "txn-1", notification_id: "notif-1"}
+    end
+
+    test "rejects a malformed notification_id in a credential response" do
+      {_issuer_pem, issuer_jwk} = issuer_keypair()
+
+      for invalid <- ["", 42] do
+        plug = fn conn ->
+          case {conn.method, conn.request_path} do
+            {"POST", "/token"} ->
+              json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+            {"POST", "/credential"} ->
+              json(conn, 202, %{
+                "transaction_id" => "txn-1",
+                "interval" => 1,
+                "notification_id" => invalid
+              })
+          end
+        end
+
+        assert {:error, :invalid_credential_response} =
+                 Wallet.request_credential(offer(), holder_key(),
+                   token_endpoint: "#{@issuer}/token",
+                   credential_endpoint: "#{@issuer}/credential",
+                   client_id: @client_id,
+                   format: "vc+sd-jwt",
+                   trusted: issuer_jwk,
+                   req_options: [plug: plug]
+                 )
+      end
     end
   end
 
@@ -256,6 +286,15 @@ defmodule AttestoClient.WalletTest do
             json(conn, 200, %{"access_token" => @access_token, "token_type" => token_type})
 
           {"POST", "/nonce"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+            send(test_pid, {
+              :nonce_transport,
+              dpop,
+              Plug.Conn.get_req_header(conn, "authorization"),
+              URI.decode_query(body)
+            })
+
             json(conn, 200, %{"c_nonce" => @c_nonce})
 
           {"POST", "/credential"} ->
@@ -293,6 +332,7 @@ defmodule AttestoClient.WalletTest do
                  format: "vc+sd-jwt",
                  trusted: issuer_jwk,
                  dpop: dpop_key,
+                 client_auth: {:client_secret_post, "wallet-secret"},
                  req_options: [plug: dpop_capturing_plug(issuer_pem, self())]
                )
 
@@ -318,6 +358,133 @@ defmodule AttestoClient.WalletTest do
                )
 
       assert ath == Attesto.DPoP.compute_ath(@access_token)
+
+      assert_receive {:nonce_transport, [], [], %{}}
+    end
+
+    test "nonce requests strip every client-auth mode and DPoP while other legs stay authenticated" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+      dpop_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      assertion_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      provider_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      instance_key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      assert {:ok, client_attestation} =
+               AttestoClient.WalletAttestation.attestation(provider_key,
+                 client_id: @client_id,
+                 instance_key: instance_key
+               )
+
+      auth_cases = [
+        basic: {:client_secret_basic, "wallet-secret"},
+        private_key_jwt: {:private_key_jwt, assertion_key, audience: @issuer},
+        client_attestation:
+          {:client_attestation, client_attestation, instance_key, audience: @issuer}
+      ]
+
+      for {auth_name, client_auth} <- auth_cases do
+        owner = self()
+
+        plug = fn conn ->
+          headers = %{
+            authorization: Plug.Conn.get_req_header(conn, "authorization"),
+            dpop: Plug.Conn.get_req_header(conn, "dpop"),
+            attestation: Plug.Conn.get_req_header(conn, "oauth-client-attestation"),
+            attestation_pop: Plug.Conn.get_req_header(conn, "oauth-client-attestation-pop")
+          }
+
+          case {conn.method, conn.request_path} do
+            {"POST", "/token"} ->
+              {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+              send(
+                owner,
+                {:authenticated_wallet_leg, auth_name, :token, headers, URI.decode_query(body)}
+              )
+
+              json(conn, 200, %{"access_token" => @access_token, "token_type" => "DPoP"})
+
+            {"POST", "/nonce"} ->
+              {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+              send(
+                owner,
+                {:authenticated_wallet_leg, auth_name, :nonce, headers, URI.decode_query(body)}
+              )
+
+              json(conn, 200, %{"c_nonce" => @c_nonce})
+
+            {"POST", "/credential"} ->
+              {request, conn} = read_json_body!(conn)
+              send(owner, {:authenticated_wallet_leg, auth_name, :credential, headers, request})
+
+              {:ok, %{jwk: holder_jwk}} =
+                Attesto.CredentialProof.verify_jwt(hd(request["proofs"]["jwt"]),
+                  issuer: @issuer,
+                  nonce: @c_nonce,
+                  client_id: @client_id
+                )
+
+              credential =
+                Attesto.SdJwtVc.issue(
+                  [iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                  claims: %{"given_name" => "Jane"},
+                  cnf: %{"jwk" => holder_jwk}
+                )
+
+              json(conn, 200, Attesto.CredentialResponse.build(credential))
+          end
+        end
+
+        assert {:ok, %{credentials: [_held]}} =
+                 Wallet.request_credential(offer(), holder_key(),
+                   token_endpoint: "#{@issuer}/token",
+                   nonce_endpoint: "#{@issuer}/nonce",
+                   credential_endpoint: "#{@issuer}/credential",
+                   client_id: @client_id,
+                   client_auth: client_auth,
+                   format: "vc+sd-jwt",
+                   trusted: issuer_jwk,
+                   dpop: dpop_key,
+                   req_options: [plug: plug]
+                 )
+
+        assert_receive {:authenticated_wallet_leg, ^auth_name, :token, token_headers, token_form}
+
+        assert [_token_dpop] = token_headers.dpop
+
+        case auth_name do
+          :basic ->
+            assert ["Basic " <> _credentials] = token_headers.authorization
+            assert token_headers.attestation == []
+            assert token_headers.attestation_pop == []
+
+          :private_key_jwt ->
+            assert token_headers.authorization == []
+            assert is_binary(token_form["client_assertion"])
+            assert token_headers.attestation == []
+            assert token_headers.attestation_pop == []
+
+          :client_attestation ->
+            assert token_headers.authorization == []
+            assert token_headers.attestation == [client_attestation]
+            assert [_pop] = token_headers.attestation_pop
+        end
+
+        assert_receive {:authenticated_wallet_leg, ^auth_name, :nonce, nonce_headers, %{}}
+        assert nonce_headers.authorization == []
+        assert nonce_headers.dpop == []
+        assert nonce_headers.attestation == []
+        assert nonce_headers.attestation_pop == []
+
+        assert_receive {:authenticated_wallet_leg, ^auth_name, :credential, credential_headers,
+                        _request}
+
+        assert credential_headers.authorization == ["DPoP #{@access_token}"]
+        assert [_credential_dpop] = credential_headers.dpop
+        assert credential_headers.attestation == []
+        assert credential_headers.attestation_pop == []
+      end
     end
 
     for {token_type, error} <- [{"Bearer", :invalid_token_type}, {nil, :invalid_token_response}] do
@@ -476,6 +643,38 @@ defmodule AttestoClient.WalletTest do
   end
 
   describe "request_credential/3 - batch issuance (§8.2)" do
+    test "rejects a symmetric holder key before any request" do
+      assert {:error, :invalid_key} =
+               Wallet.request_credential(offer(), JOSE.JWK.generate_key({:oct, 32}),
+                 access_token: "already-have-one",
+                 credential_endpoint: "#{@issuer}/credential",
+                 format: "vc+sd-jwt",
+                 trusted: @trusted_placeholder,
+                 req_options: [plug: fn _conn -> flunk("unexpected HTTP") end]
+               )
+    end
+
+    test "rejects duplicate holder keys before any request" do
+      key = holder_key()
+      {_type, private_map} = JOSE.JWK.to_map(key)
+
+      duplicate_batches = [
+        [key, key],
+        [JOSE.JWK.from_map(private_map), JOSE.JWK.from_map(private_map)]
+      ]
+
+      for duplicate_keys <- duplicate_batches do
+        assert {:error, :duplicate_holder_key} =
+                 Wallet.request_credential(offer(), duplicate_keys,
+                   access_token: "already-have-one",
+                   credential_endpoint: "#{@issuer}/credential",
+                   format: "vc+sd-jwt",
+                   trusted: @trusted_placeholder,
+                   req_options: [plug: fn _conn -> flunk("unexpected HTTP") end]
+                 )
+      end
+    end
+
     test "sends one proof per holder key and verifies each returned credential" do
       {issuer_pem, issuer_jwk} = issuer_keypair()
       test_pid = self()

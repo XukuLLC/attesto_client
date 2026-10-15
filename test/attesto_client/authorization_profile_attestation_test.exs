@@ -13,6 +13,12 @@ defmodule AttestoClient.AuthorizationProfileAttestationTest do
   @issuer "https://issuer.example"
   @provider "https://provider.example"
 
+  defp nonempty_jwks do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    {_type, public} = JOSE.JWK.to_public_map(key)
+    %{"keys" => [public]}
+  end
+
   setup_all do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
@@ -224,7 +230,7 @@ defmodule AttestoClient.AuthorizationProfileAttestationTest do
       |> Keyword.merge(
         token_endpoint: @issuer <> "/token",
         subject: "subject",
-        jwks: %{"keys" => []}
+        jwks: nonempty_jwks()
       )
 
     assert {:ok, result} = Token.refresh(coordinator, :record, tokens, refresh_opts)

@@ -44,12 +44,19 @@ defmodule AttestoClient.Wallet.PresentationTest do
   # Mirrors the held-credential shape `AttestoClient.Wallet.request_credential/3`
   # returns: `:claims` comes from verifying the issued credential, exactly as
   # the wallet does on receipt.
-  defp issue_held_sd_jwt(issuer_pem, holder_public) do
-    credential =
-      SdJwtVc.issue([iss: "https://issuer.example.com", vct: "identity", pem: issuer_pem],
+  defp issue_held_sd_jwt(issuer_pem, holder_public, opts \\ []) do
+    issue_opts =
+      [
         claims: %{"given_name" => "Alice", "family_name" => "Example"},
         cnf: %{"jwk" => holder_public},
         iat: @now
+      ]
+      |> Keyword.merge(opts)
+
+    credential =
+      SdJwtVc.issue(
+        [iss: "https://issuer.example.com", vct: "identity", pem: issuer_pem],
+        issue_opts
       )
 
     {:ok, %{claims: claims}} = SdJwtVc.verify(credential, issuer_jwks_for(issuer_pem), now: @now)
@@ -109,6 +116,55 @@ defmodule AttestoClient.Wallet.PresentationTest do
       assert result.iss == "https://issuer.example.com"
       assert result.claims["given_name"] == "Alice"
       assert result.claims["family_name"] == "Example"
+    end
+
+    test "uses the issuer-selected SHA-384 and SHA-512 algorithms for sd_hash" do
+      issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+      {holder_jwk, holder_public} = ec_keypair()
+
+      req =
+        request(%{
+          dcql_query: %{
+            "credentials" => [
+              %{
+                "id" => "identity",
+                "format" => "dc+sd-jwt",
+                "claims" => [%{"path" => ["given_name"]}]
+              }
+            ]
+          }
+        })
+
+      for {sd_alg, hash_alg} <- [{"sha-384", :sha384}, {"sha-512", :sha512}] do
+        held = issue_held_sd_jwt(issuer_pem, holder_public, sd_alg: sd_alg)
+
+        assert {:ok, %{"identity" => [presentation]}} =
+                 Presentation.build_vp_token(%{"identity" => held}, req,
+                   holder_keys: %{"identity" => holder_jwk},
+                   now: @now
+                 )
+
+        segments = String.split(presentation, "~")
+        kb_jwt = List.last(segments)
+        sd_input = segments |> Enum.drop(-1) |> Enum.join("~") |> Kernel.<>("~")
+
+        assert {:ok, %{"sd_hash" => sd_hash}} = Attesto.JWS.peek_json(kb_jwt, :payload)
+        expected = hash_alg |> :crypto.hash(sd_input) |> Attesto.JWS.encode64()
+        assert sd_hash == expected
+
+        if System.get_env("ATTESTO_PATH") in ~w(1 true) do
+          assert {:ok, %{"identity" => [result]}} =
+                   VpToken.verify(%{"identity" => [presentation]},
+                     nonce: req.nonce,
+                     audience: req.client_id,
+                     issuer_jwks: issuer_jwks_for(issuer_pem),
+                     now: @now
+                   )
+
+          assert result.claims["given_name"] == "Alice"
+        end
+      end
     end
 
     test "restricts the presentation to simple top-level requested claims" do
@@ -260,6 +316,50 @@ defmodule AttestoClient.Wallet.PresentationTest do
                  holder_keys: %{"identity" => wrong_key},
                  now: @now
                )
+    end
+
+    test "build rejects a symmetric holder key without raising" do
+      issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+      {_holder_jwk, holder_public} = ec_keypair()
+      held = issue_held_sd_jwt(issuer_pem, holder_public)
+
+      assert {:error, {"identity", :invalid_key}} =
+               Presentation.build_vp_token(%{"identity" => held}, request(),
+                 holder_keys: %{"identity" => JOSE.JWK.generate_key({:oct, 32})},
+                 now: @now
+               )
+    end
+
+    test "rejects an invalid key-binding time before signing" do
+      issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+      {holder_jwk, holder_public} = ec_keypair()
+      held = issue_held_sd_jwt(issuer_pem, holder_public)
+
+      for invalid_now <- [-1, 1.5, "1700000000"] do
+        assert {:error, {"identity", :invalid_time}} =
+                 Presentation.build_vp_token(%{"identity" => held}, request(),
+                   holder_keys: %{"identity" => holder_jwk},
+                   now: invalid_now
+                 )
+      end
+    end
+
+    test "rejects an invalid key-binding kid before signing" do
+      issuer_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer_jwk |> JOSE.JWK.to_pem() |> elem(1)
+      {holder_jwk, holder_public} = ec_keypair()
+      held = issue_held_sd_jwt(issuer_pem, holder_public)
+
+      for invalid_kid <- ["", 42] do
+        assert {:error, {"identity", :invalid_kid}} =
+                 Presentation.build_vp_token(%{"identity" => held}, request(),
+                   holder_keys: %{"identity" => holder_jwk},
+                   kid: invalid_kid,
+                   now: @now
+                 )
+      end
     end
   end
 

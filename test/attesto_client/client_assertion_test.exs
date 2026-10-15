@@ -151,6 +151,12 @@ defmodule AttestoClient.ClientAssertionTest do
       assert {:error, :invalid_lifetime} = ClientAssertion.build(key, base ++ [lifetime: -5])
       assert {:error, :invalid_lifetime} = ClientAssertion.build(key, base ++ [lifetime: 0])
       assert {:error, :invalid_jti} = ClientAssertion.build(key, base ++ [jti: ""])
+      assert {:error, :invalid_time} = ClientAssertion.build(key, base ++ [now: -1])
+      assert {:error, :invalid_time} = ClientAssertion.build(key, base ++ [now: "now"])
+
+      for kid <- ["", 42, []] do
+        assert {:error, :invalid_kid} = ClientAssertion.build(key, base ++ [kid: kid])
+      end
     end
 
     test "an unsupported algorithm, including none" do

@@ -86,6 +86,27 @@ defmodule AttestoClient.WalletAttestationTest do
                  client_id: @client_id,
                  instance_key: %{"kty" => "bogus"}
                )
+
+      assert {:error, :invalid_instance_key} =
+               WalletAttestation.attestation(es256_key(),
+                 client_id: @client_id,
+                 instance_key: JOSE.JWK.generate_key({:oct, 32})
+               )
+    end
+
+    test "rejects malformed x5c and kid options" do
+      provider = es256_key()
+      base = [client_id: @client_id, instance_key: es256_key()]
+
+      for value <- [[], [""], [42], "certificate"] do
+        assert {:error, :invalid_x5c} =
+                 WalletAttestation.attestation(provider, base ++ [x5c: value])
+      end
+
+      for value <- ["", 42, []] do
+        assert {:error, :invalid_kid} =
+                 WalletAttestation.attestation(provider, base ++ [kid: value])
+      end
     end
   end
 
@@ -93,12 +114,25 @@ defmodule AttestoClient.WalletAttestationTest do
     test "rejects a non-string Challenge before signing" do
       instance = JOSE.JWK.generate_key({:ec, "P-256"})
 
-      for invalid <- [42, [], %{}] do
+      for invalid <- ["", 42, [], %{}, String.duplicate("x", 4_097)] do
         assert {:error, :invalid_challenge} =
                  WalletAttestation.pop(instance,
                    client_id: @client_id,
                    audience: @audience,
                    challenge: invalid
+                 )
+      end
+    end
+
+    test "rejects a malformed kid" do
+      instance = es256_key()
+
+      for value <- ["", 42, []] do
+        assert {:error, :invalid_kid} =
+                 WalletAttestation.pop(instance,
+                   client_id: @client_id,
+                   audience: @audience,
+                   kid: value
                  )
       end
     end

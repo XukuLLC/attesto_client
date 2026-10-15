@@ -67,12 +67,33 @@ defmodule AttestoClient.Builder do
           {:ok, String.t()}
           | {:error, :unsupported_alg | :unsupported_key | {:signing_failed, String.t()}}
   def resolve_alg(jose_jwk, opts) do
-    case Keyword.get(opts, :alg) do
-      nil -> infer_alg(jose_jwk)
-      alg when alg in @allowed_algs -> validate_alg_for_key(jose_jwk, alg)
-      _ -> {:error, :unsupported_alg}
+    with {:ok, declared_alg} <- declared_alg(jose_jwk) do
+      case Keyword.fetch(opts, :alg) do
+        :error -> resolve_default_alg(jose_jwk, declared_alg)
+        {:ok, nil} -> resolve_default_alg(jose_jwk, declared_alg)
+        {:ok, alg} -> resolve_explicit_alg(jose_jwk, alg, declared_alg)
+      end
     end
   end
+
+  defp declared_alg(jose_jwk) do
+    {_type, jwk_map} = JOSE.JWK.to_map(jose_jwk)
+
+    case Map.fetch(jwk_map, "alg") do
+      :error -> {:ok, nil}
+      {:ok, alg} when alg in @allowed_algs -> {:ok, alg}
+      {:ok, _invalid} -> {:error, :unsupported_alg}
+    end
+  end
+
+  defp resolve_default_alg(jose_jwk, nil), do: infer_alg(jose_jwk)
+  defp resolve_default_alg(jose_jwk, alg), do: validate_alg_for_key(jose_jwk, alg)
+
+  defp resolve_explicit_alg(jose_jwk, alg, declared_alg)
+       when alg in @allowed_algs and declared_alg in [nil, alg],
+       do: validate_alg_for_key(jose_jwk, alg)
+
+  defp resolve_explicit_alg(_jose_jwk, _alg, _declared_alg), do: {:error, :unsupported_alg}
 
   defp infer_alg(jose_jwk) do
     alg = SigningAlg.infer(jose_jwk)
@@ -87,27 +108,36 @@ defmodule AttestoClient.Builder do
     _error -> {:error, {:signing_failed, @signing_failure_message}}
   end
 
-  # Add the `kid` header: an explicit `:kid` wins, else the key's own embedded
-  # kid (read from a JOSE.JWK struct as well as a raw map), else no kid.
-  @spec put_kid(map(), JOSE.JWK.t(), keyword()) :: map()
-  def put_kid(header, jose_jwk, opts) do
-    case Keyword.get(opts, :kid) || jwk_kid(jose_jwk) do
-      nil -> header
-      kid -> Map.put(header, "kid", kid)
+  # Resolve the `kid` header: an explicit `:kid` wins, else the key's own
+  # embedded kid (read from a JOSE.JWK struct as well as a raw map), else no
+  # kid. A present value must be a non-empty string; accepting arbitrary JSON
+  # here produces artifacts that peers cannot reliably select by key id.
+  @spec resolve_kid(JOSE.JWK.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, :invalid_kid}
+  def resolve_kid(jose_jwk, opts) do
+    case Keyword.fetch(opts, :kid) do
+      {:ok, explicit} -> validate_present_kid(explicit)
+      :error -> resolve_embedded_kid(jose_jwk)
     end
   end
 
-  @spec now(keyword()) :: integer()
-  def now(opts) do
-    case Keyword.get(opts, :now) do
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
+  defp validate_present_kid(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp validate_present_kid(_invalid), do: {:error, :invalid_kid}
+
+  defp resolve_embedded_kid(jose_jwk) do
+    {_type, jwk_map} = JOSE.JWK.to_map(jose_jwk)
+
+    case Map.fetch(jwk_map, "kid") do
+      :error -> {:ok, nil}
+      {:ok, value} -> validate_present_kid(value)
     end
   end
 
-  # Like `now/1`, but a NumericDate: a present `:now` must be a non-negative
-  # integer (RFC 7519 §2), otherwise `{:error, :invalid_time}`. Used by the
-  # artifact builders that stamp `iat`/`exp`.
+  @spec put_kid(map(), String.t() | nil) :: map()
+  def put_kid(header, nil), do: header
+  def put_kid(header, kid) when is_binary(kid), do: Map.put(header, "kid", kid)
+
+  # A present `:now` must be a non-negative NumericDate (RFC 7519 §2).
   @spec validate_now(keyword()) :: {:ok, non_neg_integer()} | {:error, :invalid_time}
   def validate_now(opts) do
     case Keyword.fetch(opts, :now) do
@@ -124,11 +154,29 @@ defmodule AttestoClient.Builder do
     map
   end
 
-  # Add an `x5c` header from a non-empty list of base64 DER certificates; a nil
-  # or empty value leaves the header untouched.
+  # Validate an optional `x5c` chain before adding it to a protected header.
+  # Each entry is serialized as a JSON string; rejecting empty and mixed lists
+  # avoids silently dropping a caller typo or emitting a malformed JOSE header.
+  @spec validate_x5c(keyword()) :: {:ok, [String.t()] | nil} | {:error, :invalid_x5c}
+  def validate_x5c(opts) do
+    case Keyword.fetch(opts, :x5c) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, [_ | _] = x5c} ->
+        if Enum.all?(x5c, &(is_binary(&1) and &1 != "")),
+          do: {:ok, x5c},
+          else: {:error, :invalid_x5c}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_x5c}
+    end
+  end
+
+  # Add a previously validated `x5c` header.
   @spec put_x5c(map(), term()) :: map()
   def put_x5c(header, [_ | _] = x5c), do: Map.put(header, "x5c", x5c)
-  def put_x5c(header, _absent), do: header
+  def put_x5c(header, nil), do: header
 
   # Sign claims under the given protected header, returning the compact JWS.
   # Key/algorithm compatibility is checked before this point; backend failures
@@ -148,11 +196,6 @@ defmodule AttestoClient.Builder do
     {:ok, compact}
   rescue
     _error -> {:error, {:signing_failed, @signing_failure_message}}
-  end
-
-  defp jwk_kid(%JOSE.JWK{} = jwk) do
-    {_type, map} = JOSE.JWK.to_map(jwk)
-    Map.get(map, "kid")
   end
 
   defp random_jti, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)

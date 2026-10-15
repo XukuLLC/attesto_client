@@ -367,6 +367,14 @@ defmodule AttestoClient.TokenTest do
     assert Agent.get(counter, & &1) == 2
   end
 
+  test "revocation still requires the client identity" do
+    assert {:error, :missing_client_id} =
+             Token.revoke("token",
+               revocation_endpoint: "https://op.example.com/revoke",
+               req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 200, "") end]
+             )
+  end
+
   test "exchanges an OID4VCI pre-authorized code for an access token" do
     parent = self()
 
@@ -389,6 +397,26 @@ defmodule AttestoClient.TokenTest do
     assert form["pre-authorized_code"] == "pre-auth-code-123"
     assert form["tx_code"] == "1234"
     assert form["client_id"] == @client_id
+  end
+
+  test "exchanges a pre-authorized code anonymously when client authentication is none" do
+    parent = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:anonymous_request, URI.decode_query(body)})
+      json(conn, 200, %{"access_token" => "anonymous-access-token", "token_type" => "Bearer"})
+    end
+
+    assert {:ok, %TokenSet{access_token: "anonymous-access-token"}} =
+             Token.exchange_pre_authorized_code("pre-auth-code-123",
+               token_endpoint: @endpoint,
+               req_options: [plug: plug]
+             )
+
+    assert_receive {:anonymous_request, form}
+    refute Map.has_key?(form, "client_id")
+    assert form["pre-authorized_code"] == "pre-auth-code-123"
   end
 
   test "the pre-authorized_code exchange omits tx_code when none is supplied" do

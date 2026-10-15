@@ -5,6 +5,7 @@ defmodule AttestoClient.Verifier do
   alias AttestoClient.Discovery
 
   @minimum_rsa_bits 2048
+  @private_jwk_members ~w(d p q dp dq qi oth k)
 
   # Compact JOSE values arrive before authentication. Bound the encoded input
   # before splitting or decoding it so a hostile token cannot force an
@@ -71,6 +72,7 @@ defmodule AttestoClient.Verifier do
           {:ok, map(), map(), JOSE.JWK.t()}
           | {:error,
              :invalid_token
+             | :unsupported_alg
              | :unsupported_critical_header
              | :invalid_signature
              | :ambiguous_key
@@ -135,13 +137,24 @@ defmodule AttestoClient.Verifier do
 
   @spec normalize_jwks(jwks()) :: {:ok, [map()]} | {:error, :invalid_jwks}
   def normalize_jwks(%{"keys" => keys}) when is_list(keys), do: normalize_jwks(keys)
+  def normalize_jwks(%{"keys" => _invalid}), do: {:error, :invalid_jwks}
 
-  def normalize_jwks(keys) when is_list(keys) do
-    if Enum.all?(keys, &is_map/1), do: {:ok, keys}, else: {:error, :invalid_jwks}
+  def normalize_jwks([_ | _] = keys) do
+    if Enum.all?(keys, &plain_nonempty_map?/1),
+      do: {:ok, keys},
+      else: {:error, :invalid_jwks}
   end
 
-  def normalize_jwks(%{} = jwk), do: {:ok, [jwk]}
+  def normalize_jwks([]), do: {:error, :invalid_jwks}
+
+  def normalize_jwks(%{} = jwk) do
+    if plain_nonempty_map?(jwk), do: {:ok, [jwk]}, else: {:error, :invalid_jwks}
+  end
+
   def normalize_jwks(_other), do: {:error, :invalid_jwks}
+
+  defp plain_nonempty_map?(value),
+    do: is_map(value) and not is_struct(value) and map_size(value) > 0
 
   @doc false
   @spec validate_verification_keys([map()], [SigningAlg.alg()]) ::
@@ -277,7 +290,7 @@ defmodule AttestoClient.Verifier do
         _multiple -> {:error, :ambiguous_key}
       end
     else
-      {:error, :invalid_signature}
+      {:error, :unsupported_alg}
     end
   end
 
@@ -291,26 +304,32 @@ defmodule AttestoClient.Verifier do
   defp filter_by_kid(keys, kid), do: Enum.filter(keys, &(Map.get(&1, "kid") == kid))
 
   defp verification_key?(key) do
-    use_allows_verification? =
-      case Map.fetch(key, "use") do
-        :error -> true
-        {:ok, "sig"} -> true
-        {:ok, _invalid} -> false
-      end
+    public_verification_key?(key) and use_allows_verification?(key) and
+      operations_allow_verification?(key)
+  end
 
-    operations_allow_verification? =
-      case Map.fetch(key, "key_ops") do
-        :error ->
-          true
+  defp public_verification_key?(key),
+    do: not Enum.any?(@private_jwk_members, &Map.has_key?(key, &1))
 
-        {:ok, operations} when is_list(operations) ->
-          Enum.all?(operations, &is_binary/1) and "verify" in operations
+  defp use_allows_verification?(key) do
+    case Map.fetch(key, "use") do
+      :error -> true
+      {:ok, "sig"} -> true
+      {:ok, _invalid} -> false
+    end
+  end
 
-        {:ok, _invalid} ->
-          false
-      end
+  defp operations_allow_verification?(key) do
+    case Map.fetch(key, "key_ops") do
+      :error ->
+        true
 
-    use_allows_verification? and operations_allow_verification?
+      {:ok, operations} when is_list(operations) ->
+        Enum.all?(operations, &is_binary/1) and "verify" in operations
+
+      {:ok, _invalid} ->
+        false
+    end
   end
 
   defp usable_verification_key?(key, accepted_algs) do

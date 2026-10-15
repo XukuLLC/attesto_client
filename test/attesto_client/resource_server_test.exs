@@ -72,6 +72,7 @@ defmodule AttestoClient.ResourceServerTest do
       {%{"iss" => "https://other.example"}, :invalid_issuer, []},
       {%{"aud" => "https://other-api.example"}, :invalid_audience, []},
       {%{"exp" => @now}, :expired, []},
+      {%{"nbf" => -1}, :invalid_claims, []},
       {%{"nbf" => @now + 61}, :not_yet_valid, []},
       {%{"iat" => @now + 61}, :not_yet_valid, []},
       {%{"client_id" => nil}, :invalid_claims, []},
@@ -285,7 +286,7 @@ defmodule AttestoClient.ResourceServerTest do
          req_options: [plug: issuer_plug(ctx.state)],
          fresh_ttl: 1,
          stale_ttl: 60_000,
-         refresh_timeout: 50,
+         refresh_timeout: 500,
          refresh_retry_interval: 60_000}
       )
 
@@ -435,8 +436,8 @@ defmodule AttestoClient.ResourceServerTest do
         }
       )
 
-    assert {:error, :invalid_signature} = ResourceServer.verify(ctx.server, none, now: @now)
-    assert {:error, :invalid_signature} = ResourceServer.verify(ctx.server, symmetric, now: @now)
+    assert {:error, :unsupported_alg} = ResourceServer.verify(ctx.server, none, now: @now)
+    assert {:error, :unsupported_alg} = ResourceServer.verify(ctx.server, symmetric, now: @now)
 
     assert {:error, :unsupported_critical_header} =
              ResourceServer.verify(ctx.server, critical, now: @now)
@@ -576,7 +577,7 @@ defmodule AttestoClient.ResourceServerTest do
           json(conn, 503, %{"error" => "unavailable"})
 
         {"/jwks", :slow} ->
-          Process.sleep(200)
+          Process.sleep(2_000)
           json(conn, 200, snapshot.jwks)
       end
     end

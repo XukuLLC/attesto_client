@@ -170,6 +170,23 @@ defmodule AttestoClient.DiscoveryTest do
       end
     end
 
+    test "rejects malformed request options without raising" do
+      invalid_options = [:invalid, [:bad], %{plug: fn _conn -> :ok end}, [plug: nil, plug: nil]]
+
+      for req_options <- invalid_options do
+        assert {:error, :unsafe_transport_options} =
+                 Discovery.validate_endpoint("https://op.example.com/token",
+                   req_options: req_options
+                 )
+
+        assert {:error, :unsafe_transport_options} =
+                 Discovery.fetch(@issuer, req_options: req_options)
+
+        assert {:error, :unsafe_transport_options} =
+                 Discovery.fetch_jwks("#{@issuer}/jwks", req_options: req_options)
+      end
+    end
+
     test "rejects an issuer that resolves to a link-local address (cloud metadata)" do
       assert {:error, :blocked_host} = Discovery.fetch("https://169.254.169.254")
     end

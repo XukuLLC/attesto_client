@@ -175,6 +175,35 @@ defmodule AttestoClient.ResourceServerPlugTest do
     assert ttl > 0
   end
 
+  test "canonicalizes an IPv6 request authority when verifying DPoP htu", ctx do
+    proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
+    jkt = Attesto.DPoP.compute_jkt(proof_key)
+    token = access_token(ctx.key, %{"cnf" => %{"jkt" => jkt}})
+    htu = "https://[2001:db8::1]:8443/documents"
+    proof = dpop_proof(proof_key, token, htu)
+
+    for host <- ["2001:db8::1", "[2001:db8::1]"] do
+      conn =
+        :get
+        |> conn(htu)
+        |> Map.put(:host, host)
+        |> put_req_header("authorization", "DPoP #{token}")
+        |> put_req_header("dpop", proof)
+        |> ResourceServerPlug.call(
+          ResourceServerPlug.init(
+            server: ctx.server,
+            replay_check: fn _jti, _ttl -> :ok end,
+            now: @now
+          )
+        )
+
+      refute conn.halted,
+             inspect(
+               {host, conn.status, conn.resp_body, get_resp_header(conn, "www-authenticate")}
+             )
+    end
+  end
+
   test "accepts a DPoP-bound token when the request also has authenticated mTLS", ctx do
     proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
     jkt = Attesto.DPoP.compute_jkt(proof_key)

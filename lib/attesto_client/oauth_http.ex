@@ -98,6 +98,7 @@ defmodule AttestoClient.OAuthHTTP do
   Pass `:dpop` (a `JOSE.JWK` or JWK map) to sender-constrain the request with an
   RFC 9449 DPoP proof; the proof carries the `ath` binding to `access_token` and
   a `use_dpop_nonce` challenge is retried once with the server's `DPoP-Nonce`.
+  `:alg`, `:kid`, and `:now` configure each freshly minted DPoP proof.
   """
   @spec post_json(String.t(), map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def post_json(endpoint, body, access_token, opts)
@@ -275,13 +276,13 @@ defmodule AttestoClient.OAuthHTTP do
   end
 
   defp open_options(opts) do
-    with true <- unique_keyword?(opts),
+    with true <- PinnedRequest.unique_keyword?(opts),
          options = req_options(opts),
-         true <- unique_keyword?(options),
+         true <- PinnedRequest.unique_keyword?(options),
          connect = Keyword.get(options, :connect_options, []),
-         true <- unique_keyword?(connect),
+         true <- PinnedRequest.unique_keyword?(connect),
          transport = Keyword.get(connect, :transport_opts, []),
-         true <- unique_keyword?(transport),
+         true <- PinnedRequest.unique_keyword?(transport),
          :ok <- open_routing(options, connect) do
       safe_connect =
         connect
@@ -312,13 +313,6 @@ defmodule AttestoClient.OAuthHTTP do
       :ok
     end
   end
-
-  defp unique_keyword?(options) when is_list(options) do
-    Keyword.keyword?(options) and
-      length(Keyword.keys(options)) == length(Enum.uniq(Keyword.keys(options)))
-  end
-
-  defp unique_keyword?(_options), do: false
 
   # The overall deadline includes DNS screening and request preparation, not
   # only the socket exchange. A slow or wedged resolver therefore cannot hold a
@@ -355,10 +349,11 @@ defmodule AttestoClient.OAuthHTTP do
     case URI.parse(endpoint) do
       %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
       when is_binary(host) and host != "" ->
-        with {:ok, screen_opts} <- screen_options(opts),
+        with {:ok, request_opts} <- validate_req_options(opts),
+             {:ok, screen_opts} <- screen_options(opts, request_opts),
              {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
              {:ok, prepared} <-
-               PinnedRequest.prepare(target, req_options(opts), @reserved_headers, [:auth]) do
+               PinnedRequest.prepare(target, request_opts, @reserved_headers, [:auth]) do
           {:ok, target, Keyword.put(opts, :req_options, prepared)}
         end
 
@@ -369,8 +364,8 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp screen_request(_endpoint, _opts), do: {:error, :invalid_endpoint}
 
-  defp screen_options(opts) do
-    screen_opts = [req_options: req_options(opts)]
+  defp screen_options(opts, request_opts) do
+    screen_opts = [req_options: request_opts]
 
     case Keyword.fetch(opts, :resolver) do
       :error ->
@@ -396,6 +391,11 @@ defmodule AttestoClient.OAuthHTTP do
        when is_binary(client_id) and client_id != "" do
     {:ok, Map.put(form, "client_id", client_id), req_options(opts)}
   end
+
+  # OID4VCI permits anonymous pre-authorized-code redemption. In that case
+  # there is neither client authentication nor a client_id form parameter.
+  defp authenticate_as(:none, nil, form, _endpoint, opts),
+    do: {:ok, form, req_options(opts)}
 
   defp authenticate_as({:client_secret_basic, secret}, client_id, form, _endpoint, opts)
        when is_binary(client_id) and client_id != "" and is_binary(secret) and secret != "" do
@@ -842,7 +842,9 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp dpop_proof(ctx, nonce) do
     proof_opts =
-      [access_token: ctx.access_token, nonce: nonce]
+      ctx.proof_opts
+      |> Keyword.put(:access_token, ctx.access_token)
+      |> Keyword.put(:nonce, nonce)
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     case DPoP.proof(ctx.key, ctx.method, ctx.url, proof_opts) do
@@ -862,7 +864,8 @@ defmodule AttestoClient.OAuthHTTP do
           method: method,
           url: url,
           access_token: access_token,
-          nonce: Keyword.get(opts, :dpop_nonce)
+          nonce: Keyword.get(opts, :dpop_nonce),
+          proof_opts: Keyword.take(opts, [:alg, :kid, :now])
         }
     end
   end
@@ -888,13 +891,88 @@ defmodule AttestoClient.OAuthHTTP do
 
   defp dpop_authenticate_error(resp) do
     # A resource server carries the error in WWW-Authenticate, not a JSON body.
-    case Req.Response.get_header(resp, "www-authenticate") do
-      [header | _] ->
-        if String.contains?(header, "use_dpop_nonce"), do: "use_dpop_nonce", else: nil
+    resp
+    |> Req.Response.get_header("www-authenticate")
+    |> Enum.find_value(fn header ->
+      if dpop_nonce_error?(header), do: "use_dpop_nonce"
+    end)
+  end
 
-      [] ->
-        nil
+  defp dpop_nonce_error?(header) when is_binary(header) do
+    header
+    |> auth_header_parts()
+    |> Enum.reduce_while(nil, &reduce_auth_header_part/2)
+    |> Kernel.==(true)
+  end
+
+  defp dpop_nonce_error?(_invalid), do: false
+
+  defp reduce_auth_header_part(part, scheme) do
+    case auth_header_part(part) do
+      {:challenge, next_scheme, params} -> auth_header_result(next_scheme, params)
+      {:params, params} -> auth_header_result(scheme, params)
     end
+  end
+
+  defp auth_header_result(scheme, params) do
+    if dpop_scheme?(scheme) and dpop_nonce_error_param?(params),
+      do: {:halt, true},
+      else: {:cont, scheme}
+  end
+
+  # WWW-Authenticate may combine challenges in one field. Commas inside quoted
+  # auth-param values do not delimit a new part, so split them with a small
+  # scanner before associating each auth-param with its challenge scheme.
+  defp auth_header_parts(header), do: split_auth_header(header, false, false, [], [])
+
+  defp split_auth_header(<<>>, _quoted?, _escaped?, current, parts) do
+    [current |> Enum.reverse() |> IO.iodata_to_binary() | parts]
+    |> Enum.reverse()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp split_auth_header(<<?,, rest::binary>>, false, _escaped?, current, parts) do
+    part = current |> Enum.reverse() |> IO.iodata_to_binary()
+    split_auth_header(rest, false, false, [], [part | parts])
+  end
+
+  defp split_auth_header(<<?", rest::binary>>, quoted?, false, current, parts) do
+    split_auth_header(rest, not quoted?, false, [?" | current], parts)
+  end
+
+  defp split_auth_header(<<?\\, rest::binary>>, true, false, current, parts) do
+    split_auth_header(rest, true, true, [?\\ | current], parts)
+  end
+
+  defp split_auth_header(<<char, rest::binary>>, quoted?, _escaped?, current, parts) do
+    split_auth_header(rest, quoted?, false, [char | current], parts)
+  end
+
+  defp auth_header_part(part) do
+    case Regex.run(~r/^([!#$%&'*+\-.^_`|~0-9A-Za-z]+)(.*)$/s, part, capture: :all_but_first) do
+      [token, rest] ->
+        rest = String.trim_leading(rest)
+
+        if String.starts_with?(rest, "=") do
+          {:params, part}
+        else
+          {:challenge, token, rest}
+        end
+
+      _invalid ->
+        {:params, part}
+    end
+  end
+
+  defp dpop_scheme?(scheme) when is_binary(scheme), do: String.downcase(scheme) == "dpop"
+  defp dpop_scheme?(_other), do: false
+
+  defp dpop_nonce_error_param?(params) do
+    Regex.match?(
+      ~r/^\s*(?i:error)\s*=\s*(?:"use_dpop_nonce"|use_dpop_nonce)\s*$/,
+      params
+    )
   end
 
   defp dpop_nonce(%Req.Response{} = resp) do
@@ -1071,6 +1149,18 @@ defmodule AttestoClient.OAuthHTTP do
       else
         {:cont, {request, %{response | body: body <> data}}}
       end
+    end
+  end
+
+  defp validate_req_options(opts) do
+    case Keyword.get(opts, :req_options, []) do
+      request_opts when is_list(request_opts) ->
+        if PinnedRequest.unique_keyword?(request_opts),
+          do: {:ok, request_opts},
+          else: {:error, :unsafe_transport_options}
+
+      _invalid ->
+        {:error, :unsafe_transport_options}
     end
   end
 

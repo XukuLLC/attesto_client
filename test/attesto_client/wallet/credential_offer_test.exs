@@ -137,6 +137,20 @@ defmodule AttestoClient.Wallet.CredentialOfferTest do
 
       assert {:error, :invalid_credential_issuer} =
                CredentialOffer.parse(Map.put(@pre_authorized_offer, "credential_issuer", ""))
+
+      for issuer <- [
+            "issuer.example.com",
+            "http://issuer.example.com",
+            "https:///path",
+            "https://user@issuer.example.com",
+            "https://issuer.example.com?query=1",
+            "https://issuer.example.com#fragment"
+          ] do
+        assert {:error, :invalid_credential_issuer} =
+                 CredentialOffer.parse(
+                   Map.put(@pre_authorized_offer, "credential_issuer", issuer)
+                 )
+      end
     end
 
     test "missing/empty credential_configuration_ids" do
@@ -156,6 +170,11 @@ defmodule AttestoClient.Wallet.CredentialOfferTest do
                CredentialOffer.parse(Map.put(@pre_authorized_offer, "grants", %{}))
     end
 
+    test "a present null grants member is invalid rather than treated as absent" do
+      assert {:error, :invalid_grants} =
+               CredentialOffer.parse(Map.put(@pre_authorized_offer, "grants", nil))
+    end
+
     test "a pre-authorized_code grant missing its code" do
       offer =
         Map.put(@pre_authorized_offer, "grants", %{
@@ -163,6 +182,30 @@ defmodule AttestoClient.Wallet.CredentialOfferTest do
         })
 
       assert {:error, :invalid_pre_authorized_code_grant} = CredentialOffer.parse(offer)
+    end
+
+    test "a present invalid grant is rejected even beside a valid sibling" do
+      for invalid <- [nil, false] do
+        pre_authorized =
+          Map.put(@pre_authorized_offer, "grants", %{
+            "authorization_code" => %{},
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code" => invalid
+          })
+
+        assert {:error, :invalid_pre_authorized_code_grant} =
+                 CredentialOffer.parse(pre_authorized)
+
+        authorization =
+          Map.put(@pre_authorized_offer, "grants", %{
+            "authorization_code" => invalid,
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code" => %{
+              "pre-authorized_code" => "pre-auth-code-123"
+            }
+          })
+
+        assert {:error, :invalid_authorization_code_grant} =
+                 CredentialOffer.parse(authorization)
+      end
     end
 
     test "malformed JSON" do

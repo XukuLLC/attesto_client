@@ -362,6 +362,24 @@ defmodule AttestoClient.AuthorizationProfileBindingTest do
     refute_receive :http
   end
 
+  test "FAPI accepts and uses PS256 declared by an RSA DPoP key" do
+    owner = self()
+    rsa_key = JOSE.JWK.generate_key({:rsa, 2048})
+    {_type, private_jwk} = JOSE.JWK.to_map(rsa_key)
+    configured_dpop = Map.put(private_jwk, "alg", "PS256")
+
+    plug = fn conn ->
+      assert [proof] = Plug.Conn.get_req_header(conn, "dpop")
+      send(owner, {:fapi_dpop_alg, proof |> JOSE.JWS.peek_protected() |> JSON.decode!()})
+      par(conn)
+    end
+
+    opts = authenticated_options(:fapi?, plug) |> Keyword.put(:dpop, configured_dpop)
+
+    assert {:ok, _started} = AuthorizationCode.start(store(), opts)
+    assert_receive {:fapi_dpop_alg, %{"alg" => "PS256"}}
+  end
+
   test "HAIP attestation pins its declared client and instance key through challenge renewal" do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
@@ -576,7 +594,7 @@ defmodule AttestoClient.AuthorizationProfileBindingTest do
     assert tokens.issuer == @issuer
     assert tokens.client_auth_binding.method == :private_key_jwt
 
-    assert {:error, :invalid_metadata} =
+    assert {:ok, _generic_started} =
              AuthorizationCode.start(
                store(),
                opts |> Keyword.delete(:fapi?) |> Keyword.put(:id_token_alg, "ES256")

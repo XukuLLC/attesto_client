@@ -95,6 +95,8 @@ defmodule AttestoClient.RequestObjectTest do
       assert {:error, :invalid_typ} = build(typ: "   ")
       assert {:error, :invalid_lifetime} = build(lifetime: 0)
       assert {:error, :invalid_jti} = build(jti: "")
+      assert {:error, :invalid_kid} = build(kid: "")
+      assert {:error, :invalid_kid} = build(kid: 42)
       assert {:error, :unsupported_alg} = build(alg: "none")
       assert {:error, {:signing_failed, _message}} = build(alg: "RS256")
 

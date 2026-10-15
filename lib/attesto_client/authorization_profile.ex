@@ -5,6 +5,7 @@ defmodule AttestoClient.AuthorizationProfile do
   alias Attesto.Thumbprint
   alias AttestoClient.Builder
   alias AttestoClient.ClientAssertion
+  alias AttestoClient.DPoP
   alias AttestoClient.Wallet.Presentation.CertificateTrust
   alias AttestoClient.WalletAttestation
 
@@ -37,7 +38,7 @@ defmodule AttestoClient.AuthorizationProfile do
 
   def dpop_policy(:fapi, opts) do
     with {:ok, jwk} <- Builder.normalize_key(Keyword.get(opts, :dpop)),
-         {:ok, alg} <- Builder.resolve_alg(jwk, []),
+         {:ok, alg} <- DPoP.resolve_alg(jwk, Keyword.take(opts, [:alg])),
          true <- SigningAlg.fapi_compatible?(alg, jwk) do
       :ok
     else

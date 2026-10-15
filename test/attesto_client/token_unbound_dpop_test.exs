@@ -3,6 +3,12 @@ defmodule AttestoClient.TokenUnboundDPoPTest do
 
   alias AttestoClient.{RefreshCoordinator, Token, TokenSet}
 
+  defp nonempty_jwks do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    {_type, public} = JOSE.JWK.to_public_map(key)
+    %{"keys" => [public]}
+  end
+
   test "an unsolicited DPoP response requires a locally retained signing key" do
     for type <- ["DPoP", "dpop", "dPoP"] do
       assert {:error, :missing_dpop_key} =
@@ -28,7 +34,7 @@ defmodule AttestoClient.TokenUnboundDPoPTest do
                  issuer: "https://issuer.example",
                  client_id: "client",
                  subject: "subject",
-                 jwks: %{"keys" => []},
+                 jwks: nonempty_jwks(),
                  req_options: [plug: plug]
                )
     end

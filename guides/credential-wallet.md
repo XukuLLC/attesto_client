@@ -11,7 +11,7 @@ For the encrypted examples, use these dependencies:
 
 ```elixir
 {:attesto, "~> 2.3"},
-{:attesto_client, "~> 2.7"}
+{:attesto_client, "~> 2.8"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
@@ -388,7 +388,7 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 ## Development and verification
 
 When developing both libraries in sibling source checkouts, use
-`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.7.0
+`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.8.0
 requires Attesto 2.3.1 or later, including for unencrypted wallet operations,
 so installations receive the strict PSS and OID4VP verification fixes.
 

@@ -137,7 +137,7 @@ defmodule AttestoClient.JARMTest do
       payload = Base.url_encode64(JSON.encode!(success_claims()), padding: false)
       none_jwt = header <> "." <> payload <> "."
 
-      assert {:error, :invalid_signature} = verify(none_jwt, jwks(key))
+      assert {:error, :unsupported_alg} = verify(none_jwt, jwks(key))
     end
 
     test "missing :issuer or :client_id options, and an invalid JWKS" do
@@ -146,7 +146,10 @@ defmodule AttestoClient.JARMTest do
 
       assert {:error, :missing_issuer} = JARM.verify(jwt, jwks(key), client_id: @client_id)
       assert {:error, :missing_client_id} = JARM.verify(jwt, jwks(key), issuer: @issuer)
-      assert {:error, :invalid_jwks} = verify(jwt, "not-a-jwks")
+
+      for invalid <- ["not-a-jwks", [], %{}, %{"keys" => []}, key] do
+        assert {:error, :invalid_jwks} = verify(jwt, invalid)
+      end
     end
 
     test "a mixed-type aud array is malformed even if the client_id is present" do
@@ -170,6 +173,17 @@ defmodule AttestoClient.JARMTest do
 
       # Within the clock-skew tolerance is accepted.
       assert {:ok, _} = verify(sign(key, success_claims(%{"iat" => @now + 30})), jwks(key))
+
+      assert {:error, :invalid_nbf} =
+               verify(sign(key, success_claims(%{"nbf" => -1})), jwks(key))
+
+      assert {:error, :invalid_nbf} =
+               verify(sign(key, success_claims(%{"nbf" => "soon"})), jwks(key))
+
+      assert {:error, :not_yet_valid} =
+               verify(sign(key, success_claims(%{"nbf" => @now + 3600})), jwks(key))
+
+      assert {:ok, _} = verify(sign(key, success_claims(%{"nbf" => @now + 30})), jwks(key))
     end
 
     test "an invalid :accepted_algs option" do

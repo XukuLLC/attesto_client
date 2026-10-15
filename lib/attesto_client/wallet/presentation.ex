@@ -203,10 +203,19 @@ defmodule AttestoClient.Wallet.Presentation do
   defp check_holder_key(key, held) do
     with {:ok, jwk} <- Builder.normalize_key(key),
          {:ok, bound} <- binding_key(held),
-         {:ok, actual} <- jwk |> Builder.public_jwk() |> Thumbprint.of_jwk(),
+         {:ok, public} <- holder_public_jwk(jwk),
+         {:ok, actual} <- Thumbprint.of_jwk(public),
          {:ok, expected} <- Thumbprint.of_jwk(bound) do
       if actual == expected, do: :ok, else: {:error, :holder_key_mismatch}
     end
+  end
+
+  defp holder_public_jwk(jwk) do
+    {:ok, Builder.public_jwk(jwk)}
+  rescue
+    _error -> {:error, :invalid_key}
+  catch
+    _kind, _reason -> {:error, :invalid_key}
   end
 
   defp binding_key(%{holder_binding: %{"jwk" => key}}) when is_map(key), do: {:ok, key}
@@ -217,15 +226,17 @@ defmodule AttestoClient.Wallet.Presentation do
        when format in ["dc+sd-jwt", "vc+sd-jwt"] do
     with {:ok, filtered, hash_alg} <- Disclosures.filter(held.credential, paths),
          {:ok, jwk} <- Builder.normalize_key(key),
-         {:ok, alg} <- Builder.resolve_alg(jwk, opts) do
+         {:ok, alg} <- Builder.resolve_alg(jwk, opts),
+         {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(jwk, opts) do
       claims = %{
         "nonce" => request.nonce,
         "aud" => request.client_id,
-        "iat" => Builder.now(opts),
+        "iat" => now,
         "sd_hash" => :crypto.hash(hash_alg, filtered) |> JWS.encode64()
       }
 
-      header = %{"alg" => alg, "typ" => "kb+jwt"} |> Builder.put_kid(jwk, opts)
+      header = %{"alg" => alg, "typ" => "kb+jwt"} |> Builder.put_kid(kid)
       with {:ok, jwt} <- Builder.sign(jwk, header, claims), do: {:ok, filtered <> jwt}
     end
   end

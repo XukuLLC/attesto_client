@@ -120,7 +120,9 @@ defmodule AttestoClient.Discovery do
   refresh, and revocation APIs.
   """
   @spec validate_endpoint(term(), keyword()) ::
-          :ok | {:error, :invalid_endpoint | :blocked_host | :invalid_resolver}
+          :ok
+          | {:error,
+             :invalid_endpoint | :blocked_host | :invalid_resolver | :unsafe_transport_options}
   def validate_endpoint(endpoint, opts \\ [])
 
   def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
@@ -234,12 +236,9 @@ defmodule AttestoClient.Discovery do
   end
 
   defp perform_get_json(url, opts, timeout_ms) do
-    req_options =
-      opts
-      |> Keyword.get(:req_options, [])
-      |> Keyword.put_new(:receive_timeout, timeout_ms)
-
-    with {:ok, target} <- screen_endpoint(url, opts),
+    with {:ok, request_opts} <- request_options(opts),
+         req_options = Keyword.put_new(request_opts, :receive_timeout, timeout_ms),
+         {:ok, target} <- screen_endpoint(url, Keyword.put(opts, :req_options, request_opts)),
          {:ok, req_options} <-
            PinnedRequest.prepare(target, req_options, ["authorization", "cookie"], [:auth]) do
       # SSRF hardening: redirects are NOT followed (`redirect: false` wins over
@@ -281,6 +280,18 @@ defmodule AttestoClient.Discovery do
     case Keyword.get(opts, :timeout, @default_timeout_ms) do
       timeout when is_integer(timeout) and timeout > 0 -> {:ok, timeout}
       _invalid -> {:error, :invalid_timeout}
+    end
+  end
+
+  defp request_options(opts) do
+    case Keyword.get(opts, :req_options, []) do
+      request_opts when is_list(request_opts) ->
+        if PinnedRequest.unique_keyword?(request_opts),
+          do: {:ok, request_opts},
+          else: {:error, :unsafe_transport_options}
+
+      _invalid ->
+        {:error, :unsafe_transport_options}
     end
   end
 
@@ -345,7 +356,7 @@ defmodule AttestoClient.Discovery do
   @doc false
   @spec screen_endpoint(String.t(), keyword()) ::
           {:ok, %{url: String.t(), host: String.t(), authority: String.t()}}
-          | {:error, :blocked_host | :invalid_resolver}
+          | {:error, :blocked_host | :invalid_resolver | :unsafe_transport_options}
   def screen_endpoint(url, opts \\ [])
 
   def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
@@ -362,7 +373,9 @@ defmodule AttestoClient.Discovery do
   def screen_endpoint(_url, _opts), do: {:error, :blocked_host}
 
   defp screen_uri(%URI{host: host} = uri, opts) do
-    if req_test_transport?(opts), do: {:ok, target(uri, host)}, else: screen_resolved(uri, opts)
+    with {:ok, test_transport?} <- req_test_transport?(opts) do
+      if test_transport?, do: {:ok, target(uri, host)}, else: screen_resolved(uri, opts)
+    end
   end
 
   defp screen_resolved(%URI{host: host} = uri, opts) do
@@ -381,13 +394,15 @@ defmodule AttestoClient.Discovery do
   # without weakening any real network transport. Req treats nil and false as
   # inactive, so those values must retain the network guard.
   defp req_test_transport?(opts) do
-    plug =
-      opts
-      |> Keyword.get(:req_options, [])
-      |> Map.new()
-      |> Map.get(:plug)
+    case Keyword.get(opts, :req_options, []) do
+      req_options when is_list(req_options) ->
+        if PinnedRequest.unique_keyword?(req_options),
+          do: {:ok, Keyword.get(req_options, :plug) not in [nil, false]},
+          else: {:error, :unsafe_transport_options}
 
-    plug not in [nil, false]
+      _invalid ->
+        {:error, :unsafe_transport_options}
+    end
   end
 
   defp resolve_addrs(host, resolver) do

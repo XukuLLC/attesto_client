@@ -17,27 +17,24 @@ defmodule AttestoClient.OpenIDMetadata do
   @spec validate(map(), String.t()) ::
           :ok | {:error, :invalid_metadata | :issuer_mismatch | term()}
   def validate(%{"issuer" => issuer} = metadata, issuer) do
-    validate_oidc(metadata, "RS256")
+    validate_oidc(metadata)
   end
 
   def validate(%{"issuer" => _other}, _issuer), do: {:error, :issuer_mismatch}
   def validate(_metadata, _issuer), do: {:error, :invalid_metadata}
 
-  defp validate_oidc(metadata, required_alg) do
+  defp validate_oidc(metadata) do
     with :ok <- validate_required_strings(metadata),
          :ok <- validate_endpoints(metadata),
          :ok <- validate_string_list(metadata, "response_types_supported", "code"),
          :ok <- validate_string_list(metadata, "subject_types_supported"),
-         :ok <-
-           validate_string_list(metadata, "id_token_signing_alg_values_supported", required_alg) do
+         :ok <- validate_string_list(metadata, "id_token_signing_alg_values_supported") do
       validate_pkce(metadata)
     end
   end
 
-  defp validate_protocol(%{"issuer" => issuer} = metadata, issuer, :oidc, opts) do
-    required_alg = if Keyword.get(opts, :fapi?) == true, do: nil, else: "RS256"
-    validate_oidc(metadata, required_alg)
-  end
+  defp validate_protocol(%{"issuer" => issuer} = metadata, issuer, :oidc, _opts),
+    do: validate_oidc(metadata)
 
   defp validate_protocol(metadata, issuer, :oidc, _opts), do: validate(metadata, issuer)
 

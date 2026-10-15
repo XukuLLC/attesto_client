@@ -56,6 +56,7 @@ defmodule AttestoClient.IdentityAssertion do
           | :invalid_lifetime
           | :invalid_time
           | :invalid_jti
+          | :invalid_kid
           | :unsupported_alg
           | :unsupported_key
           | {:signing_failed, String.t()}
@@ -80,6 +81,7 @@ defmodule AttestoClient.IdentityAssertion do
          {:ok, now} <- Builder.validate_now(opts),
          {:ok, nbf} <- validate_nbf(opts),
          {:ok, jti} <- validate_jti(opts),
+         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       registered =
         %{
@@ -93,7 +95,7 @@ defmodule AttestoClient.IdentityAssertion do
         }
         |> put_optional("nbf", nbf)
 
-      header = Builder.put_kid(%{"alg" => alg, "typ" => @typ}, jose_jwk, opts)
+      header = Builder.put_kid(%{"alg" => alg, "typ" => @typ}, kid)
       Builder.sign(jose_jwk, header, Map.merge(claims, registered))
     end
   end

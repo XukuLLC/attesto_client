@@ -260,14 +260,22 @@ if Code.ensure_loaded?(Plug.Conn) do
         _other ->
           scheme = Atom.to_string(conn.scheme)
 
-          {:ok,
-           scheme <> "://" <> conn.host <> port_suffix(scheme, conn.port) <> conn.request_path}
+          uri = %URI{
+            scheme: scheme,
+            host: unbracket_host(conn.host),
+            port: conn.port,
+            path: conn.request_path
+          }
+
+          {:ok, URI.to_string(uri)}
       end
     end
 
-    defp port_suffix("https", 443), do: ""
-    defp port_suffix("http", 80), do: ""
-    defp port_suffix(_scheme, port), do: ":" <> Integer.to_string(port)
+    defp unbracket_host("[" <> rest) do
+      if String.ends_with?(rest, "]"), do: String.trim_trailing(rest, "]"), else: "[" <> rest
+    end
+
+    defp unbracket_host(host), do: host
 
     defp request_scheme(conn) do
       case get_req_header(conn, "authorization") do

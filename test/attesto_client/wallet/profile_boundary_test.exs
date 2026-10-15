@@ -8,6 +8,12 @@ defmodule AttestoClient.Wallet.ProfileBoundaryTest do
 
   @issuer "https://issuer.example"
 
+  defp nonempty_jwks do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    {_type, public} = JOSE.JWK.to_public_map(key)
+    %{"keys" => [public]}
+  end
+
   defp options(key, extra) do
     Keyword.merge(
       [
@@ -68,7 +74,7 @@ defmodule AttestoClient.Wallet.ProfileBoundaryTest do
       options(key,
         haip: false,
         subject: "subject",
-        jwks: %{"keys" => []},
+        jwks: nonempty_jwks(),
         req_options: [plug: plug]
       )
 
@@ -155,7 +161,7 @@ defmodule AttestoClient.Wallet.ProfileBoundaryTest do
     assert {:ok, tokens} = Token.exchange_pre_authorized_code("code", opts)
     assert tokens.profile == :fapi
     coordinator = start_supervised!(RefreshCoordinator)
-    opts = Keyword.merge(opts, fapi?: false, subject: "subject", jwks: %{"keys" => []})
+    opts = Keyword.merge(opts, fapi?: false, subject: "subject", jwks: nonempty_jwks())
     assert {:ok, result} = Token.refresh(coordinator, make_ref(), tokens, opts)
     assert result.tokens.profile == :fapi
 

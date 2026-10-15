@@ -49,6 +49,63 @@ defmodule AttestoClient.KeyAttestationTest do
 
       assert {:error, :invalid_attested_keys} =
                KeyAttestation.build(es256_key(), attested_keys: [%{"kty" => "bogus"}])
+
+      assert {:error, :invalid_attested_keys} =
+               KeyAttestation.build(es256_key(),
+                 attested_keys: [JOSE.JWK.generate_key({:oct, 32})]
+               )
+    end
+
+    test "rejects malformed optional claims and protected-header values" do
+      provider = es256_key()
+      base = [attested_keys: [es256_key()]]
+
+      for value <- [[], [""], [42], "secure"] do
+        assert {:error, :invalid_key_storage} =
+                 KeyAttestation.build(provider, base ++ [key_storage: value])
+
+        assert {:error, :invalid_user_authentication} =
+                 KeyAttestation.build(provider, base ++ [user_authentication: value])
+      end
+
+      for value <- ["", "relative", "https:///certificate", 42] do
+        assert {:error, :invalid_certification} =
+                 KeyAttestation.build(provider, base ++ [certification: value])
+      end
+
+      for value <- ["", 42, []] do
+        assert {:error, :invalid_nonce} =
+                 KeyAttestation.build(provider, base ++ [nonce: value])
+      end
+
+      for value <- [[], [""], [42], "certificate"] do
+        assert {:error, :invalid_x5c} = KeyAttestation.build(provider, base ++ [x5c: value])
+      end
+
+      for value <- ["", 42, []] do
+        assert {:error, :invalid_kid} = KeyAttestation.build(provider, base ++ [kid: value])
+      end
+    end
+
+    test "accepts only HTTP(S) certification URLs" do
+      provider = es256_key()
+      base = [attested_keys: [es256_key()]]
+
+      for certification <- ["http://certs.example/wallet", "https://certs.example/wallet"] do
+        assert {:ok, jwt} =
+                 KeyAttestation.build(provider, base ++ [certification: certification])
+
+        assert claims(jwt)["certification"] == certification
+      end
+
+      for certification <- [
+            "ftp://certs.example/wallet",
+            "urn:example:certification",
+            "mailto:certs@example.com"
+          ] do
+        assert {:error, :invalid_certification} =
+                 KeyAttestation.build(provider, base ++ [certification: certification])
+      end
     end
   end
 

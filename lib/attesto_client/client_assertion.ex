@@ -91,7 +91,9 @@ defmodule AttestoClient.ClientAssertion do
           | :invalid_client_id
           | :invalid_audience
           | :invalid_lifetime
+          | :invalid_time
           | :invalid_jti
+          | :invalid_kid
           | :invalid_typ
           | :unsupported_alg
           | :unsupported_key
@@ -105,9 +107,9 @@ defmodule AttestoClient.ClientAssertion do
          {:ok, typ} <- assertion_typ(opts),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, jti} <- Builder.validate_jti(opts),
+         {:ok, now} <- Builder.validate_now(opts),
+         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
-      now = Builder.now(opts)
-
       claims = %{
         "iss" => client_id,
         "sub" => client_id,
@@ -119,7 +121,7 @@ defmodule AttestoClient.ClientAssertion do
 
       header = %{"alg" => alg}
       header = if is_nil(typ), do: header, else: Map.put(header, "typ", typ)
-      header = Builder.put_kid(header, jose_jwk, opts)
+      header = Builder.put_kid(header, kid)
       sign_assertion(jose_jwk, header, claims)
     end
   end

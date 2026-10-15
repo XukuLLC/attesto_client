@@ -20,6 +20,7 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   """
 
   alias Attesto.MapParams
+  alias AttestoClient.Discovery
   alias AttestoClient.OAuthHTTP
 
   @scheme "openid-credential-offer"
@@ -130,6 +131,7 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   defp from_map(offer) do
     with {:ok, credential_issuer} <-
            required_string(offer, :credential_issuer, :invalid_credential_issuer),
+         :ok <- validate_credential_issuer(credential_issuer),
          {:ok, ids} <- credential_configuration_ids(offer),
          {:ok, grants} <- grants(offer) do
       {:ok,
@@ -156,18 +158,18 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   # OID4VCI §4.1: when `grants` is absent, the Wallet MUST behave as if a
   # single `authorization_code` grant (no `issuer_state`) had been supplied.
   defp grants(offer) do
-    case MapParams.fetch(offer, :grants) do
-      nil ->
+    case fetch_present(offer, :grants) do
+      :error ->
         {:ok,
          %{
            pre_authorized_code: nil,
            authorization_code: %{issuer_state: nil, authorization_server: nil}
          }}
 
-      %{} = grants ->
+      {:ok, %{} = grants} ->
         normalize_grants(grants)
 
-      _invalid ->
+      {:ok, _invalid} ->
         {:error, :invalid_grants}
     end
   end
@@ -184,10 +186,10 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   end
 
   defp authorization_code_grant(grants) do
-    case MapParams.fetch(grants, :authorization_code) do
-      nil -> {:ok, nil}
-      %{} = grant -> normalize_authorization_code_grant(grant)
-      _invalid -> {:error, :invalid_authorization_code_grant}
+    case fetch_present(grants, :authorization_code) do
+      :error -> {:ok, nil}
+      {:ok, %{} = grant} -> normalize_authorization_code_grant(grant)
+      {:ok, _invalid} -> {:error, :invalid_authorization_code_grant}
     end
   end
 
@@ -202,18 +204,25 @@ defmodule AttestoClient.Wallet.CredentialOffer do
 
   defp pre_authorized_code_grant(grants) do
     case pre_authorized_code_grant_value(grants) do
-      nil -> {:ok, nil}
-      %{} = grant -> normalize_pre_authorized_code_grant(grant)
-      _invalid -> {:error, :invalid_pre_authorized_code_grant}
+      :error -> {:ok, nil}
+      {:ok, %{} = grant} -> normalize_pre_authorized_code_grant(grant)
+      {:ok, _invalid} -> {:error, :invalid_pre_authorized_code_grant}
     end
   end
 
   # A caller may spell the grant with the full URN (always the on-the-wire
   # JSON key) or the atom-friendly hyphen/underscore forms.
   defp pre_authorized_code_grant_value(grants) do
-    Map.get(grants, @pre_authorized_code_grant_type) ||
-      MapParams.fetch(grants, :"pre-authorized_code") ||
-      MapParams.fetch(grants, :pre_authorized_code)
+    case Map.fetch(grants, @pre_authorized_code_grant_type) do
+      {:ok, value} ->
+        {:ok, value}
+
+      :error ->
+        case fetch_present(grants, :"pre-authorized_code") do
+          {:ok, value} -> {:ok, value}
+          :error -> fetch_present(grants, :pre_authorized_code)
+        end
+    end
   end
 
   defp normalize_pre_authorized_code_grant(grant) do
@@ -226,7 +235,11 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   end
 
   defp required_pre_authorized_code(grant) do
-    value = Map.get(grant, "pre-authorized_code") || MapParams.fetch(grant, :pre_authorized_code)
+    value =
+      case fetch_present(grant, :"pre-authorized_code") do
+        {:ok, value} -> value
+        :error -> MapParams.fetch(grant, :pre_authorized_code)
+      end
 
     if is_binary(value) and value != "",
       do: {:ok, value},
@@ -277,6 +290,20 @@ defmodule AttestoClient.Wallet.CredentialOffer do
       nil -> {:ok, nil}
       value when is_binary(value) and value != "" -> {:ok, value}
       _invalid -> {:error, error}
+    end
+  end
+
+  defp validate_credential_issuer(issuer) do
+    case Discovery.validate_issuer_identifier(issuer) do
+      :ok -> :ok
+      {:error, :invalid_issuer} -> {:error, :invalid_credential_issuer}
+    end
+  end
+
+  defp fetch_present(map, key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(map, Atom.to_string(key))
     end
   end
 end

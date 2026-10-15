@@ -306,6 +306,27 @@ defmodule AttestoClient.OAuthHTTPTest do
       refute Map.has_key?(claims, "ath")
     end
 
+    test "forwards algorithm, key id, and time options to each DPoP proof" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: "c",
+                 dpop: key,
+                 alg: "PS256",
+                 kid: "dpop-rsa-1",
+                 now: 1_700_000_000,
+                 req_options: [plug: echo_dpop_plug(parent)]
+               )
+
+      assert_receive {:dpop, proof}
+      assert %{"alg" => "PS256", "kid" => "dpop-rsa-1"} = dpop_header(proof)
+      assert dpop_claims(proof)["iat"] == 1_700_000_000
+    end
+
     test "retries a use_dpop_nonce challenge once, echoing the server DPoP-Nonce" do
       parent = self()
       key = JOSE.JWK.generate_key({:ec, "P-256"})
@@ -347,6 +368,142 @@ defmodule AttestoClient.OAuthHTTPTest do
       refute dpop_claims(first)["jti"] == dpop_claims(second)["jti"]
 
       Agent.stop(counter)
+    end
+
+    test "finds a DPoP nonce challenge after another WWW-Authenticate value" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      counter = start_supervised!({Agent, fn -> 0 end})
+
+      plug = fn conn ->
+        attempt = Agent.get_and_update(counter, fn value -> {value, value + 1} end)
+        send(parent, {:multi_challenge_attempt, attempt})
+
+        if attempt == 0 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "multi-header-nonce")
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.prepend_resp_headers([
+            {"www-authenticate", ~s(Bearer realm="resource")},
+            {"www-authenticate", ~s(DPoP error="use_dpop_nonce")}
+          ])
+          |> Plug.Conn.send_resp(401, "{}")
+        else
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+        end
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{},
+                 "access-token",
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:multi_challenge_attempt, 0}
+      assert_receive {:multi_challenge_attempt, 1}
+    end
+
+    test "finds a DPoP nonce challenge combined after Bearer in one header value" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      counter = start_supervised!({Agent, fn -> 0 end})
+
+      plug = fn conn ->
+        attempt = Agent.get_and_update(counter, fn value -> {value, value + 1} end)
+        send(parent, {:combined_challenge_attempt, attempt})
+
+        if attempt == 0 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "combined-header-nonce")
+          |> Plug.Conn.put_resp_header(
+            "www-authenticate",
+            ~s(Bearer realm="resource", DPoP error="use_dpop_nonce")
+          )
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(401, "{}")
+        else
+          Req.Test.json(conn, %{"ok" => true})
+        end
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{},
+                 "access-token",
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:combined_challenge_attempt, 0}
+      assert_receive {:combined_challenge_attempt, 1}
+    end
+
+    test "does not treat an error description as a DPoP nonce error" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      plug = fn conn ->
+        send(parent, :description_only_attempt)
+
+        conn
+        |> Plug.Conn.put_resp_header("dpop-nonce", "must-not-be-used")
+        |> Plug.Conn.put_resp_header(
+          "www-authenticate",
+          ~s(DPoP error="invalid_dpop_proof", error_description="not use_dpop_nonce")
+        )
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(401, "{}")
+      end
+
+      assert {:error, {:oauth_error, 401, %{}}} =
+               OAuthHTTP.post_json(
+                 "https://issuer.example.com/credential",
+                 %{},
+                 "access-token",
+                 dpop: key,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive :description_only_attempt
+      refute_receive :description_only_attempt
+    end
+
+    test "does not find an error token inside another parameter or with different case" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      for challenge <- [
+            ~s(DPoP realm="contains error=use_dpop_nonce"),
+            ~s(DPoP error="USE_DPOP_NONCE")
+          ] do
+        plug = fn conn ->
+          send(parent, {:non_exact_challenge, challenge})
+
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", "must-not-be-used")
+          |> Plug.Conn.put_resp_header("www-authenticate", challenge)
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(401, "{}")
+        end
+
+        assert {:error, {:oauth_error, 401, %{}}} =
+                 OAuthHTTP.post_json(
+                   "https://issuer.example.com/credential",
+                   %{},
+                   "access-token",
+                   dpop: key,
+                   req_options: [plug: plug]
+                 )
+
+        assert_receive {:non_exact_challenge, ^challenge}
+        refute_receive {:non_exact_challenge, ^challenge}
+      end
     end
 
     test "a use_dpop_nonce retry re-authenticates with a fresh client_assertion" do
@@ -921,6 +1078,20 @@ defmodule AttestoClient.OAuthHTTPTest do
                    req_options: req_options
                  )
       end)
+    end
+
+    test "rejects malformed or duplicate authenticated-request transport options without raising" do
+      for request_options <- [
+            :invalid,
+            [:invalid],
+            [plug: fn _ -> :ok end, plug: fn _ -> :ok end]
+          ] do
+        assert {:error, :unsafe_transport_options} =
+                 OAuthHTTP.post_form(@pinned_endpoint, %{},
+                   client_id: "client",
+                   req_options: request_options
+                 )
+      end
     end
 
     test "bounds OAuth POST response bodies before decoding" do
