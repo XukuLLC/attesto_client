@@ -260,7 +260,7 @@ defmodule AttestoClient.WalletAttestation do
           "iat" => now,
           "exp" => now + lifetime
         }
-        |> put_optional("challenge", Keyword.get(opts, :challenge))
+        |> Attesto.MapParams.put_optional("challenge", Keyword.get(opts, :challenge))
 
       header = Builder.put_kid(%{"alg" => alg, "typ" => @pop_typ}, kid)
       Builder.sign(instance_jwk, header, claims)
@@ -273,12 +273,7 @@ defmodule AttestoClient.WalletAttestation do
   end
 
   defp public_instance_key(instance_jwk) do
-    {_type, public} = JOSE.JWK.to_public_map(instance_jwk)
-    {:ok, public}
-  rescue
-    _error -> {:error, :invalid_instance_key}
-  catch
-    _kind, _reason -> {:error, :invalid_instance_key}
+    Builder.public_jwk_result(instance_jwk, :invalid_instance_key)
   end
 
   defp validate_challenge(nil), do: :ok
@@ -297,7 +292,4 @@ defmodule AttestoClient.WalletAttestation do
       {:error, _reason} -> {:error, :invalid_instance_key}
     end
   end
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 end

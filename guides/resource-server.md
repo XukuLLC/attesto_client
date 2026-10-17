@@ -99,8 +99,10 @@ metadata issuer mismatch, invalid JWKS, blocked host, non-HTTPS URI, redirect,
 or other validation failure never activates stale fallback. An unknown key
 cannot be authenticated by stale data.
 
-After a transient failure, `refresh_retry_interval` prevents every request from
-starting another refresh while the stale snapshot remains usable. Req retries
+After any refresh failure, `refresh_retry_interval` prevents every request from
+starting another refresh. Transient failures may use a stale snapshot only
+while its configured interval remains valid; hard failures and expired stale
+snapshots return the remembered error during the cooldown. Req retries
 are disabled, `max_response_bytes` bounds metadata and JWKS response bodies
 before JSON decoding, and `refresh_timeout` bounds the single coordinated
 operation. Applications should monitor refresh errors and choose stale and

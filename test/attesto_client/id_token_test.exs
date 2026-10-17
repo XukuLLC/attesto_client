@@ -241,6 +241,9 @@ defmodule AttestoClient.IDTokenTest do
       assert {:error, :expired} =
                verify(sign(base_claims(%{"exp" => @now - 1})))
 
+      assert {:error, :expired} =
+               verify(sign(base_claims(%{"exp" => -1})))
+
       assert {:error, :missing_exp} =
                verify(sign(Map.delete(base_claims(), "exp")))
 

@@ -139,6 +139,22 @@ defmodule AttestoClient.Wallet.PresentationRequestTest do
                PresentationRequest.verify(jwt, rp_public, verify_opts())
     end
 
+    test "rejects unsafe response URI components" do
+      {rp_key, rp_public} = verifier_keypair()
+
+      for response_uri <- [
+            "https://user@verifier.example.com/response",
+            "https://verifier.example.com/response#fragment",
+            "https://verifier.example.com/%ZZ",
+            "https:///response"
+          ] do
+        assert {:error, :invalid_request_object} =
+                 rp_key
+                 |> build_request_jwt(%{"response_uri" => response_uri})
+                 |> PresentationRequest.verify(rp_public, verify_opts())
+      end
+    end
+
     test "rejects a missing nonce, response_uri, or dcql_query" do
       {rp_key, rp_public} = verifier_keypair()
 

@@ -33,7 +33,7 @@ defmodule AttestoClient.JARM do
   """
 
   alias Attesto.SigningAlg
-  alias AttestoClient.Verifier
+  alias AttestoClient.{ClaimValidation, Verifier}
 
   # Clock-skew tolerance for `iat`, matching attesto's token verification.
   @clock_skew_seconds 60
@@ -90,10 +90,25 @@ defmodule AttestoClient.JARM do
              enforce_fapi_alg_policy: enforce_fapi_policy
            ),
          :ok <- check_issuer(claims, issuer),
-         :ok <- check_audience(claims, client_id),
-         :ok <- check_issued_at(claims, now),
-         :ok <- check_not_before(claims, now),
-         :ok <- check_expiry(claims, now) do
+         :ok <- ClaimValidation.audience(claims, client_id, :invalid_audience),
+         :ok <-
+           ClaimValidation.issued_at(claims, now,
+             invalid_error: :invalid_iat,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.not_before(claims, now,
+             invalid_error: :invalid_nbf,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.expiration(claims, now,
+             missing_error: :missing_exp,
+             invalid_error: :missing_exp,
+             expired_error: :expired
+           ) do
       {:ok, claims}
     end
   end
@@ -120,52 +135,5 @@ defmodule AttestoClient.JARM do
 
   defp check_issuer(claims, issuer) do
     if Map.get(claims, "iss") == issuer, do: :ok, else: {:error, :invalid_issuer}
-  end
-
-  # An `aud` array is honoured only when every member is a string (a mixed-type
-  # array is malformed, even if the client_id is present), matching attesto's
-  # token/ID-token audience hardening.
-  defp check_audience(claims, client_id) do
-    case Map.get(claims, "aud") do
-      ^client_id ->
-        :ok
-
-      auds when is_list(auds) ->
-        if Enum.all?(auds, &is_binary/1) and client_id in auds,
-          do: :ok,
-          else: {:error, :invalid_audience}
-
-      _other ->
-        {:error, :invalid_audience}
-    end
-  end
-
-  # `iat` is optional in JARM, but when present it must be a non-negative
-  # NumericDate (RFC 7519 §2) and not meaningfully in the future (a JARM response
-  # is consumed immediately); a small skew tolerates a fast issuer clock.
-  defp check_issued_at(claims, now) do
-    case Map.get(claims, "iat") do
-      nil -> :ok
-      iat when is_integer(iat) and iat >= 0 -> within_skew(iat, now)
-      _other -> {:error, :invalid_iat}
-    end
-  end
-
-  defp within_skew(iat, now) do
-    if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
-    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
-  defp check_not_before(_claims, _now), do: :ok
-
-  defp check_expiry(claims, now) do
-    case Map.get(claims, "exp") do
-      exp when is_integer(exp) -> if exp > now, do: :ok, else: {:error, :expired}
-      _other -> {:error, :missing_exp}
-    end
   end
 end

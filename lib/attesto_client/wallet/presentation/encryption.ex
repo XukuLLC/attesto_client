@@ -1,8 +1,8 @@
 defmodule AttestoClient.Wallet.Presentation.Encryption do
   @moduledoc false
 
+  alias Attesto.JWE
   alias Attesto.JWS
-  alias AttestoClient.CryptoJWE
 
   def context(%{profile: :haip, response_mode: mode}) when mode != "direct_post.jwt",
     do: {:error, :invalid_encryption_metadata}
@@ -46,7 +46,7 @@ defmodule AttestoClient.Wallet.Presentation.Encryption do
 
   def encrypt(%{key: key, enc: enc}, payload) when is_binary(payload) do
     header = %{"alg" => "ECDH-ES", "enc" => enc, "typ" => "JWT", "kid" => key["kid"]}
-    CryptoJWE.encrypt(key, payload, header)
+    JWE.encrypt(key, payload, header)
   end
 
   defp unique_kids(keys) do

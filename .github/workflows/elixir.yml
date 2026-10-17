@@ -42,11 +42,11 @@ jobs:
     env:
       MIX_ENV: test
       ATTESTO_PATH: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && '1' || '0' }}
-      REVIEWED_CORE_REF: c2c1c6ee4c89143bb000db8bc4ad66a8b61503ee
+      REVIEWED_CORE_REF: 6c60786d59cf80eb96d3739caf9d9286ab8af0c4
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: attesto_client
 
@@ -54,7 +54,7 @@ jobs:
       # manual runs require the corresponding public Hex release.
       - name: Checkout reviewed candidate core
         if: env.ATTESTO_PATH == '1'
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: XukuLLC/attesto
           ref: ${{ env.REVIEWED_CORE_REF }}
@@ -68,7 +68,7 @@ jobs:
           echo 'Testing the pinned core source candidate; public Hex compatibility remains pending.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
@@ -79,7 +79,7 @@ jobs:
       # Both self-skip when their runtime is absent, so install them here or CI
       # would silently cover less than it appears to.
       - name: Set up Python (PyJWT parity leg)
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -87,18 +87,18 @@ jobs:
         run: python -m pip install --upgrade pip pyjwt cryptography
 
       - name: Restore dependencies cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attesto_client/deps
-          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('attesto_client/mix.lock') }}
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ env.ATTESTO_PATH }}-${{ env.REVIEWED_CORE_REF }}-${{ hashFiles('attesto_client/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attesto_client/_build
-          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ env.ATTESTO_PATH }}-${{ hashFiles('attesto_client/mix.lock') }}-${{ hashFiles('attesto_client/mix.exs') }}
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ env.ATTESTO_PATH }}-${{ env.REVIEWED_CORE_REF }}-${{ hashFiles('attesto_client/mix.lock') }}-${{ hashFiles('attesto_client/mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-
 
@@ -132,7 +132,7 @@ jobs:
         run: >-
           mix run --no-compile -e 'dep = Enum.find(Mix.Dep.cached(), &(&1.app == :attesto));
           unless dep && dep.scm == Mix.SCM.Path && Path.expand(dep.opts[:dest]) == Path.expand("../attesto"), do: System.halt(1);
-          unless Application.spec(:attesto, :vsn) |> to_string() == "2.5.0", do: System.halt(1)'
+          unless Application.spec(:attesto, :vsn) |> to_string() == "2.6.0", do: System.halt(1)'
 
       - name: Run tests
         run: mix test --trace
@@ -147,7 +147,7 @@ jobs:
 
       - name: Restore PLT cache
         if: ${{ matrix.lint }}
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attesto_client/priv/plts
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-${{ hashFiles('**/mix.lock') }}
@@ -162,7 +162,7 @@ jobs:
         run: mix dialyzer
 
   attesto-2-hex:
-    name: Published Attesto 2.5.0 compatibility
+    name: Published Attesto 2.6.0 compatibility
     if: github.event_name != 'pull_request' && inputs.dependency_source != 'candidate'
     runs-on: ubuntu-latest
 
@@ -171,16 +171,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.1"
           otp-version: "29.0.2"
 
       - name: Set up Python (PyJWT parity leg)
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -200,7 +200,7 @@ jobs:
       - name: Assert published hardened Attesto dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
-          unless Version.match?(version, ">= 2.5.0 and < 3.0.0"), do: System.halt(1)'
+          unless Version.match?(version, ">= 2.6.0 and < 3.0.0"), do: System.halt(1)'
 
       - name: Run tests against published Attesto 2
         run: mix test --trace

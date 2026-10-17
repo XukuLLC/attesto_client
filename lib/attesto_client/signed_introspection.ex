@@ -9,7 +9,7 @@ defmodule AttestoClient.SignedIntrospection do
   """
 
   alias Attesto.SigningAlg
-  alias AttestoClient.Verifier
+  alias AttestoClient.{ClaimValidation, Verifier}
 
   @clock_skew_seconds 60
   @typ "token-introspection+jwt"
@@ -67,11 +67,26 @@ defmodule AttestoClient.SignedIntrospection do
          {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, issuer),
-         :ok <- check_audience(claims, audience),
+         :ok <- ClaimValidation.audience(claims, audience, :invalid_audience),
          :ok <- check_claims(claims),
-         :ok <- check_iat(claims, now),
-         :ok <- check_not_before(claims, now),
-         :ok <- check_expiry(claims, now) do
+         :ok <-
+           ClaimValidation.issued_at(claims, now,
+             missing_error: :invalid_iat,
+             invalid_error: :invalid_iat,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.not_before(claims, now,
+             invalid_error: :invalid_nbf,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.expiration(claims, now,
+             invalid_error: :expired,
+             expired_error: :expired
+           ) do
       {:ok, claims}
     end
   end
@@ -90,40 +105,8 @@ defmodule AttestoClient.SignedIntrospection do
 
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  defp check_audience(%{"aud" => aud}, audience) when is_binary(aud) do
-    if aud == audience, do: :ok, else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(%{"aud" => auds}, audience) when is_list(auds) do
-    if Enum.all?(auds, &is_binary/1) and audience in auds,
-      do: :ok,
-      else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _audience), do: {:error, :invalid_audience}
-
   defp check_claims(%{"token_introspection" => %{"active" => active}}) when is_boolean(active),
     do: :ok
 
   defp check_claims(_claims), do: {:error, :invalid_claims}
-
-  defp check_iat(%{"iat" => iat}, now) when is_integer(iat) and iat >= 0 do
-    if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_iat(_claims, _now), do: {:error, :invalid_iat}
-
-  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
-    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
-  defp check_not_before(_claims, _now), do: :ok
-
-  defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) do
-    if exp > now, do: :ok, else: {:error, :expired}
-  end
-
-  defp check_expiry(%{"exp" => _bad}, _now), do: {:error, :expired}
-  defp check_expiry(_claims, _now), do: :ok
 end

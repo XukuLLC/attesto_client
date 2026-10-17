@@ -44,7 +44,7 @@ defmodule AttestoClient.IDToken do
 
   alias Attesto.SecureCompare
   alias Attesto.SigningAlg
-  alias AttestoClient.Verifier
+  alias AttestoClient.{ClaimValidation, Verifier}
 
   @clock_skew_seconds 60
   @id_token_typ "JWT"
@@ -142,9 +142,25 @@ defmodule AttestoClient.IDToken do
          :ok <- check_audience_and_azp(claims, client_id),
          :ok <- check_required_claims(claims),
          :ok <- check_subject(claims, Keyword.get(opts, :subject)),
-         :ok <- check_expiry(claims, now),
-         :ok <- check_issued_at(claims, now),
-         :ok <- check_not_before(claims, now),
+         :ok <-
+           ClaimValidation.expiration(claims, now,
+             missing_error: :missing_exp,
+             invalid_error: :missing_exp,
+             expired_error: :expired
+           ),
+         :ok <-
+           ClaimValidation.issued_at(claims, now,
+             missing_error: :invalid_iat,
+             invalid_error: :invalid_iat,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.not_before(claims, now,
+             invalid_error: :invalid_nbf,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
          :ok <- check_nonce(claims, Keyword.get(opts, :nonce)),
          :ok <- check_max_age(claims, opts, now),
          :ok <-
@@ -252,25 +268,6 @@ defmodule AttestoClient.IDToken do
   end
 
   defp check_subject(_claims, _expected), do: {:error, :subject_mismatch}
-
-  defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) do
-    if exp > now, do: :ok, else: {:error, :expired}
-  end
-
-  defp check_expiry(_claims, _now), do: {:error, :missing_exp}
-
-  defp check_issued_at(%{"iat" => iat}, now) when is_integer(iat) and iat >= 0 do
-    if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_issued_at(_claims, _now), do: {:error, :invalid_iat}
-
-  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
-    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
-  defp check_not_before(_claims, _now), do: :ok
 
   defp check_nonce(_claims, nil), do: :ok
 

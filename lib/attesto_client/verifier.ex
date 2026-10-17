@@ -1,41 +1,21 @@
 defmodule AttestoClient.Verifier do
   @moduledoc false
 
-  alias Attesto.SigningAlg
+  alias Attesto.{JWS, NumericDate, SigningAlg}
   alias AttestoClient.Discovery
 
   @minimum_rsa_bits 2048
-  @private_jwk_members ~w(d p q dp dq qi oth k)
-
-  # Compact JOSE values arrive before authentication. Bound the encoded input
-  # before splitting or decoding it so a hostile token cannot force an
-  # unbounded separator list or Base64URL allocation. The per-segment ceilings
-  # follow Authlib's hardened 256 KiB limit; the 1 MiB total also bounds the
-  # payload while leaving ample room for ordinary JWT claims and x5c headers.
-  @max_compact_bytes 1_048_576
-  @max_protected_segment_bytes 256 * 1_024
-  @max_signature_segment_bytes 256 * 1_024
 
   @type compact_segments :: {binary(), binary(), binary()}
 
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
 
   @spec require_string(keyword(), atom(), term()) :: {:ok, String.t()} | {:error, term()}
-  def require_string(opts, key, error) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, error}
-    end
-  end
+  def require_string(opts, key, error),
+    do: AttestoClient.InputValidation.required_string(opts, key, error)
 
   @spec now(keyword()) :: non_neg_integer()
-  def now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
-    end
-  end
+  def now(opts), do: NumericDate.now(opts, default: :system, invalid_override: :fallback)
 
   @spec accepted_algs(keyword(), [SigningAlg.alg()]) ::
           {:ok, [SigningAlg.alg()]} | {:error, :unsupported_alg}
@@ -81,14 +61,29 @@ defmodule AttestoClient.Verifier do
 
   def verify_signature(jwt, keys, accepted_algs, opts)
       when is_binary(jwt) and is_list(keys) and is_list(accepted_algs) and is_list(opts) do
-    with {:ok, segments} <- parse_compact(jwt),
-         {:ok, header} <- decode_header(segments),
-         {:ok, _claims} <- decode_payload(segments),
-         :ok <- check_crit(header),
-         {:ok, candidates} <- candidates(keys, header, accepted_algs, opts),
-         {:ok, claims, verified_jwk} <- verify_against_any(jwt, candidates) do
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_token,
+             crit_error: :unsupported_critical_header
+           ),
+         :ok <- check_algorithm(header, accepted_algs),
+         {:ok, candidate} <- verification_candidate(keys, header, accepted_algs, opts),
+         {:ok, claims, {_kid, _alg, verified_jwk}} <-
+           JWS.verify_strict(jwt, [candidate],
+             accepted_algs: accepted_algs,
+             fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, false),
+             terminal_error: :invalid_signature,
+             malformed_error: :invalid_token,
+             malformed_result: :halt,
+             claims_map?: true,
+             return_key?: true
+           ) do
       {:ok, claims, header, verified_jwk}
     end
+  rescue
+    _error -> {:error, :invalid_token}
+  catch
+    _kind, _reason -> {:error, :invalid_token}
   end
 
   def verify_signature(_jwt, _keys, _accepted_algs, _opts), do: {:error, :invalid_token}
@@ -116,10 +111,16 @@ defmodule AttestoClient.Verifier do
   """
   @spec decode_unsigned(String.t()) :: {:ok, map(), map()} | {:error, :invalid_token}
   def decode_unsigned(jwt) when is_binary(jwt) do
-    with {:ok, {_, _payload, ""} = segments} <- parse_compact(jwt),
-         {:ok, %{"alg" => "none"} = header} <- decode_header(segments),
-         :ok <- check_crit_result(header),
-         {:ok, claims} <- decode_payload(segments) do
+    with {:ok, %{signature_segment: ""}} <-
+           JWS.decode_compact(jwt, canonical: true, allow_empty_signature: true),
+         {:ok, %{"alg" => "none"} = header} <-
+           JWS.protected_header(jwt,
+             canonical: true,
+             allow_empty_signature: true,
+             error: :invalid_token,
+             crit_error: :invalid_token
+           ),
+         {:ok, claims} <- JWS.peek_json(jwt, :payload, canonical: true) do
       {:ok, claims, header}
     else
       _other -> {:error, :invalid_token}
@@ -127,13 +128,6 @@ defmodule AttestoClient.Verifier do
   end
 
   def decode_unsigned(_jwt), do: {:error, :invalid_token}
-
-  defp check_crit_result(header) do
-    case check_crit(header) do
-      :ok -> :ok
-      {:error, _reason} -> :error
-    end
-  end
 
   @spec normalize_jwks(jwks()) :: {:ok, [map()]} | {:error, :invalid_jwks}
   def normalize_jwks(%{"keys" => keys}) when is_list(keys), do: normalize_jwks(keys)
@@ -179,22 +173,14 @@ defmodule AttestoClient.Verifier do
         {:ok, Keyword.fetch!(opts, :jwks_uri)}
 
       is_map(Keyword.get(opts, :metadata)) ->
-        jwks_uri_from_metadata(Keyword.fetch!(opts, :metadata), issuer)
+        Discovery.jwks_uri(Keyword.fetch!(opts, :metadata), issuer)
 
       true ->
         with {:ok, metadata} <- Discovery.fetch(issuer, discovery_opts(opts)) do
-          jwks_uri_from_metadata(metadata, issuer)
+          Discovery.jwks_uri(metadata, issuer)
         end
     end
   end
-
-  defp jwks_uri_from_metadata(%{"issuer" => issuer, "jwks_uri" => jwks_uri}, issuer)
-       when is_binary(jwks_uri) and jwks_uri != "" do
-    {:ok, jwks_uri}
-  end
-
-  defp jwks_uri_from_metadata(%{"issuer" => _other}, _issuer), do: {:error, :issuer_mismatch}
-  defp jwks_uri_from_metadata(_metadata, _issuer), do: {:error, :invalid_metadata}
 
   defp discovery_opts(opts) do
     opts
@@ -202,230 +188,102 @@ defmodule AttestoClient.Verifier do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
-  # Split at most twice, then scan the final segment for one extra separator.
-  # A global split allocates one list entry per attacker-supplied period before
-  # it can reject the wrong part count.
-  defp parse_compact(jwt) when byte_size(jwt) <= @max_compact_bytes do
-    with [protected, rest] <- :binary.split(jwt, "."),
-         [payload, signature] <- :binary.split(rest, "."),
-         :nomatch <- :binary.match(signature, "."),
-         true <- byte_size(protected) <= @max_protected_segment_bytes,
-         true <- byte_size(signature) <= @max_signature_segment_bytes,
-         true <- Enum.all?([protected, payload, signature], &canonical_base64url?/1) do
-      {:ok, {protected, payload, signature}}
-    else
-      _other -> {:error, :invalid_token}
-    end
-  end
-
-  defp parse_compact(_jwt), do: {:error, :invalid_token}
-
-  defp canonical_base64url?(segment) do
-    case Base.url_decode64(segment, padding: false) do
-      {:ok, decoded} -> Base.url_encode64(decoded, padding: false) == segment
-      :error -> false
-    end
-  end
-
   @doc false
   @spec peek_header(String.t()) :: {:ok, map()} | {:error, :invalid_token}
   def peek_header(jwt) do
-    with {:ok, segments} <- parse_compact(jwt), do: decode_header(segments)
-  end
-
-  defp decode_header({header, _payload, _signature}) do
-    with {:ok, decoded} <- Base.url_decode64(header, padding: false),
-         {:ok, map} <- decode_json_map(decoded) do
-      {:ok, map}
-    else
-      _ -> {:error, :invalid_token}
-    end
-  end
-
-  defp decode_payload({_header, payload, _signature}) do
-    with {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, map} <- decode_json_map(decoded) do
-      {:ok, map}
-    else
-      _ -> {:error, :invalid_token}
-    end
-  end
-
-  defp decode_json_map(bytes) do
-    decoders = [
-      object_start: fn _old_acc -> %{} end,
-      object_push: fn key, value, object ->
-        if Map.has_key?(object, key),
-          do: throw(:duplicate_json_member),
-          else: Map.put(object, key, value)
-      end,
-      object_finish: fn object, old_acc -> {object, old_acc} end
-    ]
-
-    case JSON.decode(bytes, nil, decoders) do
-      {%{} = map, nil, ""} -> {:ok, map}
-      _other -> {:error, :invalid_token}
-    end
-  rescue
-    _error -> {:error, :invalid_token}
-  catch
-    :duplicate_json_member -> {:error, :invalid_token}
-  end
-
-  defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
-  end
-
-  defp candidates(keys, %{"alg" => alg} = header, accepted_algs, opts) when is_binary(alg) do
-    if alg in accepted_algs do
-      candidates =
-        keys
-        |> filter_by_kid(Map.get(header, "kid"))
-        |> Enum.filter(&verification_key?/1)
-        |> Enum.flat_map(&candidate(&1, [alg]))
-
-      case candidates do
-        [] -> {:error, :invalid_signature}
-        [candidate] -> validate_key_policy(candidate, opts)
-        _multiple -> {:error, :ambiguous_key}
-      end
-    else
-      {:error, :unsupported_alg}
-    end
-  end
-
-  defp candidates(_keys, _header, _accepted_algs, _opts), do: {:error, :invalid_signature}
-
-  # A `kid` must resolve to exactly one eligible key. When the token omits a
-  # `kid`, verification remains interoperable with a JWKS containing exactly
-  # one eligible signing key, but never guesses between multiple keys.
-  defp filter_by_kid(keys, nil), do: keys
-
-  defp filter_by_kid(keys, kid), do: Enum.filter(keys, &(Map.get(&1, "kid") == kid))
-
-  defp verification_key?(key) do
-    public_verification_key?(key) and use_allows_verification?(key) and
-      operations_allow_verification?(key)
-  end
-
-  defp public_verification_key?(key),
-    do: not Enum.any?(@private_jwk_members, &Map.has_key?(key, &1))
-
-  defp use_allows_verification?(key) do
-    case Map.fetch(key, "use") do
-      :error -> true
-      {:ok, "sig"} -> true
-      {:ok, _invalid} -> false
-    end
-  end
-
-  defp operations_allow_verification?(key) do
-    case Map.fetch(key, "key_ops") do
-      :error ->
-        true
-
-      {:ok, operations} when is_list(operations) ->
-        Enum.all?(operations, &is_binary/1) and "verify" in operations
-
-      {:ok, _invalid} ->
-        false
+    case JWS.peek_json(jwt, :protected, canonical: true) do
+      {:ok, header} -> {:ok, header}
+      {:error, _reason} -> {:error, :invalid_token}
     end
   end
 
   defp usable_verification_key?(key, accepted_algs) do
-    verification_key?(key) and
-      key
-      |> candidate(accepted_algs)
-      |> Enum.any?(&match?({:ok, _candidates}, validate_key_strength(&1)))
-  end
-
-  defp candidate(key_map, accepted_algs) do
-    # Bound RSA `n` and `e` on their raw base64url strings before JOSE turns
-    # them into bignums. A remote JWKS (or a token-selected key within it) is
-    # attacker-influenceable; decoding and verifying with a multi-hundred-KB
-    # exponent can pin a scheduler for seconds per request.
-    if !SigningAlg.rsa_params_ok?(key_map) do
-      raise ArgumentError, "RSA verification key parameters are out of safe bounds"
-    end
-
-    jwk = JOSE.JWK.from_map(key_map)
-
-    algs =
-      key_map
-      |> key_algs(jwk)
-      |> Enum.filter(&(&1 in accepted_algs))
-
-    case algs do
-      [] -> []
-      [_ | _] -> [{Map.get(key_map, "kid"), algs, jwk, key_map}]
-    end
-  rescue
-    _error -> []
-  end
-
-  defp validate_key_strength({_kid, _algs, _jwk, %{"kty" => "RSA", "n" => modulus}} = candidate)
-       when is_binary(modulus) do
-    case Base.url_decode64(modulus, padding: false) do
-      {:ok, bytes} ->
-        if modulus_bits(bytes) >= @minimum_rsa_bits,
-          do: {:ok, [candidate]},
-          else: {:error, :weak_key}
-
-      :error ->
-        {:error, :invalid_signature}
-    end
-  end
-
-  defp validate_key_strength({_kid, _algs, _jwk, %{"kty" => "RSA"}}),
-    do: {:error, :invalid_signature}
-
-  defp validate_key_strength(candidate), do: {:ok, [candidate]}
-
-  defp modulus_bits(bytes) do
-    bytes
-    |> :binary.decode_unsigned()
-    |> Integer.digits(2)
-    |> length()
-  end
-
-  defp key_algs(%{"alg" => alg}, jwk), do: [SigningAlg.validate_for_key!(alg, jwk)]
-
-  defp key_algs(_key_map, jwk), do: SigningAlg.compatible_algs(jwk)
-
-  defp validate_key_policy(candidate, opts) do
-    with {:ok, candidates} <- validate_key_strength(candidate),
-         :ok <- validate_fapi_key_policy(candidate, opts) do
-      {:ok, candidates}
-    end
-  end
-
-  defp validate_fapi_key_policy({_kid, [alg], jwk, _map}, opts) do
-    if Keyword.get(opts, :enforce_fapi_alg_policy, false) do
-      if SigningAlg.fapi_compatible?(alg, jwk),
-        do: :ok,
-        else: {:error, :invalid_signature}
-    else
-      :ok
-    end
-  end
-
-  defp verify_against_any(jwt, candidates) do
-    strict_candidates =
-      Enum.flat_map(candidates, fn {kid, algs, jwk, _map} ->
-        Enum.map(algs, &{kid, &1, jwk})
+    strict_key_metadata?(key) and
+      Enum.any?(accepted_algs, fn alg ->
+        match?(
+          [_],
+          JWS.verification_candidates(
+            [key],
+            candidate_opts(alg, accepted_algs, [], @minimum_rsa_bits)
+          )
+        )
       end)
+  end
 
-    case Attesto.JWS.verify_strict(jwt, strict_candidates,
-           terminal_error: :invalid_signature,
-           malformed_error: :invalid_token,
-           malformed_result: :halt,
-           claims_map?: true,
-           return_key?: true
-         ) do
-      {:ok, claims, {_kid, _alg, jwk}} -> {:ok, claims, jwk}
-      {:error, _reason} = error -> error
+  defp check_algorithm(%{"alg" => alg}, accepted_algs) when is_binary(alg),
+    do: if(alg in accepted_algs, do: :ok, else: {:error, :unsupported_alg})
+
+  defp check_algorithm(_header, _accepted_algs), do: {:error, :invalid_signature}
+
+  defp verification_candidate(keys, %{"alg" => alg} = header, accepted_algs, opts) do
+    key_policy_opts = Keyword.put(opts, :enforce_fapi_alg_policy, false)
+
+    selection_opts =
+      candidate_opts(alg, accepted_algs, key_policy_opts, nil, Map.get(header, "kid"))
+
+    strict_keys = Enum.filter(keys, &strict_key_metadata?/1)
+
+    case JWS.verification_candidates(strict_keys, selection_opts) do
+      [] ->
+        {:error, :invalid_signature}
+
+      [_one, _two | _rest] ->
+        {:error, :ambiguous_key}
+
+      [_candidate] ->
+        strong_opts = Keyword.put(selection_opts, :min_rsa_bits, @minimum_rsa_bits)
+
+        case JWS.verification_candidates(strict_keys, strong_opts) do
+          [candidate] -> enforce_candidate_policy(candidate, strict_keys, strong_opts, opts)
+          [] -> {:error, :weak_key}
+        end
     end
-  rescue
-    _error -> {:error, :invalid_token}
+  end
+
+  defp enforce_candidate_policy(candidate, keys, selection_opts, opts) do
+    if Keyword.get(opts, :enforce_fapi_alg_policy, false) do
+      case JWS.verification_candidates(keys, Keyword.put(selection_opts, :fapi?, true)) do
+        [_candidate] -> {:ok, candidate}
+        [] -> {:error, :invalid_signature}
+      end
+    else
+      {:ok, candidate}
+    end
+  end
+
+  # Core treats an explicit JSON null like an absent optional JWK member. The
+  # client historically rejects present-but-null `use`/`alg`/`key_ops` and
+  # non-string key operations, so retain that stricter remote-JWKS boundary
+  # before handing candidate construction and cryptographic checks to core.
+  defp strict_key_metadata?(key) do
+    optional_sig_use?(Map.fetch(key, "use")) and
+      optional_alg?(Map.fetch(key, "alg")) and
+      optional_verify_ops?(Map.fetch(key, "key_ops"))
+  end
+
+  defp optional_sig_use?(:error), do: true
+  defp optional_sig_use?({:ok, "sig"}), do: true
+  defp optional_sig_use?(_other), do: false
+
+  defp optional_alg?(:error), do: true
+  defp optional_alg?({:ok, alg}), do: is_binary(alg) and alg != ""
+
+  defp optional_verify_ops?(:error), do: true
+
+  defp optional_verify_ops?({:ok, ops}) when is_list(ops),
+    do: Enum.all?(ops, &is_binary/1) and "verify" in ops
+
+  defp optional_verify_ops?(_other), do: false
+
+  defp candidate_opts(alg, accepted_algs, opts, minimum_bits, kid \\ nil) do
+    [
+      alg: alg,
+      accepted_algs: accepted_algs,
+      fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, false),
+      kid: kid,
+      min_rsa_bits: minimum_bits,
+      ambiguous_kid: :allow,
+      malformed_key: :skip
+    ]
   end
 end

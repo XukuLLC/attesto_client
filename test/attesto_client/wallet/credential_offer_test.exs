@@ -43,6 +43,13 @@ defmodule AttestoClient.Wallet.CredentialOfferTest do
       assert offer.credential_issuer == @issuer
     end
 
+    test "rejects duplicate members in a raw JSON offer" do
+      json =
+        ~s({"credential_issuer":"#{@issuer}","credential_issuer":"https://evil.example","credential_configuration_ids":["UniversityDegree"]})
+
+      assert {:error, :invalid_json} = CredentialOffer.parse(json)
+    end
+
     test "defaults to an implied authorization_code grant when grants is omitted" do
       offer = Map.delete(@pre_authorized_offer, "grants")
       assert {:ok, parsed} = CredentialOffer.parse(offer)

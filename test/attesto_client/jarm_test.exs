@@ -2,6 +2,7 @@ defmodule AttestoClient.JARMTest do
   use ExUnit.Case, async: true
 
   alias AttestoClient.JARM
+  alias AttestoClient.Test.{JWT, Python}
 
   @issuer "https://op.example.com"
   @client_id "attesto-fapi-dpop-client"
@@ -11,18 +12,13 @@ defmodule AttestoClient.JARMTest do
   # negative tests. Generated once per test run.
   defp as_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
 
-  defp public_jwk(jose_jwk, overrides) do
-    {_, public} = JOSE.JWK.to_public_map(jose_jwk)
-    Map.merge(public, overrides)
-  end
+  defp public_jwk(jose_jwk, overrides), do: JWT.public_jwk(jose_jwk, overrides)
 
   defp jwks(jose_jwk, overrides \\ %{}), do: %{"keys" => [public_jwk(jose_jwk, overrides)]}
 
   # Sign a JARM response directly (lets the negative tests control the claims).
-  defp sign(jose_jwk, claims, header \\ %{"alg" => "ES256"}) do
-    {_, jwt} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    jwt
-  end
+  defp sign(jose_jwk, claims, header \\ %{"alg" => "ES256"}),
+    do: JWT.sign_compact(jose_jwk, claims, header)
 
   defp success_claims(overrides \\ %{}) do
     Map.merge(
@@ -101,6 +97,9 @@ defmodule AttestoClient.JARMTest do
 
       assert {:error, :expired} =
                verify(sign(key, success_claims(%{"exp" => @now - 1})), jwks(key))
+
+      assert {:error, :expired} =
+               verify(sign(key, success_claims(%{"exp" => -1})), jwks(key))
 
       assert {:error, :missing_exp} =
                verify(sign(key, success_claims() |> Map.drop(["exp"])), jwks(key))
@@ -233,14 +232,18 @@ defmodule AttestoClient.JARMTest do
     end
 
     test "verifies a JARM response signed by an independent PyJWT signer (external parity, Leg A)" do
-      case python_pyjwt() do
+      case Python.available("sign_jarm.py") do
         {:ok, python} ->
           key = as_key()
           {_, priv} = JOSE.JWK.to_map(key)
           priv = Map.put(priv, "kid", "py-as-key")
 
           {:ok, %{"jwt" => jwt}} =
-            sign_with_pyjwt(python, %{private_jwk: priv, alg: "ES256", claims: success_claims()})
+            Python.run(python, "sign_jarm.py", %{
+              private_jwk: priv,
+              alg: "ES256",
+              claims: success_claims()
+            })
 
           assert {:ok, claims} = verify(jwt, jwks(key, %{"kid" => "py-as-key"}))
           assert claims["code"] == "auth-code-123"
@@ -249,59 +252,6 @@ defmodule AttestoClient.JARMTest do
         {:skip, reason} ->
           IO.puts("Skipping PyJWT JARM parity: #{reason}")
       end
-    end
-  end
-
-  # ── python parity harness (mirrors req_dpop) ───────────────────────────────
-
-  defp python_pyjwt do
-    python = System.get_env("ATTESTO_CLIENT_PYTHON") || System.find_executable("python3")
-
-    cond do
-      is_nil(python) -> {:skip, "python3 not found"}
-      not File.exists?(signer_script()) -> {:skip, "signer helper not found"}
-      true -> ensure_pyjwt(python)
-    end
-  end
-
-  defp ensure_pyjwt(python) do
-    case System.cmd(python, ["-c", "import jwt"], stderr_to_stdout: true) do
-      {_out, 0} -> {:ok, python}
-      {out, _} -> {:skip, "PyJWT unavailable: #{String.trim(out)}"}
-    end
-  end
-
-  defp sign_with_pyjwt(python, payload) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "attesto_client_jarm_#{System.unique_integer([:positive])}.json"
-      )
-
-    File.write!(path, JSON.encode!(payload))
-
-    try do
-      case System.cmd(python, [signer_script(), path], stderr_to_stdout: true) do
-        {out, 0} -> {:ok, out |> last_json_line!() |> JSON.decode!()}
-        {out, _} -> {:error, String.trim(out)}
-      end
-    after
-      File.rm(path)
-    end
-  end
-
-  defp signer_script do
-    Path.expand("../../test_support/python/sign_jarm.py", __DIR__)
-  end
-
-  defp last_json_line!(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reverse()
-    |> Enum.find(&String.starts_with?(&1, "{"))
-    |> case do
-      nil -> raise "python signer emitted no JSON: #{output}"
-      line -> line
     end
   end
 end

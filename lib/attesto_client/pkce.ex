@@ -18,9 +18,7 @@ defmodule AttestoClient.PKCE do
   """
   @spec code_verifier() :: String.t()
   def code_verifier do
-    32
-    |> :crypto.strong_rand_bytes()
-    |> Base.url_encode64(padding: false)
+    Attesto.Secret.generate()
   end
 
   @doc """

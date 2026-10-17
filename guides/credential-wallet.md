@@ -10,12 +10,12 @@ that assurance comes from your wallet provider and key-attestation issuer.
 For the encrypted examples, use these dependencies:
 
 ```elixir
-{:attesto, "~> 2.5"},
-{:attesto_client, "~> 2.9"}
+{:attesto, "~> 2.6"},
+{:attesto_client, "~> 2.10"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
-AttestoClient 2.9 uses the shared security boundaries introduced in Attesto 2.5.
+AttestoClient 2.10 uses the shared security boundaries in Attesto 2.6.
 The [wallet Livebook](digital_wallet.livemd) starts with a complete local
 SD-JWT VC selective-disclosure example and then encrypts its response.
 
@@ -149,6 +149,8 @@ checks the returned SD-JWT `vct` or mdoc document type against that
 configuration. If you omit configuration metadata, your application must
 check the expected credential type itself. In both cases, your trust policy
 must authorize the issuer to issue that type of credential.
+When an SD-JWT VC or JWT VC includes `iss`, the wallet requires it to equal the
+offer's Credential Issuer Identifier.
 
 `result.credentials` contains verified held credentials, or pending markers
 when deferred polling is disabled or no deferred endpoint is supplied. Store
@@ -325,7 +327,9 @@ credentials include the verified `issuer_certificate_chain` and
 `authority_key_identifiers`; failed signature or holder-binding checks never
 produce a held credential. Add `certificate_trust:` for further issuer policy.
 Certificate-identified SD-JWT credentials may omit `iss`; accepting those
-requires Attesto 2.5.0 or later. A present malformed issuer still fails.
+requires Attesto 2.6.0 or later. A present issuer must equal the offer's
+Credential Issuer Identifier. Use `certificate_trust:` to bind certificate
+subjects to the issuer identities allowed by your ecosystem policy.
 
 Credential status remains application-owned. Before storing or presenting a
 credential, apply your revocation and freshness policy. For a Token Status
@@ -388,8 +392,8 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 ## Development and verification
 
 When developing both libraries in sibling source checkouts, use
-`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.9.0
-requires Attesto 2.5.0 or later, including for unencrypted wallet operations,
+`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.10.0
+requires Attesto 2.6.0 or later, including for unencrypted wallet operations,
 so installations use the shared JWS, DPoP, URI, and outbound-address policy.
 
 Run conformance against one frozen source or released dependency set. Record

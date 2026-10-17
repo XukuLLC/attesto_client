@@ -1,6 +1,7 @@
 defmodule AttestoClient.UserInfoTest do
   use ExUnit.Case, async: true
 
+  alias AttestoClient.Test.JWT
   alias AttestoClient.UserInfo
 
   @issuer "https://op.example.com"
@@ -45,8 +46,7 @@ defmodule AttestoClient.UserInfoTest do
       %{"alg" => "RS256", "kid" => Attesto.Key.kid(pem), "typ" => "JWT"}
       |> Map.merge(header_overrides)
 
-    {_, jwt} = jwk |> JOSE.JWS.sign(JSON.encode!(claims), header) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(jwk, claims, header)
   end
 
   defp verify(jwt, opts \\ []) do

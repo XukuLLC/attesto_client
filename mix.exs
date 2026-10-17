@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.9.0"
+  @version "2.10.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -79,7 +79,7 @@ defmodule AttestoClient.MixProject do
          not Enum.any?(System.argv(), &(&1 in ["hex.build", "hex.publish"])) do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, ">= 2.5.0 and < 3.0.0"}
+      {:attesto, ">= 2.6.0 and < 3.0.0"}
     end
   end
 

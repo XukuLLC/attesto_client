@@ -23,7 +23,9 @@ defmodule AttestoClient.ResourceServer do
       generation and refresh interval, preventing request fan-out and random
       `kid` refresh storms;
     * stale keys are used only within the configured stale interval and only
-      after transient transport, 429, or 5xx refresh failures;
+      after transient transport, 429, or 5xx refresh failures; every refresh
+      failure receives a retry cooldown so a persistent hard failure cannot
+      make every token verification wait on the issuer;
     * DPoP and mTLS confirmation claims fail closed unless the matching verified
       proof-key or certificate thumbprint is supplied.
 
@@ -54,15 +56,15 @@ defmodule AttestoClient.ResourceServer do
 
   `fresh_ttl` and `stale_ttl` are milliseconds. `stale_ttl` starts when the
   fresh interval ends. `refresh_retry_interval` avoids retrying a failed
-  upstream refresh on every request while a stale snapshot remains usable.
+  upstream refresh on every request. During that interval, a transient failure
+  may use a still-valid stale snapshot; a hard failure or an exhausted stale
+  interval returns the remembered refresh error without another fetch.
   """
 
   use GenServer
 
-  alias Attesto.SecureCompare
-  alias Attesto.SigningAlg
-  alias AttestoClient.Discovery
-  alias AttestoClient.Verifier
+  alias Attesto.{NumericDate, SecureCompare, SigningAlg}
+  alias AttestoClient.{ClaimValidation, Discovery, Verifier}
 
   @default_fresh_ttl :timer.minutes(5)
   @default_stale_ttl :timer.hours(1)
@@ -236,7 +238,7 @@ defmodule AttestoClient.ResourceServer do
         {:noreply, %{state | refresh_waiters: [from | state.refresh_waiters]}}
 
       refresh_suppressed?(state, reason) ->
-        {:reply, {:ok, state.snapshot}, state}
+        {:reply, refresh_suppressed_reply(state, reason), state}
 
       true ->
         task = Task.async(fn -> fetch_snapshot(state) end)
@@ -306,8 +308,8 @@ defmodule AttestoClient.ResourceServer do
       now < snapshot.fresh_until ->
         {:ok, snapshot}
 
-      stale_retry_active?(snapshot, now) ->
-        {:ok, snapshot}
+      refresh_retry_active?(snapshot, now) ->
+        refresh_retry_result(snapshot, now)
 
       true ->
         refresh_expired_snapshot(server, snapshot, now)
@@ -372,11 +374,28 @@ defmodule AttestoClient.ResourceServer do
            Verifier.verify_signature(access_token, snapshot.keys, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, snapshot.issuer),
-         :ok <- check_audience(claims, snapshot.audiences),
+         :ok <- ClaimValidation.audience(claims, snapshot.audiences, :invalid_audience),
          :ok <- check_claims(claims),
-         :ok <- check_expiry(claims, now),
-         :ok <- check_not_before(claims, now, snapshot.clock_skew_seconds),
-         :ok <- check_issued_at(claims, now, snapshot.clock_skew_seconds),
+         :ok <-
+           ClaimValidation.expiration(claims, now,
+             missing_error: :expired,
+             invalid_error: :expired,
+             expired_error: :expired
+           ),
+         :ok <-
+           ClaimValidation.not_before(claims, now,
+             invalid_error: :invalid_claims,
+             future_error: :not_yet_valid,
+             skew: snapshot.clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.issued_at(claims, now,
+             missing_error: :invalid_claims,
+             invalid_error: :invalid_claims,
+             future_error: :not_yet_valid,
+             non_negative: false,
+             skew: snapshot.clock_skew_seconds
+           ),
          :ok <- check_token_policy(claims, opts, now, snapshot.clock_skew_seconds),
          {:ok, scopes} <- scopes(claims),
          :ok <- check_required_scopes(scopes, Keyword.get(opts, :required_scopes, [])),
@@ -396,41 +415,12 @@ defmodule AttestoClient.ResourceServer do
   defp check_issuer(%{"iss" => issuer}, issuer), do: :ok
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  defp check_audience(%{"aud" => aud}, expected) when is_binary(aud) do
-    if aud in expected, do: :ok, else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(%{"aud" => audiences}, expected) when is_list(audiences) do
-    if audiences != [] and Enum.all?(audiences, &is_binary/1) and
-         Enum.any?(audiences, &(&1 in expected)),
-       do: :ok,
-       else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
-
   defp check_claims(claims) do
     if non_empty_string?(claims["sub"]) and non_empty_string?(claims["client_id"]) and
          non_empty_string?(claims["jti"]) and non_negative_integer?(claims["iat"]),
        do: :ok,
        else: {:error, :invalid_claims}
   end
-
-  defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) and exp > now, do: :ok
-  defp check_expiry(_claims, _now), do: {:error, :expired}
-
-  defp check_not_before(%{"nbf" => nbf}, now, skew) when is_integer(nbf) and nbf >= 0 do
-    if nbf <= now + skew, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => _invalid}, _now, _skew), do: {:error, :invalid_claims}
-  defp check_not_before(_claims, _now, _skew), do: :ok
-
-  defp check_issued_at(%{"iat" => iat}, now, skew) when is_integer(iat) do
-    if iat <= now + skew, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_issued_at(_claims, _now, _skew), do: {:error, :invalid_claims}
 
   defp check_token_policy(claims, opts, now, skew) do
     with :ok <-
@@ -561,6 +551,7 @@ defmodule AttestoClient.ResourceServer do
          generation: state.generation + 1,
          issuer: state.issuer,
          keys: keys,
+         refresh_error: nil,
          retry_after: nil,
          stale_until: now + state.fresh_ttl + state.stale_ttl
        }}
@@ -574,20 +565,13 @@ defmodule AttestoClient.ResourceServer do
   defp resolve_jwks_uri(%{jwks_uri: uri}) when is_binary(uri), do: {:ok, uri}
 
   defp resolve_jwks_uri(%{metadata: %{} = metadata, issuer: issuer}),
-    do: jwks_uri_from_metadata(metadata, issuer)
+    do: Discovery.jwks_uri(metadata, issuer)
 
   defp resolve_jwks_uri(state) do
     with {:ok, metadata} <- Discovery.fetch(state.issuer, discovery_opts(state)) do
-      jwks_uri_from_metadata(metadata, state.issuer)
+      Discovery.jwks_uri(metadata, state.issuer)
     end
   end
-
-  defp jwks_uri_from_metadata(%{"issuer" => issuer, "jwks_uri" => uri}, issuer)
-       when is_binary(uri) and uri != "",
-       do: {:ok, uri}
-
-  defp jwks_uri_from_metadata(%{"issuer" => _other}, _issuer), do: {:error, :issuer_mismatch}
-  defp jwks_uri_from_metadata(_metadata, _issuer), do: {:error, :invalid_metadata}
 
   defp discovery_opts(state) do
     [
@@ -620,13 +604,22 @@ defmodule AttestoClient.ResourceServer do
     do: state.snapshot.generation > observed
 
   defp refresh_suppressed?(state, :expired),
-    do: stale_retry_active?(state.snapshot, monotonic_ms())
+    do: refresh_retry_active?(state.snapshot, monotonic_ms())
 
   defp refresh_suppressed?(%{next_unknown_refresh_at: next_refresh}, :unknown_kid)
        when is_integer(next_refresh),
        do: monotonic_ms() < next_refresh
 
   defp refresh_suppressed?(_state, _reason), do: false
+
+  defp refresh_suppressed_reply(state, :expired) do
+    case refresh_retry_result(state.snapshot, monotonic_ms()) do
+      {:error, {:jwks_refresh_failed, reason}} -> {:error, reason}
+      result -> result
+    end
+  end
+
+  defp refresh_suppressed_reply(state, _reason), do: {:ok, state.snapshot}
 
   defp unknown_kid?(token, keys) do
     case Verifier.peek_header(token) do
@@ -673,7 +666,7 @@ defmodule AttestoClient.ResourceServer do
           @default_refresh_retry_interval
         ),
       refresh_timeout: refresh_timeout,
-      req_options: req_options!(opts, refresh_timeout, max_response_bytes),
+      req_options: req_options!(opts, refresh_timeout),
       stale_ttl: non_negative_integer!(opts, :stale_ttl, @default_stale_ttl),
       unknown_kid_refresh_interval:
         non_negative_integer!(
@@ -729,7 +722,7 @@ defmodule AttestoClient.ResourceServer do
     end
   end
 
-  defp req_options!(opts, refresh_timeout, max_response_bytes) do
+  defp req_options!(opts, refresh_timeout) do
     case Keyword.get(opts, :req_options, []) do
       req_options when is_list(req_options) ->
         phase_timeout = max(div(max(refresh_timeout - 1_000, 1), 4), 1)
@@ -740,7 +733,6 @@ defmodule AttestoClient.ResourceServer do
         |> Keyword.put(:receive_timeout, phase_timeout)
         |> Keyword.put(:connect_options, connect_options)
         |> Keyword.put(:compressed, false)
-        |> Keyword.put(:into, bounded_response_into(max_response_bytes))
 
       _invalid ->
         raise ArgumentError, "ResourceServer :req_options must be a keyword list"
@@ -774,52 +766,38 @@ defmodule AttestoClient.ResourceServer do
     end
   end
 
-  defp now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = value -> DateTime.to_unix(value)
-      value when is_integer(value) -> value
-      _other -> System.system_time(:second)
-    end
-  end
+  defp now(opts), do: NumericDate.now(opts, default: :system, invalid_override: :fallback)
 
   defp record_refresh_failure(%{snapshot: nil} = state, _reason), do: state
 
   defp record_refresh_failure(state, reason) do
     now = monotonic_ms()
 
-    if transient_refresh_error?(reason) and now < state.snapshot.stale_until do
-      snapshot =
-        Map.put(state.snapshot, :retry_after, now + state.refresh_retry_interval)
+    snapshot =
+      state.snapshot
+      |> Map.put(:refresh_error, reason)
+      |> Map.put(:retry_after, now + state.refresh_retry_interval)
 
-      %{state | snapshot: snapshot}
-    else
-      state
-    end
+    %{state | snapshot: snapshot}
   end
 
-  defp stale_retry_active?(%{retry_after: retry_after, stale_until: stale_until}, now)
-       when is_integer(retry_after),
-       do: now < retry_after and now < stale_until
-
-  defp stale_retry_active?(_snapshot, _now), do: false
-
-  defp bounded_response_into(max_bytes) do
-    fn {:data, data}, {request, response} ->
-      body = if is_binary(response.body), do: response.body, else: ""
-
-      if byte_size(body) + byte_size(data) > max_bytes do
-        response = %{
-          response
-          | body: "",
-            private: Map.put(response.private, :attesto_client_response_too_large, true)
-        }
-
-        {:halt, {request, response}}
-      else
-        {:cont, {request, %{response | body: body <> data}}}
-      end
-    end
+  defp refresh_retry_active?(%{retry_after: retry_after} = snapshot, now)
+       when is_integer(retry_after) do
+    now < retry_after and
+      (Map.has_key?(snapshot, :refresh_error) or now < snapshot.stale_until)
   end
+
+  defp refresh_retry_active?(_snapshot, _now), do: false
+
+  defp refresh_retry_result(%{refresh_error: reason} = snapshot, now) do
+    if transient_refresh_error?(reason) and now < snapshot.stale_until,
+      do: {:ok, snapshot},
+      else: {:error, {:jwks_refresh_failed, reason}}
+  end
+
+  # A process retained across a hot upgrade can still hold an older snapshot.
+  # Earlier retry markers were written only for transient failures.
+  defp refresh_retry_result(snapshot, _now), do: {:ok, snapshot}
 
   defp call_exit_reason({:noproc, _call}), do: :server_not_running
   defp call_exit_reason({:timeout, _call}), do: :refresh_timeout

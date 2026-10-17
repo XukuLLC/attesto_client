@@ -121,10 +121,9 @@ defmodule AttestoClient.Wallet.CredentialOffer do
   defp non_empty(_value), do: nil
 
   defp parse_json(value) do
-    case JSON.decode(value) do
-      {:ok, %{} = offer} -> from_map(offer)
-      {:ok, _other} -> {:error, :invalid_credential_offer}
-      {:error, _reason} -> {:error, :invalid_json}
+    case AttestoClient.StrictJSON.decode_object(value) do
+      {:ok, offer} -> from_map(offer)
+      {:error, :invalid_json} = error -> error
     end
   end
 
@@ -278,12 +277,8 @@ defmodule AttestoClient.Wallet.CredentialOffer do
     end
   end
 
-  defp required_string(map, key, error) do
-    case MapParams.fetch(map, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _invalid -> {:error, error}
-    end
-  end
+  defp required_string(map, key, error),
+    do: AttestoClient.InputValidation.required_string(map, key, error)
 
   defp optional_string(map, key, error) do
     case MapParams.fetch(map, key) do

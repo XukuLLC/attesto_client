@@ -82,10 +82,10 @@ defmodule AttestoClient.KeyAttestation do
          {:ok, alg} <- Builder.resolve_alg(provider_jwk, opts) do
       claims =
         %{"iat" => now, "exp" => now + lifetime, "attested_keys" => attested_keys}
-        |> put_optional("key_storage", key_storage)
-        |> put_optional("user_authentication", user_authentication)
-        |> put_optional("certification", certification)
-        |> put_optional("nonce", nonce)
+        |> Attesto.MapParams.put_optional("key_storage", key_storage)
+        |> Attesto.MapParams.put_optional("user_authentication", user_authentication)
+        |> Attesto.MapParams.put_optional("certification", certification)
+        |> Attesto.MapParams.put_optional("nonce", nonce)
 
       header =
         %{"alg" => alg, "typ" => @typ}
@@ -117,16 +117,11 @@ defmodule AttestoClient.KeyAttestation do
   defp attested_public_key(key) do
     case Builder.normalize_key(key) do
       {:ok, jwk} ->
-        {_type, public} = JOSE.JWK.to_public_map(jwk)
-        {:ok, public}
+        Builder.public_jwk_result(jwk, :invalid_attested_keys)
 
       {:error, _reason} ->
         {:error, :invalid_attested_keys}
     end
-  rescue
-    _error -> {:error, :invalid_attested_keys}
-  catch
-    _kind, _reason -> {:error, :invalid_attested_keys}
   end
 
   defp optional_string_list(opts, key, error) do
@@ -161,21 +156,8 @@ defmodule AttestoClient.KeyAttestation do
   defp validate_optional_url(nil, _error), do: {:ok, nil}
 
   defp validate_optional_url(value, error) do
-    case URI.new(value) do
-      {:ok, uri} ->
-        validate_certification_uri(uri, value, error)
-
-      _invalid ->
-        {:error, error}
-    end
+    if Attesto.URI.https_identifier?(value, allow_http: true),
+      do: {:ok, value},
+      else: {:error, error}
   end
-
-  defp validate_certification_uri(%URI{scheme: scheme, host: host}, value, _error)
-       when scheme in ["http", "https"] and is_binary(host) and host != "",
-       do: {:ok, value}
-
-  defp validate_certification_uri(_uri, _value, error), do: {:error, error}
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 end

@@ -29,12 +29,8 @@ defmodule AttestoClient.Builder do
   # A non-empty string option, or `{:error, error}` — a security artifact builder
   # rejects bad input rather than signing it.
   @spec require_string(keyword(), atom(), term()) :: {:ok, String.t()} | {:error, term()}
-  def require_string(opts, key, error) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, error}
-    end
-  end
+  def require_string(opts, key, error),
+    do: AttestoClient.InputValidation.required_string(opts, key, error)
 
   # A positive `:lifetime` option (default `default`), optionally capped at `max`
   # (`:infinity` for no cap); anything else is `{:error, :invalid_lifetime}`.
@@ -154,6 +150,16 @@ defmodule AttestoClient.Builder do
     map
   end
 
+  @doc false
+  @spec public_jwk_result(JOSE.JWK.t(), atom()) :: {:ok, map()} | {:error, atom()}
+  def public_jwk_result(jose_jwk, error \\ :invalid_key) when is_atom(error) do
+    {:ok, public_jwk(jose_jwk)}
+  rescue
+    _error -> {:error, error}
+  catch
+    _kind, _reason -> {:error, error}
+  end
+
   # Validate an optional `x5c` chain before adding it to a protected header.
   # Each entry is serialized as a JSON string; rejecting empty and mixed lists
   # avoids silently dropping a caller typo or emitting a malformed JOSE header.
@@ -185,18 +191,15 @@ defmodule AttestoClient.Builder do
   @spec sign(JOSE.JWK.t(), map(), map()) ::
           {:ok, String.t()} | {:error, {:signing_failed, String.t()}}
   def sign(jose_jwk, header, claims) do
-    compact =
-      if header["alg"] in ~w(PS256 PS384 PS512) do
-        Attesto.JWS.sign_compact_jwk(jose_jwk, Map.put_new(header, "typ", "JWT"), claims)
-      else
-        {_protected, signed} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-        signed
-      end
+    protected =
+      if header["alg"] in ~w(PS256 PS384 PS512),
+        do: Map.put_new(header, "typ", "JWT"),
+        else: header
 
-    {:ok, compact}
+    {:ok, Attesto.JWS.sign_compact_jwk(jose_jwk, protected, claims)}
   rescue
     _error -> {:error, {:signing_failed, @signing_failure_message}}
   end
 
-  defp random_jti, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+  defp random_jti, do: Attesto.Secret.generate(16)
 end

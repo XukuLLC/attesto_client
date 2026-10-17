@@ -231,7 +231,7 @@ defmodule AttestoClient.AuthorizationProfileBindingTest do
   test "duplicate decoded endpoint roots reject while benign fixed query values survive" do
     metadata = options()[:metadata]
 
-    for query <- ["tenant=a&tenant=b", "tenant=a&ten%61nt=b", "tenant=x&tenant[]=y"] do
+    for query <- ["tenant=a&tenant=b", "tenant=a&ten%61nt=b"] do
       assert {:error, :invalid_endpoint_query} =
                AuthorizationCode.start(
                  store(),
@@ -245,6 +245,21 @@ defmodule AttestoClient.AuthorizationProfileBindingTest do
                  )
                )
     end
+
+    # Raw brackets are not valid URI characters. The centralized strict URI
+    # boundary rejects this before the endpoint-query policy runs.
+    assert {:error, :invalid_endpoint} =
+             AuthorizationCode.start(
+               store(),
+               options(
+                 metadata:
+                   Map.put(
+                     metadata,
+                     "authorization_endpoint",
+                     @issuer <> "/authorize?tenant=x&tenant[]=y"
+                   )
+               )
+             )
 
     assert {:ok, started} =
              AuthorizationCode.start(

@@ -5,12 +5,10 @@ defmodule AttestoClient.AuthorizationProfile do
   alias Attesto.Thumbprint
   alias AttestoClient.Builder
   alias AttestoClient.ClientAssertion
+  alias AttestoClient.ClientAuthOptions
   alias AttestoClient.DPoP
   alias AttestoClient.Wallet.Presentation.CertificateTrust
   alias AttestoClient.WalletAttestation
-
-  @assertion_options ~w(audience alg kid typ lifetime now jti)a
-  @attestation_options ~w(audience challenge alg kid lifetime now jti)a
 
   @spec select(keyword()) :: {:ok, :generic | :haip | :fapi} | {:error, atom()}
   def select(opts) do
@@ -21,6 +19,19 @@ defmodule AttestoClient.AuthorizationProfile do
       {true, true} -> {:error, :conflicting_profiles}
       {haip, _fapi} when not is_boolean(haip) -> {:error, :invalid_haip}
       _invalid -> {:error, :invalid_fapi}
+    end
+  end
+
+  @spec reconcile(term(), keyword()) ::
+          {:ok, :generic | :haip | :fapi} | {:error, atom()}
+  def reconcile(stored, opts) do
+    with {:ok, requested} <- select(opts),
+         true <- stored in [:generic, :haip, :fapi],
+         true <- stored == :generic or requested in [:generic, stored] do
+      {:ok, if(stored == :generic, do: requested, else: stored)}
+    else
+      false -> {:error, :profile_mismatch}
+      error -> error
     end
   end
 
@@ -113,7 +124,7 @@ defmodule AttestoClient.AuthorizationProfile do
     do: bind_auth({:private_key_jwt, key, []}, profile, client_id, issuer)
 
   defp bind_auth({:private_key_jwt, key, opts}, profile, client_id, issuer) do
-    with :ok <- auth_options(opts, @assertion_options),
+    with :ok <- auth_options(opts, :assertion),
          :ok <- assertion_audience(opts, issuer),
          {:ok, jwk} <- Builder.normalize_key(key),
          {:ok, alg} <- Builder.resolve_alg(jwk, opts),
@@ -128,7 +139,7 @@ defmodule AttestoClient.AuthorizationProfile do
   end
 
   defp bind_auth({:client_attestation, attestation, key, opts}, :haip, client_id, issuer) do
-    with :ok <- auth_options(opts, @attestation_options),
+    with :ok <- auth_options(opts, :attestation),
          true <- Keyword.get(opts, :audience) == issuer,
          {:ok, jwk} <- Builder.normalize_key(key),
          {:ok, alg} <- Builder.resolve_alg(jwk, opts),
@@ -150,11 +161,10 @@ defmodule AttestoClient.AuthorizationProfile do
   defp bind_auth(_auth, _profile, _client_id, _issuer),
     do: {:error, :unsupported_profile_client_auth}
 
-  defp auth_options(opts, allowed) do
-    if Keyword.keyword?(opts) and Enum.all?(Keyword.keys(opts), &(&1 in allowed)) and
-         length(opts) == length(Enum.uniq_by(opts, &elem(&1, 0))),
-       do: :ok,
-       else: {:error, :invalid_profile_client_auth}
+  defp auth_options(opts, kind) do
+    if ClientAuthOptions.valid?(opts, kind),
+      do: :ok,
+      else: {:error, :invalid_profile_client_auth}
   end
 
   defp assertion_audience(opts, issuer) do

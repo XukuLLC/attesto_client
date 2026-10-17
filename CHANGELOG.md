@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-10-17
+
+### Security
+
+- Bind every returned SD-JWT VC and JWT VC issuer claim to the Credential
+  Issuer Identifier from the accepted offer. Certificate-backed credentials
+  may still omit `iss` where the profiled credential format permits it.
+- Evict the oldest live authorization transaction when the bounded ETS store
+  reaches capacity, with telemetry for operators, so unauthenticated login
+  starts cannot leave the store refusing every new login until expiry.
+- Apply the JWKS refresh retry cooldown to hard validation and HTTP failures as
+  well as transient outages. Hard failures remain fail-closed and no longer
+  make every token verification repeat the same upstream fetch.
+- Route all client JWT verification through Attesto's strict protected-header,
+  candidate-selection, and signature-verification boundaries while preserving
+  ambiguous-key rejection and the 2048-bit RSA minimum.
+- Use Attesto's strict URI validator at every client endpoint boundary. This
+  closes weaker userinfo, fragment, malformed-percent, and hostless cases in
+  key-attestation and wallet presentation paths.
+- Reject duplicate JSON object members in discovery metadata, JWKS documents,
+  credential offers, and credential responses before protocol validation.
+
+### Changed
+
+- Require Attesto 2.6.0 or later in the 2.x line for the shared JWS candidate,
+  NumericDate, claim, URI, JWE, and secret-generation boundaries.
+- Consolidate registered-claim validation without changing each protocol's
+  established missing, malformed, expiry, and future-time error results.
+- Split OAuth client authentication and challenge parsing from the HTTP
+  transport, centralize bounded response collection and option validation,
+  and remove nested request deadlines and repeat DPoP signing probes.
+- Call `Attesto.JWE` directly internally now that every supported core version
+  provides the bounded implementation. The deprecated
+  <code>AttestoClient.CryptoJWE</code> compatibility wrapper remains available
+  throughout the 2.x line.
+- Retain the public <code>AttestoClient.OpenIDMetadata.validate/2</code>
+  validation entry point, the hidden DCQL matching/path helpers, and the
+  <code>AttestoClient.Verifier.compact_segments/0</code> remote type throughout
+  the 2.x line.
+
 ## [2.9.0] - 2026-10-17
 
 ### Security

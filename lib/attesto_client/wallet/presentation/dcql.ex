@@ -66,6 +66,7 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
     end
   end
 
+  @doc false
   def matches?(%{format: format, claims: claims} = held, %{"format" => format} = query)
       when format in @formats and is_map(claims) do
     meta_matches?(held, query) and authority_matches?(held, query) and
@@ -74,6 +75,7 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
 
   def matches?(_held, _query), do: false
 
+  @doc false
   def values_at(value, path) do
     case resolve_values(value, path) do
       {:ok, values} -> values

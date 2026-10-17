@@ -190,15 +190,21 @@ defmodule AttestoClient.Wallet do
   def request_credential(_offer, _holder_key, _opts), do: {:error, :invalid_offer}
 
   defp issuer_options(offer, opts) do
-    case Keyword.fetch(opts, :credential_issuer_metadata) do
-      :error ->
-        {:ok, opts}
+    result =
+      case Keyword.fetch(opts, :credential_issuer_metadata) do
+        :error ->
+          {:ok, opts}
 
-      {:ok, %{"credential_issuer" => issuer} = metadata} when issuer == offer.credential_issuer ->
-        metadata_endpoints(metadata, opts)
+        {:ok, %{"credential_issuer" => issuer} = metadata}
+        when issuer == offer.credential_issuer ->
+          metadata_endpoints(metadata, opts)
 
-      {:ok, _invalid} ->
-        {:error, :credential_issuer_metadata_mismatch}
+        {:ok, _invalid} ->
+          {:error, :credential_issuer_metadata_mismatch}
+      end
+
+    with {:ok, resolved} <- result do
+      {:ok, Keyword.put(resolved, :expected_credential_issuer, offer.credential_issuer)}
     end
   end
 
@@ -345,21 +351,15 @@ defmodule AttestoClient.Wallet do
     stored =
       if is_struct(tokens, TokenSet), do: Map.get(tokens, :profile, :generic), else: :generic
 
-    with {:ok, requested} <- AuthorizationProfile.select(opts),
-         true <- stored in [:generic, :haip, :fapi],
-         true <- stored == :generic or requested in [:generic, stored] do
-      profile = if stored == :generic, do: requested, else: stored
+    with {:ok, profile} <- AuthorizationProfile.reconcile(stored, opts) do
       opts = opts |> Keyword.put(:haip, profile == :haip) |> Keyword.put(:fapi?, profile == :fapi)
 
       with {:ok, jkt} <- TokenSet.dpop_thumbprint(opts),
            :ok <- AuthorizationProfile.require_dpop(profile, jkt),
            :ok <- AuthorizationProfile.dpop_policy(profile, opts),
            :ok <- require_profile_tokens(profile, tokens) do
-        {:ok, opts}
+        {:ok, Keyword.put(opts, :__verified_dpop_jkt__, jkt)}
       end
-    else
-      false -> {:error, :profile_mismatch}
-      error -> error
     end
   end
 
@@ -384,8 +384,9 @@ defmodule AttestoClient.Wallet do
   end
 
   defp check_token_binding(tokens, opts) do
-    with {:ok, jkt} <- TokenSet.dpop_thumbprint(opts),
-         {:ok, _bound} <- TokenSet.bind_dpop(tokens, jkt) do
+    jkt = Keyword.fetch!(opts, :__verified_dpop_jkt__)
+
+    with {:ok, _bound} <- TokenSet.bind_dpop(tokens, jkt) do
       cond do
         not is_binary(tokens.access_token) or tokens.access_token == "" ->
           {:error, :invalid_token_set}
@@ -453,13 +454,8 @@ defmodule AttestoClient.Wallet do
 
   defp holder_public_key(key) do
     with {:ok, jwk} <- Builder.normalize_key(key) do
-      {_type, public} = JOSE.JWK.to_public_map(jwk)
-      {:ok, public}
+      Builder.public_jwk_result(jwk)
     end
-  rescue
-    _error -> {:error, :invalid_key}
-  catch
-    _kind, _reason -> {:error, :invalid_key}
   end
 
   defp distinct_holder_keys(holder_publics) do
@@ -545,7 +541,11 @@ defmodule AttestoClient.Wallet do
 
   defp post_credential_request(configuration_id, proofs, access_token, encryption, opts) do
     with {:ok, endpoint} <-
-           required_string(opts, :credential_endpoint, :missing_credential_endpoint) do
+           AttestoClient.InputValidation.required_string(
+             opts,
+             :credential_endpoint,
+             :missing_credential_endpoint
+           ) do
       # OID4VCI 1.0 final §8.2: a Credential Request carries `proofs`, an object
       # keyed by proof type whose value is an array of proofs (the singular
       # `proof` of earlier drafts was removed). A multi-proof array is a batch
@@ -562,7 +562,11 @@ defmodule AttestoClient.Wallet do
   defp deferred_response(response, access_token, encryption, opts) do
     Deferred.resolve(response, opts, fn transaction_id, poll_opts ->
       with {:ok, endpoint} <-
-             required_string(poll_opts, :deferred_credential_endpoint, :missing_deferred_endpoint) do
+             AttestoClient.InputValidation.required_string(
+               poll_opts,
+               :deferred_credential_endpoint,
+               :missing_deferred_endpoint
+             ) do
         CredentialEncryption.post(
           endpoint,
           %{"transaction_id" => transaction_id},
@@ -756,15 +760,17 @@ defmodule AttestoClient.Wallet do
   end
 
   defp verify_format(format, credential, key, opts) when format in @sd_jwt_vc_formats do
-    with {:ok, %{claims: claims, cnf: cnf}} <-
-           Attesto.SdJwtVc.verify(credential, key, verify_opts(opts)) do
+    with {:ok, %{claims: claims, cnf: cnf, iss: issuer}} <-
+           Attesto.SdJwtVc.verify(credential, key, verify_opts(opts)),
+         :ok <- check_credential_issuer(issuer, opts) do
       {:ok, %{format: format, credential: credential, claims: claims, holder_binding: cnf}}
     end
   end
 
   defp verify_format(@jwt_vc_format, credential, key, opts) do
-    with {:ok, %{claims: claims, cnf: cnf}} <-
-           Attesto.JwtVc.verify(credential, key, verify_opts(opts)) do
+    with {:ok, %{claims: claims, cnf: cnf, iss: issuer}} <-
+           Attesto.JwtVc.verify(credential, key, verify_opts(opts)),
+         :ok <- check_credential_issuer(issuer, opts) do
       {:ok,
        %{format: @jwt_vc_format, credential: credential, claims: claims, holder_binding: cnf}}
     end
@@ -791,6 +797,14 @@ defmodule AttestoClient.Wallet do
 
   defp verify_format(_format, _credential, _key, _opts), do: {:error, :unsupported_format}
 
+  defp check_credential_issuer(nil, _opts), do: :ok
+
+  defp check_credential_issuer(issuer, opts) when is_binary(issuer) do
+    if issuer == Keyword.fetch!(opts, :expected_credential_issuer),
+      do: :ok,
+      else: {:error, :credential_issuer_mismatch}
+  end
+
   defp verify_opts(opts) do
     verify_opts = Keyword.get(opts, :verify_opts, [])
 
@@ -808,11 +822,4 @@ defmodule AttestoClient.Wallet do
 
   defp put_optional(opts, _key, nil), do: opts
   defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)
-
-  defp required_string(opts, key, error) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _invalid -> {:error, error}
-    end
-  end
 end

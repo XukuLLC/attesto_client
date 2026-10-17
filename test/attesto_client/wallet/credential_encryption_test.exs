@@ -57,7 +57,7 @@ defmodule AttestoClient.Wallet.CredentialEncryptionTest do
     parameters = request["credential_response_encryption"]
 
     {:ok, jwt} =
-      AttestoClient.CryptoJWE.encrypt(parameters["jwk"], JSON.encode!(response), %{
+      Attesto.JWE.encrypt(parameters["jwk"], JSON.encode!(response), %{
         "alg" => parameters["jwk"]["alg"],
         "enc" => parameters["enc"],
         "cty" => "json"
@@ -69,7 +69,7 @@ defmodule AttestoClient.Wallet.CredentialEncryptionTest do
   defp decrypt_request(conn, key) do
     assert Plug.Conn.get_req_header(conn, "content-type") == ["application/jwt"]
     {:ok, jwt, conn} = Plug.Conn.read_body(conn)
-    assert {:ok, json, header} = AttestoClient.CryptoJWE.decrypt(key, jwt)
+    assert {:ok, json, header} = Attesto.JWE.decrypt(key, jwt)
     assert header["kid"] == "issuer-encryption"
     assert header["alg"] == "ECDH-ES"
     {JSON.decode!(json), conn}
@@ -324,7 +324,7 @@ defmodule AttestoClient.Wallet.CredentialEncryptionTest do
         parameters = request["credential_response_encryption"]
 
         {:ok, jwt} =
-          AttestoClient.CryptoJWE.encrypt(parameters["jwk"], plaintext, %{
+          Attesto.JWE.encrypt(parameters["jwk"], plaintext, %{
             "alg" => "ECDH-ES",
             "enc" => parameters["enc"]
           })
@@ -347,7 +347,7 @@ defmodule AttestoClient.Wallet.CredentialEncryptionTest do
       public = request["credential_response_encryption"]["jwk"]
 
       {:ok, jwt} =
-        AttestoClient.CryptoJWE.encrypt(public, "{\"credentials\":[]}", %{
+        Attesto.JWE.encrypt(public, "{\"credentials\":[]}", %{
           "alg" => "ECDH-ES",
           "enc" => "A128GCM"
         })

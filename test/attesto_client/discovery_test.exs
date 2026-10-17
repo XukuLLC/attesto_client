@@ -15,6 +15,14 @@ defmodule AttestoClient.DiscoveryTest do
     end
   end
 
+  defp raw_json_plug(status, body) do
+    fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(status, body)
+    end
+  end
+
   defp fetch(issuer, plug, opts \\ []) do
     Discovery.fetch(issuer, [req_options: [plug: plug]] ++ opts)
   end
@@ -96,6 +104,11 @@ defmodule AttestoClient.DiscoveryTest do
                fetch(@issuer, json_plug(200, %{"issuer" => "https://evil.example"}))
     end
 
+    test "rejects duplicate metadata members before validation" do
+      body = ~s({"issuer":"#{@issuer}","issuer":"https://evil.example"})
+      assert {:error, :invalid_metadata} = fetch(@issuer, raw_json_plug(200, body))
+    end
+
     test "surfaces a non-200 status" do
       assert {:error, {:http_status, 404}} = fetch(@issuer, json_plug(404, %{"error" => "nope"}))
     end
@@ -149,6 +162,15 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:error, :invalid_metadata} =
                Discovery.fetch_jwks("#{@issuer}/jwks",
                  req_options: [plug: json_plug(200, %{"x" => 1})]
+               )
+    end
+
+    test "rejects duplicate JWKS members before key selection" do
+      body = ~s({"keys":[],"keys":[{"kty":"EC","crv":"P-256"}]})
+
+      assert {:error, :invalid_metadata} =
+               Discovery.fetch_jwks("#{@issuer}/jwks",
+                 req_options: [plug: raw_json_plug(200, body)]
                )
     end
 

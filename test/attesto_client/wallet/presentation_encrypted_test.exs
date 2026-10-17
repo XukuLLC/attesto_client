@@ -1,8 +1,7 @@
 defmodule AttestoClient.Wallet.PresentationEncryptedTest do
   use ExUnit.Case, async: true
   @moduletag :requires_core_jwe
-  alias Attesto.{Mdoc, SdJwt, SdJwtVc, VpToken}
-  alias AttestoClient.CryptoJWE
+  alias Attesto.{JWE, Mdoc, SdJwt, SdJwtVc, VpToken}
   alias AttestoClient.Wallet.{Presentation, PresentationRequest}
 
   @now 1_700_000_000
@@ -111,7 +110,7 @@ defmodule AttestoClient.Wallet.PresentationEncryptedTest do
     assert {:ok, %{"response" => compact} = form} = Presentation.build_response(req, vp)
     assert Map.keys(form) == ["response"]
     refute String.contains?(compact, presentation)
-    assert {:ok, bytes, header} = CryptoJWE.decrypt(recipient, compact)
+    assert {:ok, bytes, header} = JWE.decrypt(recipient, compact)
     assert header["alg"] == "ECDH-ES"
     assert header["enc"] == "A256GCM"
     assert header["kid"] == "recipient"
@@ -231,9 +230,9 @@ defmodule AttestoClient.Wallet.PresentationEncryptedTest do
     assert {:ok, %{"response" => compact}} =
              Presentation.build_response(req, %{"identity" => ["presentation"]})
 
-    assert {:ok, _, %{"enc" => "A128GCM"}} = CryptoJWE.decrypt(recipient, compact)
+    assert {:ok, _, %{"enc" => "A128GCM"}} = JWE.decrypt(recipient, compact)
     {other, _} = keypair()
-    assert {:error, :invalid_jwe} = CryptoJWE.decrypt(other, compact)
+    assert {:error, :invalid_jwe} = JWE.decrypt(other, compact)
   end
 
   test "present submits only encrypted response and returns the browser continuation" do
@@ -247,7 +246,7 @@ defmodule AttestoClient.Wallet.PresentationEncryptedTest do
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       assert %{"response" => compact} = form = URI.decode_query(body)
       assert Map.keys(form) == ["response"]
-      assert {:ok, plaintext, _header} = CryptoJWE.decrypt(recipient, compact)
+      assert {:ok, plaintext, _header} = JWE.decrypt(recipient, compact)
 
       assert %{"vp_token" => %{"identity" => [_]}, "state" => "private-state"} =
                JSON.decode!(plaintext)

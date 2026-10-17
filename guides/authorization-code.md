@@ -30,9 +30,11 @@ Its `put_new/4` and `take/2` operations must be atomic, and `take/2` must delete
 before returning.
 
 Login starts can allocate store capacity before authentication. Rate-limit the
-start endpoint per client and network/user signal, and monitor
-`:capacity_exceeded` rather than treating the configured bound as abuse
-protection by itself.
+start endpoint per client and network/user signal. At `max_entries`, the ETS
+store evicts the oldest live transaction and emits
+`[:attesto_client, :authorization_transaction, :evicted]` with
+`%{count: 1}` and `%{reason: :capacity}`. Monitor that event; the configured
+bound limits memory but does not replace admission controls.
 
 Single-flight refresh protection covers callers sharing one coordinator
 process. In a cluster, route each token-record key to one coordinator or place a

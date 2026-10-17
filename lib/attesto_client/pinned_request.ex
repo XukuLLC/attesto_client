@@ -71,7 +71,7 @@ defmodule AttestoClient.PinnedRequest do
       )
       when is_binary(url) and is_binary(host) and is_binary(authority) and
              is_list(req_options) and is_list(reserved_headers) and is_list(reserved_options) do
-    with true <- unique_keyword?(req_options),
+    with :ok <- validate_options(req_options),
          {:ok, connect_options} <- connect_options(req_options),
          :ok <- safe_destination_options(target, req_options, connect_options) do
       headers =
@@ -104,6 +104,39 @@ defmodule AttestoClient.PinnedRequest do
     |> Req.merge(options)
   end
 
+  @doc false
+  @spec validate_options(term()) :: :ok | {:error, :unsafe_transport_options}
+  def validate_options(options) when is_list(options) do
+    connect = Keyword.get(options, :connect_options, [])
+    transport = if is_list(connect), do: Keyword.get(connect, :transport_opts, []), else: nil
+
+    if unique_keyword?(options) and unique_keyword?(connect) and unique_keyword?(transport),
+      do: :ok,
+      else: {:error, :unsafe_transport_options}
+  end
+
+  def validate_options(_options), do: {:error, :unsafe_transport_options}
+
+  @doc false
+  @spec bounded_response_into(pos_integer()) :: function()
+  def bounded_response_into(max_bytes) when is_integer(max_bytes) and max_bytes > 0 do
+    fn {:data, data}, {request, response} ->
+      body = if is_binary(response.body), do: response.body, else: ""
+
+      if byte_size(body) + byte_size(data) > max_bytes do
+        response = %{
+          response
+          | body: "",
+            private: Map.put(response.private, :attesto_client_response_too_large, true)
+        }
+
+        {:halt, {request, response}}
+      else
+        {:cont, {request, %{response | body: body <> data}}}
+      end
+    end
+  end
+
   defp safe_destination_options(_target, req_options, connect_options) do
     in_process? = active?(Keyword.get(req_options, :plug))
 
@@ -128,9 +161,7 @@ defmodule AttestoClient.PinnedRequest do
   defp connect_options(req_options) do
     case Keyword.get(req_options, :connect_options, []) do
       options when is_list(options) ->
-        if unique_keyword?(options),
-          do: secure_transport_options(options),
-          else: {:error, :connect_options}
+        secure_transport_options(options)
 
       _other ->
         {:error, :connect_options}
@@ -147,16 +178,12 @@ defmodule AttestoClient.PinnedRequest do
         {:ok, options}
 
       {:ok, transport_opts} when is_list(transport_opts) ->
-        if unique_keyword?(transport_opts) do
-          transport_opts =
-            transport_opts
-            |> Keyword.drop(@protected_transport_options)
-            |> Keyword.put(:verify, :verify_peer)
+        transport_opts =
+          transport_opts
+          |> Keyword.drop(@protected_transport_options)
+          |> Keyword.put(:verify, :verify_peer)
 
-          {:ok, Keyword.put(options, :transport_opts, transport_opts)}
-        else
-          {:error, :transport_opts}
-        end
+        {:ok, Keyword.put(options, :transport_opts, transport_opts)}
 
       _other ->
         {:error, :transport_opts}

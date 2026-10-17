@@ -23,17 +23,16 @@ defmodule AttestoClient.AuthorizationCode do
   alias AttestoClient.AuthorizationProfile
   alias AttestoClient.AuthorizationTransaction
   alias AttestoClient.AuthorizationTransaction.Store
-  alias AttestoClient.Deadline
+  alias AttestoClient.HTTPPolicy
   alias AttestoClient.IDToken
   alias AttestoClient.OpenIDMetadata
   alias AttestoClient.PKCE
+  alias AttestoClient.ProtocolParams
   alias AttestoClient.TokenSet
   alias AttestoClient.Verifier
 
   @default_transaction_ttl_ms 10 * 60 * 1_000
-  @default_timeout_ms 10_000
   @max_callback_bytes 1_000_000
-  @reserved_params ~w(client_id redirect_uri response_type scope state nonce code_challenge code_challenge_method dpop_jkt request_uri request request_uri_method client_secret client_assertion client_assertion_type grant_type code code_verifier)
 
   @type store :: Store.store()
 
@@ -143,9 +142,12 @@ defmodule AttestoClient.AuthorizationCode do
           "code_challenge" => code_challenge!(transaction.code_verifier),
           "code_challenge_method" => "S256"
         })
-        |> put_optional("scope", if(scopes == [], do: nil, else: Enum.join(scopes, " ")))
-        |> put_optional("nonce", if(protocol == :oidc, do: transaction.nonce))
-        |> put_optional("dpop_jkt", dpop_jkt)
+        |> Attesto.MapParams.put_optional(
+          "scope",
+          if(scopes == [], do: nil, else: Enum.join(scopes, " "))
+        )
+        |> Attesto.MapParams.put_optional("nonce", if(protocol == :oidc, do: transaction.nonce))
+        |> Attesto.MapParams.put_optional("dpop_jkt", dpop_jkt)
 
       finish_start(store, state, transaction, params, par?, deadline, opts)
     end
@@ -202,12 +204,13 @@ defmodule AttestoClient.AuthorizationCode do
              transaction.issuer,
              opts
            ),
-         :ok <- check_dpop_binding(transaction, opts),
+         {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
+         :ok <- check_dpop_binding(transaction, dpop_jkt),
          :ok <- AuthorizationProfile.dpop_policy(transaction_profile(transaction), opts),
          :ok <- check_response_issuer(params, transaction),
          {:ok, code} <- callback_code(params),
-         {:ok, timeout_ms} <- positive_integer(opts, :timeout, @default_timeout_ms) do
-      Deadline.run(fn -> exchange_and_verify(transaction, code, opts) end, timeout_ms)
+         {:ok, _timeout_ms} <- HTTPPolicy.timeout(opts) do
+      exchange_and_verify(transaction, code, dpop_jkt, opts)
     end
   end
 
@@ -265,12 +268,7 @@ defmodule AttestoClient.AuthorizationCode do
     ArgumentError -> {:error, :invalid_callback}
   end
 
-  defp parameter_root(key) do
-    case :binary.match(key, "[") do
-      {position, _length} -> binary_part(key, 0, position)
-      :nomatch -> key
-    end
-  end
+  defp parameter_root(key), do: ProtocolParams.root(key)
 
   defp store_transaction(store, context, ttl_ms) do
     Enum.reduce_while(1..3, {:error, :state_collision}, fn _attempt, _acc ->
@@ -303,7 +301,7 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
-  defp exchange_and_verify(transaction, code, opts) do
+  defp exchange_and_verify(transaction, code, dpop_jkt, opts) do
     form = %{
       "grant_type" => "authorization_code",
       "code" => code,
@@ -321,7 +319,7 @@ defmodule AttestoClient.AuthorizationCode do
              http_opts
            ),
          {:ok, tokens} <- TokenSet.from_response(response, nil),
-         {:ok, tokens} <- bind_token_dpop(tokens, opts),
+         {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
          {:ok, tokens} <- bind_token_profile(tokens, transaction),
          {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code) do
       {:ok, %{tokens: tokens, id_token_claims: claims}}
@@ -345,10 +343,6 @@ defmodule AttestoClient.AuthorizationCode do
   defp protocol_claims(tokens, transaction, jwks, code) do
     with {:ok, id_token} <- require_id_token(tokens),
          do: verify_id_token(id_token, tokens, transaction, jwks, code)
-  end
-
-  defp bind_token_dpop(tokens, opts) do
-    with {:ok, jkt} <- dpop_thumbprint(opts), do: TokenSet.bind_dpop(tokens, jkt)
   end
 
   defp bind_token_profile(tokens, transaction) do
@@ -416,10 +410,10 @@ defmodule AttestoClient.AuthorizationCode do
     do: authorization_url(transaction, params, false, opts)
 
   defp bounded_authorization_url(transaction, params, true, remaining, opts) do
-    with {:ok, timeout} <- positive_integer(opts, :timeout, @default_timeout_ms) do
+    with {:ok, timeout} <- HTTPPolicy.timeout(opts) do
       budget = min(timeout, remaining)
       bounded_opts = Keyword.put(opts, :timeout, budget)
-      Deadline.run(fn -> authorization_url(transaction, params, true, bounded_opts) end, budget)
+      authorization_url(transaction, params, true, bounded_opts)
     end
   end
 
@@ -477,18 +471,17 @@ defmodule AttestoClient.AuthorizationCode do
 
   defp dpop_thumbprint(opts), do: TokenSet.dpop_thumbprint(opts)
 
-  defp check_dpop_binding(%AuthorizationTransaction{dpop_jkt: nil}, opts) do
-    with {:ok, _jkt} <- dpop_thumbprint(opts), do: :ok
-  end
+  defp check_dpop_binding(%AuthorizationTransaction{dpop_jkt: nil}, _presented), do: :ok
 
-  defp check_dpop_binding(transaction, opts) do
-    with {:ok, presented} when is_binary(presented) <- dpop_thumbprint(opts),
-         true <- SecureCompare.equal?(transaction.dpop_jkt, presented) do
+  defp check_dpop_binding(transaction, presented) when is_binary(presented) do
+    if SecureCompare.equal?(transaction.dpop_jkt, presented) do
       :ok
     else
-      _other -> {:error, :dpop_key_mismatch}
+      {:error, :dpop_key_mismatch}
     end
   end
+
+  defp check_dpop_binding(_transaction, _presented), do: {:error, :dpop_key_mismatch}
 
   defp protocol(opts) do
     case Keyword.get(opts, :protocol, :oidc) do
@@ -589,7 +582,7 @@ defmodule AttestoClient.AuthorizationCode do
       %{} = params ->
         valid? =
           Enum.all?(params, fn {key, value} ->
-            is_binary(key) and parameter_root(key) not in @reserved_params and
+            is_binary(key) and parameter_root(key) not in ProtocolParams.protected() and
               scalar_authorization_value?(value)
           end)
 
@@ -602,16 +595,14 @@ defmodule AttestoClient.AuthorizationCode do
 
   defp redirect_uri(opts) do
     with {:ok, value} <- required_string(opts, :redirect_uri) do
-      case URI.parse(value) do
-        %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
-        when is_binary(host) and host != "" ->
+      cond do
+        Attesto.URI.https_identifier?(value) ->
           {:ok, value}
 
-        %URI{scheme: "http", host: host, userinfo: nil, fragment: nil}
-        when is_binary(host) and host != "" ->
-          validate_http_redirect(value, host)
+        Attesto.URI.https_identifier?(value, allow_http: true) ->
+          validate_http_redirect(value, URI.parse(value).host)
 
-        _invalid ->
+        true ->
           {:error, :invalid_redirect_uri}
       end
     end
@@ -676,10 +667,7 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   defp required_string(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _invalid -> {:error, missing_error(key)}
-    end
+    AttestoClient.InputValidation.required_string(opts, key, missing_error(key))
   end
 
   defp positive_integer(opts, key, default) do
@@ -695,7 +683,6 @@ defmodule AttestoClient.AuthorizationCode do
   defp missing_error(:redirect_uri), do: :missing_redirect_uri
 
   defp invalid_error(:transaction_ttl_ms), do: :invalid_transaction_ttl_ms
-  defp invalid_error(:timeout), do: :invalid_timeout
 
   defp scalar_authorization_value?(value) when is_binary(value), do: true
   defp scalar_authorization_value?(value) when is_integer(value), do: true
@@ -717,15 +704,12 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
-  defp random_value, do: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+  defp random_value, do: Attesto.Secret.generate()
 
   defp code_challenge!(verifier) do
     {:ok, challenge} = PKCE.code_challenge(verifier)
     challenge
   end
-
-  defp put_optional(params, _key, nil), do: params
-  defp put_optional(params, key, value), do: Map.put(params, key, value)
 
   defp put_query(endpoint, params) do
     uri = URI.parse(endpoint)
@@ -749,5 +733,5 @@ defmodule AttestoClient.AuthorizationCode do
   defp validate_endpoint_query(nil), do: :ok
 
   defp validate_endpoint_query(endpoint),
-    do: AttestoClient.OAuthHTTP.validate_endpoint_query(endpoint, @reserved_params)
+    do: AttestoClient.OAuthHTTP.validate_endpoint_query(endpoint, ProtocolParams.protected())
 end

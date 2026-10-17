@@ -75,12 +75,12 @@ defmodule AttestoClient.Wallet.Proof do
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
       claims =
         %{"aud" => credential_issuer, "iat" => now}
-        |> put_optional("nonce", nonce)
-        |> put_optional("iss", client_id)
+        |> Attesto.MapParams.put_optional("nonce", nonce)
+        |> Attesto.MapParams.put_optional("iss", client_id)
 
       header =
         %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
-        |> put_optional("key_attestation", key_attestation)
+        |> Attesto.MapParams.put_optional("key_attestation", key_attestation)
         |> Builder.put_kid(kid)
 
       Builder.sign(jose_jwk, header, claims)
@@ -94,7 +94,4 @@ defmodule AttestoClient.Wallet.Proof do
       {:ok, _invalid} -> {:error, error}
     end
   end
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 end

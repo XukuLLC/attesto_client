@@ -311,6 +311,23 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     end
   end
 
+  test "a present credential issuer must match the accepted offer", context do
+    issued = issue("dc+sd-jwt", context, [context.leaf])
+
+    mismatched =
+      resign_sd_jwt(issued, context.key, %{}, fn claims ->
+        Map.put(claims, "iss", "https://other-issuer.example")
+      end)
+
+    assert {:error, :credential_issuer_mismatch} =
+             request("dc+sd-jwt", mismatched, context)
+
+    trusted = context.key |> JOSE.JWK.to_public_map() |> elem(1)
+
+    assert {:error, :credential_issuer_mismatch} =
+             request("dc+sd-jwt", mismatched, context, haip: false, trusted: trusted)
+  end
+
   test "mdoc accepts a single certificate byte string and rejects malformed or oversized envelopes",
        context do
     issued = issue("mso_mdoc", context, [context.leaf])

@@ -44,10 +44,10 @@ defmodule AttestoClient.Discovery do
   @oidc_segment "/.well-known/openid-configuration"
   @oauth_segment "/.well-known/oauth-authorization-server"
   @default_max_response_bytes 512 * 1024
-  @default_timeout_ms 10_000
 
   alias Attesto.IPAddress
   alias AttestoClient.Deadline
+  alias AttestoClient.HTTPPolicy
   alias AttestoClient.PinnedRequest
 
   @type well_known :: :openid_configuration | :oauth_authorization_server
@@ -107,6 +107,16 @@ defmodule AttestoClient.Discovery do
     end
   end
 
+  @doc false
+  @spec jwks_uri(map(), String.t()) ::
+          {:ok, String.t()} | {:error, :issuer_mismatch | :invalid_metadata}
+  def jwks_uri(%{"issuer" => issuer, "jwks_uri" => jwks_uri}, issuer)
+      when is_binary(jwks_uri) and jwks_uri != "",
+      do: {:ok, jwks_uri}
+
+  def jwks_uri(%{"issuer" => _other}, _issuer), do: {:error, :issuer_mismatch}
+  def jwks_uri(_metadata, _issuer), do: {:error, :invalid_metadata}
+
   @doc """
   Preflight an authorization-server endpoint against the URL and address
   policy. The endpoint must use HTTPS, must not contain userinfo or a fragment,
@@ -127,14 +137,9 @@ defmodule AttestoClient.Discovery do
   def validate_endpoint(endpoint, opts \\ [])
 
   def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
-    case URI.parse(endpoint) do
-      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
-      when is_binary(host) and host != "" ->
-        guard_host(endpoint, opts)
-
-      _invalid ->
-        {:error, :invalid_endpoint}
-    end
+    if Attesto.URI.https_identifier?(endpoint),
+      do: guard_host(endpoint, opts),
+      else: {:error, :invalid_endpoint}
   end
 
   def validate_endpoint(_endpoint, _opts), do: {:error, :invalid_endpoint}
@@ -142,14 +147,7 @@ defmodule AttestoClient.Discovery do
   @doc false
   @spec validate_browser_endpoint(term()) :: :ok | {:error, :invalid_endpoint}
   def validate_browser_endpoint(endpoint) when is_binary(endpoint) do
-    case URI.parse(endpoint) do
-      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
-      when is_binary(host) and host != "" ->
-        :ok
-
-      _invalid ->
-        {:error, :invalid_endpoint}
-    end
+    if Attesto.URI.https_identifier?(endpoint), do: :ok, else: {:error, :invalid_endpoint}
   end
 
   def validate_browser_endpoint(_endpoint), do: {:error, :invalid_endpoint}
@@ -167,27 +165,18 @@ defmodule AttestoClient.Discovery do
   # the parsed URI and the issuer exactly as supplied, which is what the §3.3
   # document match compares against.
   defp validate_issuer(issuer) when is_binary(issuer) do
-    case URI.parse(issuer) do
-      %URI{scheme: "https", host: host, userinfo: nil, query: nil, fragment: nil} = uri
-      when is_binary(host) and host != "" ->
-        {:ok, uri, issuer}
-
-      _other ->
-        {:error, :invalid_issuer}
+    with true <- Attesto.URI.https_identifier?(issuer),
+         %URI{query: nil} = uri <- URI.parse(issuer) do
+      {:ok, uri, issuer}
+    else
+      _other -> {:error, :invalid_issuer}
     end
   end
 
   defp validate_issuer(_other), do: {:error, :invalid_issuer}
 
   defp validate_https(url, error) when is_binary(url) do
-    case URI.parse(url) do
-      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
-      when is_binary(host) and host != "" ->
-        {:ok, url}
-
-      _other ->
-        {:error, error}
-    end
+    if Attesto.URI.https_identifier?(url), do: {:ok, url}, else: {:error, error}
   end
 
   defp validate_https(_url, error), do: {:error, error}
@@ -231,7 +220,7 @@ defmodule AttestoClient.Discovery do
   defp validate_jwks(_other), do: {:error, :invalid_metadata}
 
   defp get_json(url, opts) do
-    with {:ok, timeout_ms} <- request_timeout(opts) do
+    with {:ok, timeout_ms} <- HTTPPolicy.timeout(opts) do
       Deadline.run(fn -> perform_get_json(url, opts, timeout_ms) end, timeout_ms)
     end
   end
@@ -277,19 +266,10 @@ defmodule AttestoClient.Discovery do
     error -> {:error, {:transport, Exception.message(error)}}
   end
 
-  defp request_timeout(opts) do
-    case Keyword.get(opts, :timeout, @default_timeout_ms) do
-      timeout when is_integer(timeout) and timeout > 0 -> {:ok, timeout}
-      _invalid -> {:error, :invalid_timeout}
-    end
-  end
-
   defp request_options(opts) do
     case Keyword.get(opts, :req_options, []) do
       request_opts when is_list(request_opts) ->
-        if PinnedRequest.unique_keyword?(request_opts),
-          do: {:ok, request_opts},
-          else: {:error, :unsafe_transport_options}
+        with :ok <- PinnedRequest.validate_options(request_opts), do: {:ok, request_opts}
 
       _invalid ->
         {:error, :unsafe_transport_options}
@@ -305,33 +285,15 @@ defmodule AttestoClient.Discovery do
       retry: false,
       compressed: false,
       raw: true,
-      into: bounded_response_into(max_bytes)
+      into: PinnedRequest.bounded_response_into(max_bytes)
     )
     |> PinnedRequest.new()
   end
 
-  defp bounded_response_into(max_bytes) do
-    fn {:data, data}, {request, response} ->
-      body = if is_binary(response.body), do: response.body, else: ""
-
-      if byte_size(body) + byte_size(data) > max_bytes do
-        response = %{
-          response
-          | body: "",
-            private: Map.put(response.private, :attesto_client_response_too_large, true)
-        }
-
-        {:halt, {request, response}}
-      else
-        {:cont, {request, %{response | body: body <> data}}}
-      end
-    end
-  end
-
   defp decode_json(body) do
-    case JSON.decode(body) do
-      {:ok, %{} = decoded} -> {:ok, decoded}
-      _other -> {:error, :invalid_metadata}
+    case AttestoClient.StrictJSON.decode_object(body) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, :invalid_json} -> {:error, :invalid_metadata}
     end
   end
 
@@ -361,14 +323,9 @@ defmodule AttestoClient.Discovery do
   def screen_endpoint(url, opts \\ [])
 
   def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
-    case URI.new(url) do
-      {:ok, %URI{scheme: "https", host: host, userinfo: nil, fragment: nil} = uri}
-      when is_binary(host) and host != "" ->
-        screen_uri(uri, opts)
-
-      _other ->
-        {:error, :blocked_host}
-    end
+    if Attesto.URI.https_identifier?(url),
+      do: screen_uri(URI.parse(url), opts),
+      else: {:error, :blocked_host}
   end
 
   def screen_endpoint(_url, _opts), do: {:error, :blocked_host}
@@ -397,9 +354,9 @@ defmodule AttestoClient.Discovery do
   defp req_test_transport?(opts) do
     case Keyword.get(opts, :req_options, []) do
       req_options when is_list(req_options) ->
-        if PinnedRequest.unique_keyword?(req_options),
-          do: {:ok, Keyword.get(req_options, :plug) not in [nil, false]},
-          else: {:error, :unsafe_transport_options}
+        with :ok <- PinnedRequest.validate_options(req_options) do
+          {:ok, Keyword.get(req_options, :plug) not in [nil, false]}
+        end
 
       _invalid ->
         {:error, :unsafe_transport_options}

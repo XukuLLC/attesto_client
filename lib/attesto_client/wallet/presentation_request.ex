@@ -133,7 +133,7 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   end
 
   defp post_request(uri, opts) do
-    nonce = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+    nonce = Attesto.Secret.generate()
 
     with {:ok, jwt} <- OAuthHTTP.post_text_open(uri, %{"wallet_nonce" => nonce}, opts),
          do: {:ok, jwt, Keyword.put(opts, :wallet_nonce, nonce)}
@@ -370,17 +370,11 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   end
 
   defp valid_response_uri?(uri) do
-    parsed = URI.parse(uri)
-
-    parsed.scheme == "https" and is_binary(parsed.host) and parsed.host != "" and
-      is_nil(parsed.userinfo) and is_nil(parsed.fragment)
+    Attesto.URI.https_identifier?(uri)
   end
 
   defp required_string(claims, key, error) do
-    case Map.get(claims, key) do
-      value when is_binary(value) and value != "" and byte_size(value) <= 8192 -> {:ok, value}
-      _ -> {:error, error}
-    end
+    AttestoClient.InputValidation.required_string(claims, key, error, max_bytes: 8192)
   end
 
   defp url_safe_string(claims, key, error) do

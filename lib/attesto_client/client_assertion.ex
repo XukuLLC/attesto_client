@@ -134,22 +134,10 @@ defmodule AttestoClient.ClientAssertion do
     end
   end
 
-  # JOSE.JWT.sign/3 supplies typ=JWT when absent. The lower-level signer lets
-  # callers explicitly omit typ for peers that still require a legacy header.
+  # The lower-level signer preserves an explicitly omitted `typ` for peers
+  # that still require the legacy header form.
   defp sign_assertion(jose_jwk, header, claims) do
-    compact =
-      if header["alg"] in ~w(PS256 PS384 PS512) do
-        Attesto.JWS.sign_compact_jwk(jose_jwk, header, claims)
-      else
-        {_jws, signed} =
-          jose_jwk
-          |> JOSE.JWS.sign(JSON.encode!(claims), header)
-          |> JOSE.JWS.compact()
-
-        signed
-      end
-
-    {:ok, compact}
+    {:ok, Attesto.JWS.sign_compact_jwk(jose_jwk, header, claims)}
   rescue
     _error -> {:error, {:signing_failed, @signing_failure_message}}
   end

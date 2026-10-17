@@ -2,6 +2,7 @@ defmodule AttestoClient.ResourceServerTest do
   use ExUnit.Case, async: true
 
   alias AttestoClient.ResourceServer
+  alias AttestoClient.Test.Python
 
   @issuer "https://issuer.example"
   @audience "https://api.example"
@@ -334,7 +335,8 @@ defmodule AttestoClient.ResourceServerTest do
          accepted_algs: ["RS256"],
          req_options: [plug: issuer_plug(ctx.state)],
          fresh_ttl: 1,
-         stale_ttl: 60_000}
+         stale_ttl: 0,
+         refresh_retry_interval: 60_000}
       )
 
     token = access_token(ctx.key)
@@ -344,6 +346,13 @@ defmodule AttestoClient.ResourceServerTest do
 
     assert {:error, {:jwks_refresh_failed, :issuer_mismatch}} =
              ResourceServer.verify(server, token, now: @now)
+
+    request_count = length(requests(ctx.state))
+
+    assert {:error, {:jwks_refresh_failed, :issuer_mismatch}} =
+             ResourceServer.verify(server, token, now: @now)
+
+    assert length(requests(ctx.state)) == request_count
   end
 
   test "bounds the number of cached JWKS keys", ctx do
@@ -481,13 +490,13 @@ defmodule AttestoClient.ResourceServerTest do
 
   describe "cross-language parity" do
     test "accepts an RFC 9068 token signed by PyJWT", ctx do
-      case python_pyjwt() do
+      case Python.available("resource_server_jwt.py") do
         {:ok, python} ->
           now = System.system_time(:second)
           {_, private_jwk} = JOSE.JWK.to_map(ctx.key)
 
           assert {:ok, %{"token" => token}} =
-                   run_pyjwt(python, %{
+                   Python.run(python, "resource_server_jwt.py", %{
                      operation: "sign",
                      private_jwk: private_jwk,
                      alg: "RS256",
@@ -504,7 +513,7 @@ defmodule AttestoClient.ResourceServerTest do
     end
 
     test "PyJWT accepts an RFC 9068 token accepted by the resource server", ctx do
-      case python_pyjwt() do
+      case Python.available("resource_server_jwt.py") do
         {:ok, python} ->
           now = System.system_time(:second)
           token = sign_token(ctx.key, interop_claims(now), [])
@@ -512,7 +521,7 @@ defmodule AttestoClient.ResourceServerTest do
           assert {:ok, _claims} = ResourceServer.verify(ctx.server, token, now: now)
 
           assert {:ok, %{"claims" => claims, "header" => header}} =
-                   run_pyjwt(python, %{
+                   Python.run(python, "resource_server_jwt.py", %{
                      operation: "verify",
                      token: token,
                      public_jwk: public_jwk(ctx.key, "key-1"),
@@ -530,7 +539,7 @@ defmodule AttestoClient.ResourceServerTest do
     end
 
     test "refreshes an unknown key for a PyJWT-signed rotation token", ctx do
-      case python_pyjwt() do
+      case Python.available("resource_server_jwt.py") do
         {:ok, python} ->
           assert {:ok, _claims} =
                    ResourceServer.verify(ctx.server, access_token(ctx.key), now: @now)
@@ -542,7 +551,7 @@ defmodule AttestoClient.ResourceServerTest do
           Agent.update(ctx.state, &%{&1 | jwks: %{"keys" => [rotated_jwk]}})
 
           assert {:ok, %{"token" => token}} =
-                   run_pyjwt(python, %{
+                   Python.run(python, "resource_server_jwt.py", %{
                      operation: "sign",
                      private_jwk: private_jwk,
                      alg: "RS256",
@@ -646,56 +655,5 @@ defmodule AttestoClient.ResourceServerTest do
     encoded_header = header |> JSON.encode!() |> Base.url_encode64(padding: false)
     encoded_claims = claims |> JSON.encode!() |> Base.url_encode64(padding: false)
     encoded_header <> "." <> encoded_claims <> "."
-  end
-
-  defp python_pyjwt do
-    python = System.get_env("ATTESTO_CLIENT_PYTHON") || System.find_executable("python3")
-
-    cond do
-      is_nil(python) -> {:skip, "python3 not found"}
-      not File.exists?(resource_server_python_script()) -> {:skip, "parity helper not found"}
-      true -> ensure_pyjwt(python)
-    end
-  end
-
-  defp ensure_pyjwt(python) do
-    case System.cmd(python, ["-c", "import jwt"], stderr_to_stdout: true) do
-      {_output, 0} -> {:ok, python}
-      {output, _status} -> {:skip, "PyJWT unavailable: #{String.trim(output)}"}
-    end
-  end
-
-  defp run_pyjwt(python, payload) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "attesto_client_resource_server_#{System.unique_integer([:positive])}.json"
-      )
-
-    File.write!(path, JSON.encode!(payload))
-
-    try do
-      case System.cmd(python, [resource_server_python_script(), path], stderr_to_stdout: true) do
-        {output, 0} -> {:ok, output |> last_json_line!() |> JSON.decode!()}
-        {output, _status} -> {:error, String.trim(output)}
-      end
-    after
-      File.rm(path)
-    end
-  end
-
-  defp resource_server_python_script do
-    Path.expand("../../test_support/python/resource_server_jwt.py", __DIR__)
-  end
-
-  defp last_json_line!(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reverse()
-    |> Enum.find(&String.starts_with?(&1, "{"))
-    |> case do
-      nil -> raise "python parity helper emitted no JSON: #{output}"
-      line -> line
-    end
   end
 end

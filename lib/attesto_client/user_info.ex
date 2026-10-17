@@ -9,7 +9,7 @@ defmodule AttestoClient.UserInfo do
   """
 
   alias Attesto.SigningAlg
-  alias AttestoClient.Verifier
+  alias AttestoClient.{ClaimValidation, Verifier}
 
   @clock_skew_seconds 60
 
@@ -67,11 +67,25 @@ defmodule AttestoClient.UserInfo do
          {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, issuer),
-         :ok <- check_audience(claims, client_id),
+         :ok <- ClaimValidation.audience(claims, client_id, :invalid_audience),
          :ok <- check_subject(claims, Keyword.get(opts, :id_token_sub)),
-         :ok <- check_expiry(claims, now),
-         :ok <- check_issued_at(claims, now),
-         :ok <- check_not_before(claims, now) do
+         :ok <-
+           ClaimValidation.expiration(claims, now,
+             invalid_error: :expired,
+             expired_error: :expired
+           ),
+         :ok <-
+           ClaimValidation.issued_at(claims, now,
+             invalid_error: :invalid_iat,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ),
+         :ok <-
+           ClaimValidation.not_before(claims, now,
+             invalid_error: :invalid_nbf,
+             future_error: :not_yet_valid,
+             skew: @clock_skew_seconds
+           ) do
       {:ok, claims}
     end
   end
@@ -91,18 +105,6 @@ defmodule AttestoClient.UserInfo do
 
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  defp check_audience(%{"aud" => aud}, client_id) when is_binary(aud) do
-    if aud == client_id, do: :ok, else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(%{"aud" => auds}, client_id) when is_list(auds) do
-    if Enum.all?(auds, &is_binary/1) and client_id in auds,
-      do: :ok,
-      else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _client_id), do: {:error, :invalid_audience}
-
   defp check_subject(%{"sub" => sub}, nil) when is_binary(sub) and sub != "", do: :ok
 
   defp check_subject(%{"sub" => sub}, expected) when is_binary(sub) and is_binary(expected) do
@@ -110,25 +112,4 @@ defmodule AttestoClient.UserInfo do
   end
 
   defp check_subject(_claims, _expected), do: {:error, :invalid_claims}
-
-  defp check_expiry(%{"exp" => exp}, now) when is_integer(exp) do
-    if exp > now, do: :ok, else: {:error, :expired}
-  end
-
-  defp check_expiry(%{"exp" => _bad}, _now), do: {:error, :expired}
-  defp check_expiry(_claims, _now), do: :ok
-
-  defp check_issued_at(%{"iat" => iat}, now) when is_integer(iat) and iat >= 0 do
-    if iat <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_issued_at(%{"iat" => _bad}, _now), do: {:error, :invalid_iat}
-  defp check_issued_at(_claims, _now), do: :ok
-
-  defp check_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) and nbf >= 0 do
-    if nbf <= now + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
-  end
-
-  defp check_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_nbf}
-  defp check_not_before(_claims, _now), do: :ok
 end

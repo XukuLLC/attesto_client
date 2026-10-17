@@ -2,6 +2,7 @@ defmodule AttestoClient.ClientAssertionTest do
   use ExUnit.Case, async: true
 
   alias AttestoClient.ClientAssertion
+  alias AttestoClient.Test.Python
 
   @client_id "attesto-fapi-dpop-client"
   @audience "https://op.example.com"
@@ -231,7 +232,7 @@ defmodule AttestoClient.ClientAssertionTest do
     end
 
     test "an independent PyJWT verifier accepts the assertion (external parity, Leg A)" do
-      case python_pyjwt() do
+      case Python.available("verify_client_assertion.py") do
         {:ok, python} ->
           key = es256_key()
 
@@ -239,13 +240,13 @@ defmodule AttestoClient.ClientAssertionTest do
             ClientAssertion.build(key, client_id: @client_id, audience: @audience)
 
           result =
-            verify_with_pyjwt(python, %{
+            Python.run(python, "verify_client_assertion.py", %{
               assertion: assertion,
               public_jwk: public_jwk(key, %{"alg" => "ES256"}),
               audience: @audience
             })
 
-          assert {:ok, c} = result
+          assert {:ok, %{"claims" => c}} = result
           assert c["iss"] == @client_id
           assert c["sub"] == @client_id
           assert c["aud"] == @audience
@@ -262,55 +263,5 @@ defmodule AttestoClient.ClientAssertionTest do
     # A private JWK map carrying a `kid`, to exercise the kid default path.
     {_, map} = es256_key() |> JOSE.JWK.to_map()
     Map.put(map, "kid", "key-1")
-  end
-
-  # Mirror req_dpop's external-reference harness: shell to python3, require the
-  # reference library, and skip gracefully when either is absent.
-  defp python_pyjwt do
-    python = System.get_env("ATTESTO_CLIENT_PYTHON") || System.find_executable("python3")
-
-    cond do
-      is_nil(python) -> {:skip, "python3 not found"}
-      not File.exists?(verifier_script()) -> {:skip, "verifier helper not found"}
-      true -> ensure_pyjwt(python)
-    end
-  end
-
-  defp ensure_pyjwt(python) do
-    case System.cmd(python, ["-c", "import jwt"], stderr_to_stdout: true) do
-      {_out, 0} -> {:ok, python}
-      {out, _} -> {:skip, "PyJWT unavailable: #{String.trim(out)}"}
-    end
-  end
-
-  defp verify_with_pyjwt(python, payload) do
-    path =
-      Path.join(System.tmp_dir!(), "attesto_client_#{System.unique_integer([:positive])}.json")
-
-    File.write!(path, JSON.encode!(payload))
-
-    try do
-      case System.cmd(python, [verifier_script(), path], stderr_to_stdout: true) do
-        {out, 0} -> {:ok, out |> last_json_line!() |> JSON.decode!() |> Map.fetch!("claims")}
-        {out, _} -> {:error, String.trim(out)}
-      end
-    after
-      File.rm(path)
-    end
-  end
-
-  defp verifier_script do
-    Path.expand("../../test_support/python/verify_client_assertion.py", __DIR__)
-  end
-
-  defp last_json_line!(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reverse()
-    |> Enum.find(&String.starts_with?(&1, "{"))
-    |> case do
-      nil -> raise "python verifier emitted no JSON: #{output}"
-      line -> line
-    end
   end
 end

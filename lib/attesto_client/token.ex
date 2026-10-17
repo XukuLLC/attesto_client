@@ -15,6 +15,7 @@ defmodule AttestoClient.Token do
   alias Attesto.SecureCompare
   alias Attesto.SigningAlg
   alias AttestoClient.AuthorizationProfile
+  alias AttestoClient.HTTPPolicy
   alias AttestoClient.IDToken
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.RefreshCoordinator
@@ -22,7 +23,6 @@ defmodule AttestoClient.Token do
   alias AttestoClient.TokenSet
   alias AttestoClient.Verifier
 
-  @default_timeout_ms 10_000
   @pre_authorized_code_grant_type "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
   @doc """
@@ -107,7 +107,7 @@ defmodule AttestoClient.Token do
           {:ok, RefreshResult.t()} | {:error, term()}
   def refresh(coordinator, key, %TokenSet{refresh_token: refresh_token} = tokens, opts)
       when is_binary(refresh_token) and refresh_token != "" and is_list(opts) do
-    with {:ok, timeout_ms} <- timeout(opts),
+    with {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          {:ok, _endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
@@ -213,13 +213,8 @@ defmodule AttestoClient.Token do
   defp refresh_profile(tokens, opts) do
     stored = Map.get(tokens, :profile, :generic)
 
-    with {:ok, selected} <- AuthorizationProfile.select(opts),
-         true <- stored in [:generic, :haip, :fapi],
-         true <- stored == :generic or selected in [:generic, stored] do
-      retained_profile(stored, selected, tokens, opts)
-    else
-      false -> {:error, :profile_mismatch}
-      error -> error
+    with {:ok, profile} <- AuthorizationProfile.reconcile(stored, opts) do
+      retained_profile(stored, profile, tokens, opts)
     end
   end
 
@@ -338,13 +333,6 @@ defmodule AttestoClient.Token do
 
   defp check_refresh_id_token_alg(error, _expected), do: error
 
-  defp timeout(opts) do
-    case Keyword.get(opts, :timeout, @default_timeout_ms) do
-      timeout when is_integer(timeout) and timeout > 0 -> {:ok, timeout}
-      _invalid -> {:error, :invalid_timeout}
-    end
-  end
-
   defp token_type_hint(opts) do
     case Keyword.get(opts, :token_type_hint) do
       nil -> {:ok, nil}
@@ -354,10 +342,7 @@ defmodule AttestoClient.Token do
   end
 
   defp required_string(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _invalid -> {:error, missing_error(key)}
-    end
+    AttestoClient.InputValidation.required_string(opts, key, missing_error(key))
   end
 
   defp missing_error(:token_endpoint), do: :missing_token_endpoint

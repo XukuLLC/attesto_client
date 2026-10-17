@@ -61,10 +61,7 @@ defmodule AttestoClient.Logout do
   defp end_session_endpoint(_metadata), do: {:error, :missing_end_session_endpoint}
 
   defp required_string(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _invalid -> {:error, missing_error(key)}
-    end
+    AttestoClient.InputValidation.required_string(opts, key, missing_error(key))
   end
 
   defp missing_error(:issuer), do: :missing_issuer

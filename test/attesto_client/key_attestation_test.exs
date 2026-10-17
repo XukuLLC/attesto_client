@@ -68,7 +68,15 @@ defmodule AttestoClient.KeyAttestationTest do
                  KeyAttestation.build(provider, base ++ [user_authentication: value])
       end
 
-      for value <- ["", "relative", "https:///certificate", 42] do
+      for value <- [
+            "",
+            "relative",
+            "https:///certificate",
+            "https://user@certs.example/wallet",
+            "https://certs.example/wallet#fragment",
+            "https://certs.example/%ZZ",
+            42
+          ] do
         assert {:error, :invalid_certification} =
                  KeyAttestation.build(provider, base ++ [certification: value])
       end

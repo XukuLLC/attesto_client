@@ -953,5 +953,43 @@ defmodule AttestoClient.WalletTest do
       assert held.format == "jwt_vc_json"
       assert held.claims == %{}
     end
+
+    test "rejects a JWT VC issued under a different issuer identifier" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+
+      trusted =
+        Map.merge(issuer_jwk, %{
+          "kid" => Attesto.Key.kid(issuer_pem),
+          "alg" => "ES256",
+          "use" => "sig"
+        })
+
+      key = holder_key()
+
+      plug = fn conn ->
+        {request, conn} = read_json_body!(conn)
+        proof_jwt = hd(request["proofs"]["jwt"])
+
+        {:ok, %{jwk: holder_jwk}} =
+          Attesto.CredentialProof.verify_jwt(proof_jwt, issuer: @issuer)
+
+        credential =
+          Attesto.JwtVc.issue(
+            [pem: issuer_pem, iss: "https://other-issuer.example", sub: "subject-1"],
+            cnf: %{"jwk" => holder_jwk}
+          )
+
+        json(conn, 200, Attesto.CredentialResponse.build(credential))
+      end
+
+      assert {:error, :credential_issuer_mismatch} =
+               Wallet.request_credential(offer(), key,
+                 access_token: "already-have-one",
+                 credential_endpoint: "#{@issuer}/credential",
+                 format: "jwt_vc_json",
+                 trusted: trusted,
+                 req_options: [plug: plug]
+               )
+    end
   end
 end

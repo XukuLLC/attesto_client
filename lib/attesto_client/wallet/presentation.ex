@@ -111,11 +111,13 @@ defmodule AttestoClient.Wallet.Presentation do
 
   defp response_form(request, vp_token, nil) do
     with {:ok, encoded} <- encode_response(vp_token, byte_size(request.state || "")),
-         do: {:ok, %{"vp_token" => encoded} |> put_optional("state", request.state)}
+         do:
+           {:ok,
+            %{"vp_token" => encoded} |> Attesto.MapParams.put_optional("state", request.state)}
   end
 
   defp response_form(request, vp_token, encryption) do
-    payload = %{"vp_token" => vp_token} |> put_optional("state", request.state)
+    payload = %{"vp_token" => vp_token} |> Attesto.MapParams.put_optional("state", request.state)
 
     with {:ok, encoded} <- encode_response(payload),
          {:ok, compact} <- Encryption.encrypt(encryption, encoded),
@@ -211,11 +213,7 @@ defmodule AttestoClient.Wallet.Presentation do
   end
 
   defp holder_public_jwk(jwk) do
-    {:ok, Builder.public_jwk(jwk)}
-  rescue
-    _error -> {:error, :invalid_key}
-  catch
-    _kind, _reason -> {:error, :invalid_key}
+    Builder.public_jwk_result(jwk)
   end
 
   defp binding_key(%{holder_binding: %{"jwk" => key}}) when is_map(key), do: {:ok, key}
@@ -252,7 +250,4 @@ defmodule AttestoClient.Wallet.Presentation do
 
   defp build_credential(_held, _request, _key, _paths, _encryption, _opts),
     do: {:error, :unsupported_format}
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 end

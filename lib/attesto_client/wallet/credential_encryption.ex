@@ -184,7 +184,7 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
     header = encryption_header(request.public, request.enc)
 
     with {:ok, compact} <-
-           AttestoClient.CryptoJWE.encrypt(request.public, JSON.encode!(body), header) do
+           Attesto.JWE.encrypt(request.public, JSON.encode!(body), header) do
       {:ok, {:jwt, compact}}
     end
   end
@@ -216,7 +216,7 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
        when is_binary(body) and not is_nil(context) do
     with true <- media_type(response.headers) == "application/jwt",
          {:ok, plaintext, header} <-
-           AttestoClient.CryptoJWE.decrypt(context.private, body,
+           Attesto.JWE.decrypt(context.private, body,
              accepted_algs: ["ECDH-ES"],
              accepted_encs: [context.enc],
              max_compact_bytes: @max_bytes,

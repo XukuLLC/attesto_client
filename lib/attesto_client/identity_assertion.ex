@@ -93,7 +93,7 @@ defmodule AttestoClient.IdentityAssertion do
           "iat" => now,
           "exp" => now + lifetime
         }
-        |> put_optional("nbf", nbf)
+        |> Attesto.MapParams.put_optional("nbf", nbf)
 
       header = Builder.put_kid(%{"alg" => alg, "typ" => @typ}, kid)
       Builder.sign(jose_jwk, header, Map.merge(claims, registered))
@@ -172,7 +172,4 @@ defmodule AttestoClient.IdentityAssertion do
       {:ok, _invalid} -> {:error, :invalid_time}
     end
   end
-
-  defp put_optional(claims, _key, nil), do: claims
-  defp put_optional(claims, key, value), do: Map.put(claims, key, value)
 end

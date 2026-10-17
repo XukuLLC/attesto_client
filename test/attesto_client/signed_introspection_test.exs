@@ -2,6 +2,7 @@ defmodule AttestoClient.SignedIntrospectionTest do
   use ExUnit.Case, async: true
 
   alias AttestoClient.SignedIntrospection
+  alias AttestoClient.Test.JWT
 
   @issuer "https://op.example.com"
   @audience "rs-1"
@@ -46,8 +47,7 @@ defmodule AttestoClient.SignedIntrospectionTest do
       %{"alg" => "RS256", "kid" => Attesto.Key.kid(pem), "typ" => "token-introspection+jwt"}
       |> Map.merge(header_overrides)
 
-    {_, jwt} = jwk |> JOSE.JWS.sign(JSON.encode!(claims), header) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(jwk, claims, header)
   end
 
   defp claims(overrides \\ %{}) do
