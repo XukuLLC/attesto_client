@@ -10,12 +10,12 @@ that assurance comes from your wallet provider and key-attestation issuer.
 For the encrypted examples, use these dependencies:
 
 ```elixir
-{:attesto, "~> 2.3"},
-{:attesto_client, "~> 2.8"}
+{:attesto, "~> 2.5"},
+{:attesto_client, "~> 2.9"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
-Existing plaintext wallet operations retain support for older core releases.
+AttestoClient 2.9 uses the shared security boundaries introduced in Attesto 2.5.
 The [wallet Livebook](digital_wallet.livemd) starts with a complete local
 SD-JWT VC selective-disclosure example and then encrypts its response.
 
@@ -325,7 +325,7 @@ credentials include the verified `issuer_certificate_chain` and
 `authority_key_identifiers`; failed signature or holder-binding checks never
 produce a held credential. Add `certificate_trust:` for further issuer policy.
 Certificate-identified SD-JWT credentials may omit `iss`; accepting those
-requires Attesto 2.3.1 or later. A present malformed issuer still fails.
+requires Attesto 2.5.0 or later. A present malformed issuer still fails.
 
 Credential status remains application-owned. Before storing or presenting a
 credential, apply your revocation and freshness policy. For a Token Status
@@ -388,9 +388,9 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 ## Development and verification
 
 When developing both libraries in sibling source checkouts, use
-`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.8.0
-requires Attesto 2.3.1 or later, including for unencrypted wallet operations,
-so installations receive the strict PSS and OID4VP verification fixes.
+`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.9.0
+requires Attesto 2.5.0 or later, including for unencrypted wallet operations,
+so installations use the shared JWS, DPoP, URI, and outbound-address policy.
 
 Run conformance against one frozen source or released dependency set. Record
 the implementation versions and suite revision, and finish one complete plan

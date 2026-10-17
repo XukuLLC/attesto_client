@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-10-17
+
+### Security
+
+- Defer DPoP replay-cache claims in the resource-server Plug until after the
+  access-token signature and `cnf.jkt` binding verify. An unauthenticated proof
+  can no longer reserve replay identifiers or grow the replay store before its
+  token establishes the caller's identity.
+- Route local JWT verification through Attesto's shared strict verifier so
+  client-side verification applies the same canonical parsing, candidate
+  filtering, malformed-result handling, and exact RSA-PSS salt and MGF1 checks
+  as core protocol verifiers.
+- Build DPoP proofs through `Attesto.DPoP.Proof`, which requires HTTPS targets,
+  rejects userinfo and malformed percent escapes, and preserves key-declared
+  algorithms and identifiers. Resource metadata challenge URLs now use the
+  same strict URI policy.
+- Use Attesto's IANA-registry-based public destination policy for discovery and
+  JWKS fetches. Non-global and special-use destinations remain blocked across
+  IPv4, IPv6, mapped, compatible, NAT64, and 6to4 forms, while the registries'
+  applicable globally reachable exceptions remain available. ORCHIDv2 and
+  Drone Remote ID non-locator identifiers remain blocked from fetches.
+
+### Changed
+
+- Require Attesto 2.5.0 or later in the 2.x line. `AttestoClient.DPoP` now
+  delegates proof building and algorithm resolution to the core implementation,
+  and discovery delegates destination classification to
+  `Attesto.IPAddress.public_fetch_destination?/1`.
+
 ## [2.8.0] - 2026-10-15
 
 ### Security

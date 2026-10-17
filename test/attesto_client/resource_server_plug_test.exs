@@ -134,6 +134,29 @@ defmodule AttestoClient.ResourceServerPlugTest do
     assert challenge =~ ~s(Bearer error="invalid_token")
   end
 
+  test "omits unsafe protected-resource metadata from challenges", ctx do
+    for url <- [
+          "https://user:password@api.example/.well-known/oauth-protected-resource",
+          "https://api.example/.well-known/oauth-protected-resource#fragment",
+          "https://api.example/%zz"
+        ] do
+      conn =
+        :get
+        |> conn("/")
+        |> ResourceServerPlug.call(
+          ResourceServerPlug.init(
+            server: ctx.server,
+            now: @now,
+            resource_metadata: url
+          )
+        )
+
+      assert conn.halted
+      assert conn.status == 401
+      assert get_resp_header(conn, "www-authenticate") == ["Bearer"]
+    end
+  end
+
   test "verifies DPoP proof, replay callback, and token binding", ctx do
     proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
     jkt = Attesto.DPoP.compute_jkt(proof_key)
@@ -173,6 +196,34 @@ defmodule AttestoClient.ResourceServerPlugTest do
     assert_receive {:replay_check, ^expected_replay_key, ttl}
     refute expected_replay_key == "proof-123"
     assert ttl > 0
+  end
+
+  test "does not claim a DPoP replay identity before the access token verifies", ctx do
+    proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
+    invalid_token = "not-a-valid-access-token"
+    proof = dpop_proof(proof_key, invalid_token, "https://api.example/documents")
+    parent = self()
+
+    conn =
+      :get
+      |> conn("/documents")
+      |> external_https_conn()
+      |> put_req_header("authorization", "DPoP #{invalid_token}")
+      |> put_req_header("dpop", proof)
+      |> ResourceServerPlug.call(
+        ResourceServerPlug.init(
+          server: ctx.server,
+          replay_check: fn replay_key, ttl ->
+            send(parent, {:unexpected_replay_claim, replay_key, ttl})
+            :ok
+          end,
+          now: @now
+        )
+      )
+
+    assert conn.halted
+    assert conn.status == 401
+    refute_receive {:unexpected_replay_claim, _replay_key, _ttl}
   end
 
   test "canonicalizes an IPv6 request authority when verifying DPoP htu", ctx do

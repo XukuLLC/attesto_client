@@ -88,7 +88,8 @@ if Code.ensure_loaded?(Plug.Conn) do
     @impl Elixir.Plug
     def call(conn, opts) do
       with {:ok, scheme, token} <- authorization(conn),
-           {:ok, dpop_jkt} <- verify_dpop(conn, scheme, token, opts),
+           {:ok, dpop_jkt, dpop_replay_key, dpop_jti, replay_ttl} <-
+             verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumbprint} <- certificate_thumbprint(conn, opts),
            {:ok, claims} <-
              ResourceServer.verify(resolve_server(opts), token,
@@ -100,7 +101,8 @@ if Code.ensure_loaded?(Plug.Conn) do
                dpop_jkt: dpop_jkt,
                mtls_cert_thumbprint: mtls_thumbprint,
                now: Keyword.get(opts, :now)
-             ) do
+             ),
+           :ok <- claim_dpop_jti(dpop_replay_key, dpop_jti, replay_ttl, opts) do
         assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
       else
         :missing ->
@@ -181,7 +183,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp verify_dpop(conn, :bearer, _token, _opts) do
       case get_req_header(conn, "dpop") do
-        [] -> {:ok, nil}
+        [] -> {:ok, nil, nil, nil, nil}
         _present -> {:dpop_error, :dpop_scheme_required}
       end
     end
@@ -207,14 +209,38 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp verify_dpop_signature(conn, proof, token, http_uri, opts) do
       verify_opts =
         [http_method: conn.method, http_uri: http_uri, access_token: token]
-        |> put_if_present(:replay_check, Keyword.get(opts, :replay_check))
         |> put_if_present(:nonce_check, Keyword.get(opts, :nonce_check))
         |> put_if_present(:now, Keyword.get(opts, :now))
         |> put_if_present(:max_age_seconds, Keyword.get(opts, :dpop_max_age_seconds))
 
       case DPoP.verify_proof(proof, verify_opts) do
-        {:ok, %{jkt: jkt}} -> {:ok, jkt}
-        {:error, reason} -> {:dpop_error, reason}
+        {:ok, %{jkt: jkt, replay_key: replay_key, jti: jti, replay_ttl: ttl}} ->
+          {:ok, jkt, replay_key, jti, ttl}
+
+        {:error, reason} ->
+          {:dpop_error, reason}
+      end
+    end
+
+    # A proof is signed by a caller-controlled key, so proof validation alone
+    # does not authenticate the caller. Claim its replay identity only after
+    # the access token and its cnf binding have verified; otherwise arbitrary
+    # requests can write one replay-store row apiece.
+    defp claim_dpop_jti(nil, _jti, _ttl, _opts), do: :ok
+
+    defp claim_dpop_jti(replay_key, jti, ttl_seconds, opts) when is_binary(replay_key) do
+      case Keyword.fetch!(opts, :replay_check).(replay_key, ttl_seconds) do
+        :ok ->
+          :ok
+
+        {:error, :replay} ->
+          Attesto.Telemetry.dpop_replay_detected(jti)
+          {:dpop_error, :replay}
+
+        _other ->
+          raise ArgumentError,
+                "AttestoClient.ResourceServer.Plug :replay_check must return :ok or " <>
+                  "{:error, :replay}"
       end
     end
 
@@ -345,12 +371,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     defp metadata_url?(url) do
-      not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, url) and
-        match?(
-          {:ok, %URI{scheme: "https", host: host, fragment: nil}}
-          when is_binary(host) and host != "",
-          URI.new(url)
-        )
+      Attesto.URI.https_identifier?(url)
     end
 
     defp escape_challenge_value(value) do

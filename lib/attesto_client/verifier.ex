@@ -390,19 +390,7 @@ defmodule AttestoClient.Verifier do
 
   defp key_algs(%{"alg" => alg}, jwk), do: [SigningAlg.validate_for_key!(alg, jwk)]
 
-  defp key_algs(_key_map, jwk), do: compatible_algs(jwk)
-
-  defp compatible_algs(jwk) do
-    case public_fields(jwk) do
-      %{"kty" => "RSA"} -> ~w(RS256 PS256)
-      %{"kty" => "EC", "crv" => "P-256"} -> ["ES256"]
-      %{"kty" => "EC", "crv" => "P-384"} -> ["ES384"]
-      %{"kty" => "EC", "crv" => "P-521"} -> ["ES512"]
-      %{"kty" => "OKP", "crv" => "Ed25519"} -> ~w(EdDSA Ed25519)
-      %{"kty" => "OKP", "crv" => "Ed448"} -> ~w(EdDSA Ed448)
-      _other -> []
-    end
-  end
+  defp key_algs(_key_map, jwk), do: SigningAlg.compatible_algs(jwk)
 
   defp validate_key_policy(candidate, opts) do
     with {:ok, candidates} <- validate_key_strength(candidate),
@@ -421,20 +409,22 @@ defmodule AttestoClient.Verifier do
     end
   end
 
-  defp public_fields(jwk) do
-    jwk
-    |> JOSE.JWK.to_public_map()
-    |> elem(1)
-  end
-
   defp verify_against_any(jwt, candidates) do
-    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, algs, jwk, _map}, acc ->
-      case JOSE.JWT.verify_strict(jwk, algs, jwt) do
-        {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:halt, {:ok, claims, jwk}}
-        {false, _jwt_struct, _jws_struct} -> {:cont, acc}
-        _other -> {:halt, {:error, :invalid_token}}
-      end
-    end)
+    strict_candidates =
+      Enum.flat_map(candidates, fn {kid, algs, jwk, _map} ->
+        Enum.map(algs, &{kid, &1, jwk})
+      end)
+
+    case Attesto.JWS.verify_strict(jwt, strict_candidates,
+           terminal_error: :invalid_signature,
+           malformed_error: :invalid_token,
+           malformed_result: :halt,
+           claims_map?: true,
+           return_key?: true
+         ) do
+      {:ok, claims, {_kid, _alg, jwk}} -> {:ok, claims, jwk}
+      {:error, _reason} = error -> error
+    end
   rescue
     _error -> {:error, :invalid_token}
   end

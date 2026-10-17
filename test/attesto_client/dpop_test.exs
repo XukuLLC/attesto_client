@@ -69,6 +69,20 @@ defmodule AttestoClient.DPoPTest do
       assert %{"alg" => "PS256", "kid" => "rsa-dpop"} = header(jwt)
     end
 
+    test "uses the core builder's broader DPoP RSA algorithm support" do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+
+      assert {:ok, jwt} = DPoP.proof(key, "POST", @htu, alg: "PS384", now: 1_700_000_000)
+      assert header(jwt)["alg"] == "PS384"
+
+      assert {:ok, _verified} =
+               Attesto.DPoP.verify_proof(jwt,
+                 http_method: "POST",
+                 http_uri: @htu,
+                 now: 1_700_000_000
+               )
+    end
+
     test "rejects an explicit algorithm that conflicts with the JWK declaration" do
       key = JOSE.JWK.generate_key({:rsa, 2048})
       {_type, private_jwk} = JOSE.JWK.to_map(key)
@@ -94,8 +108,16 @@ defmodule AttestoClient.DPoPTest do
       assert {:error, :invalid_htm} = DPoP.proof(key, "  ", @htu)
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "not-a-url")
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "/relative/only")
+      assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "http://issuer.example.com/token")
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "ftp://issuer.example.com/token")
+
+      assert {:error, :invalid_htu} =
+               DPoP.proof(key, "POST", "https://user:password@issuer.example.com/token")
+
       assert {:error, :invalid_htu} = DPoP.proof(key, "POST", "https:///token")
+
+      assert {:error, :invalid_htu} =
+               DPoP.proof(key, "POST", @htu <> "?redirect=%zz")
 
       for access_token <- [nil, "", 123] do
         assert {:error, :invalid_access_token} =

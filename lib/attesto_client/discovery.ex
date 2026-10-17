@@ -46,6 +46,7 @@ defmodule AttestoClient.Discovery do
   @default_max_response_bytes 512 * 1024
   @default_timeout_ms 10_000
 
+  alias Attesto.IPAddress
   alias AttestoClient.Deadline
   alias AttestoClient.PinnedRequest
 
@@ -451,78 +452,5 @@ defmodule AttestoClient.Discovery do
   defp default_port?("http", 80), do: true
   defp default_port?(_scheme, _port), do: false
 
-  # IPv4 ranges that must never be the target of a server-side fetch. The
-  # globally reachable anycast exceptions inside 192.0.0.0/24 remain usable.
-  defp blocked_ip?({127, _, _, _}), do: true
-  defp blocked_ip?({10, _, _, _}), do: true
-  defp blocked_ip?({192, 168, _, _}), do: true
-  defp blocked_ip?({172, b, _, _}) when b in 16..31, do: true
-  defp blocked_ip?({169, 254, _, _}), do: true
-  defp blocked_ip?({100, b, _, _}) when b in 64..127, do: true
-  defp blocked_ip?({0, _, _, _}), do: true
-  defp blocked_ip?({192, 0, 0, d}) when d in [9, 10], do: false
-  defp blocked_ip?({192, 0, 0, _}), do: true
-  defp blocked_ip?({192, 0, 2, _}), do: true
-  defp blocked_ip?({192, 88, 99, _}), do: true
-  defp blocked_ip?({198, b, _, _}) when b in 18..19, do: true
-  defp blocked_ip?({198, 51, 100, _}), do: true
-  defp blocked_ip?({203, 0, 113, _}), do: true
-  defp blocked_ip?({a, _, _, _}) when a in 224..255, do: true
-
-  defp blocked_ip?({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
-    do: false
-
-  # IPv6 unspecified and loopback addresses.
-  defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
-  defp blocked_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
-
-  # Deprecated IPv4-compatible IPv6 (::a.b.c.d) — unwrap and re-check the
-  # embedded v4 address so compatible private/loopback targets cannot bypass
-  # the IPv4 policy.
-  defp blocked_ip?({0, 0, 0, 0, 0, 0, g, h}),
-    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
-
-  # IPv4-mapped IPv6 (::ffff:a.b.c.d) — unwrap and re-check the embedded v4.
-  defp blocked_ip?({0, 0, 0, 0, 0, 0xFFFF, g, h}),
-    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
-
-  # The globally reachable RFC 6052 NAT64 prefix may carry a public IPv4
-  # destination, so unwrap it and apply the IPv4 policy rather than blocking
-  # the entire prefix.
-  defp blocked_ip?({0x64, 0xFF9B, 0, 0, 0, 0, g, h}),
-    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
-
-  # RFC 8215's local-use NAT64 prefix is not globally reachable.
-  defp blocked_ip?({0x64, 0xFF9B, 1, _, _, _, _, _}), do: true
-
-  # 6to4 embeds an IPv4 destination in words 2-3.
-  defp blocked_ip?({0x2002, g, h, _, _, _, _, _}),
-    do: blocked_ip?({div(g, 256), rem(g, 256), div(h, 256), rem(h, 256)})
-
-  # IANA IPv6 special-purpose ranges. The broad 2001::/23 protocol-assignment
-  # block is non-global except for the more-specific allocations admitted
-  # immediately below.
-  defp blocked_ip?({0x0100, 0, 0, 0, _, _, _, _}), do: true
-  defp blocked_ip?({0x0100, 0, 0, 1, _, _, _, _}), do: true
-  defp blocked_ip?({0x2001, 1, 0, 0, 0, 0, 0, last}) when last in 1..3, do: false
-  defp blocked_ip?({0x2001, 3, _, _, _, _, _, _}), do: false
-  defp blocked_ip?({0x2001, 4, 0x0112, _, _, _, _, _}), do: false
-  # ORCHIDv2 and DETs are globally reachable identifier prefixes, not ordinary
-  # service locators. Keep server-side HTTP fetches off both ranges.
-  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word in 0x0020..0x002F, do: true
-  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word in 0x0030..0x003F, do: true
-  defp blocked_ip?({0x2001, word, _, _, _, _, _, _}) when word <= 0x01FF, do: true
-  defp blocked_ip?({0x2001, 0x0DB8, _, _, _, _, _, _}), do: true
-  defp blocked_ip?({0x3FFF, second, _, _, _, _, _, _}) when second <= 0x0FFF, do: true
-  defp blocked_ip?({0x5F00, _, _, _, _, _, _, _}), do: true
-  defp blocked_ip?({first, _, _, _, _, _, _, _}) when first in 0xFF00..0xFFFF, do: true
-
-  # Conventional global unicast occupies 2000::/3. Explicit special-purpose
-  # exclusions above still win. Everything outside it is reserved or scoped,
-  # unless an earlier translation clause safely reduced it to a public IPv4
-  # destination.
-  defp blocked_ip?({first, _, _, _, _, _, _, _}) when first in 0x2000..0x3FFF, do: false
-  defp blocked_ip?({_, _, _, _, _, _, _, _}), do: true
-
-  defp blocked_ip?(_addr), do: true
+  defp blocked_ip?(address), do: not IPAddress.public_fetch_destination?(address)
 end

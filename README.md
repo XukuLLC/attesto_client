@@ -186,11 +186,11 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.8`.
+a new major version. Pin to `~> 2.9`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto 2.3.1 or later within the
+AttestoClient requires Elixir 1.18 or later, Attesto 2.5.0 or later within the
 Attesto 2.x line, and JOSE 1.11.12 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
@@ -198,9 +198,9 @@ compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
 working older-Elixir installation.
 
-Deploy AttestoClient 2.8.0 with Attesto 2.3.1 or later in the 2.x line. The core
-floor ensures exact PSS signature policy and the OID4VP-specific Request Object
-checks are available for every installation.
+Deploy AttestoClient 2.9.0 with Attesto 2.5.0 or later in the 2.x line. The core
+floor supplies the shared strict JWS verifier, DPoP proof builder, URI policy,
+and outbound-address policy used by this release.
 
 Ed448 verification and OIDC hash claims additionally require JOSE to have a
 working Curve448 and SHAKE256 backend. That may come from supported native OTP

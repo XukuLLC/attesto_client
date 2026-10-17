@@ -1,7 +1,7 @@
 defmodule AttestoClient.CryptoJWE do
   @moduledoc false
 
-  # The dependency floor supplies the bounded JWE implementation in Attesto 2.3.
+  # The dependency floor supplies the bounded JWE implementation in Attesto 2.5.
   # Retain a controlled diagnostic for manually assembled runtimes that omit it.
   @spec encrypt(term(), binary(), map(), keyword()) :: {:ok, binary()} | {:error, atom()}
   def encrypt(key, plaintext, header, opts \\ []) do

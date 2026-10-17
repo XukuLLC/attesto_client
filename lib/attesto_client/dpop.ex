@@ -16,17 +16,13 @@ defmodule AttestoClient.DPoP do
     * `nonce` - a server-supplied DPoP nonce, echoed when the server has
       demanded one (a `use_dpop_nonce` error carrying a `DPoP-Nonce` header).
 
-  Signing and key-bound `:alg`/`:kid` validation behave as in
-  `AttestoClient.Wallet.Proof` (shared `AttestoClient.Builder` internals): the
-  proof's public `jwk` is this key, and the server pins the token to its
-  `jkt` thumbprint.
+  Signing and key-bound `:alg`/`:kid` validation are provided by
+  `Attesto.DPoP.Proof`, keeping proof construction and verification on the
+  same implementation. The proof's public `jwk` is this key, and the server
+  pins the token to its `jkt` thumbprint.
   """
 
-  alias Attesto.DPoP, as: Verify
-  alias AttestoClient.Builder
-
-  # RFC 9449 §4.2: the fixed proof type. Not overridable.
-  @proof_typ "dpop+jwt"
+  alias Attesto.DPoP.Proof
 
   @type jwk :: JOSE.JWK.t() | map()
 
@@ -35,7 +31,7 @@ defmodule AttestoClient.DPoP do
           | {:nonce, String.t()}
           | {:alg, String.t()}
           | {:kid, String.t()}
-          | {:now, integer()}
+          | {:now, integer() | DateTime.t()}
           | {:jti, String.t()}
 
   @type error ::
@@ -64,26 +60,7 @@ defmodule AttestoClient.DPoP do
   @spec proof(jwk(), String.t(), String.t(), [build_opt()]) ::
           {:ok, String.t()} | {:error, error()}
   def proof(jwk, htm, htu, opts \\ []) when is_binary(htm) and is_binary(htu) and is_list(opts) do
-    with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
-         {:ok, method} <- normalize_htm(htm),
-         {:ok, uri} <- normalize_htu(htu),
-         {:ok, now} <- Builder.validate_now(opts),
-         {:ok, jti} <- Builder.validate_jti(opts),
-         {:ok, alg} <- resolve_alg(jose_jwk, opts),
-         {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
-         {:ok, access_token_hash} <- access_token_hash(opts),
-         {:ok, nonce} <- nonce(opts) do
-      claims =
-        %{"htm" => method, "htu" => uri, "iat" => now, "jti" => jti}
-        |> put_optional("ath", access_token_hash)
-        |> put_optional("nonce", nonce)
-
-      header =
-        %{"alg" => alg, "typ" => @proof_typ, "jwk" => Builder.public_jwk(jose_jwk)}
-        |> Builder.put_kid(kid)
-
-      Builder.sign(jose_jwk, header, claims)
-    end
+    Proof.build(jwk, htm, htu, opts)
   end
 
   @doc false
@@ -91,52 +68,6 @@ defmodule AttestoClient.DPoP do
           {:ok, String.t()}
           | {:error, :unsupported_alg | :unsupported_key | {:signing_failed, String.t()}}
   def resolve_alg(%JOSE.JWK{} = jose_jwk, opts) when is_list(opts) do
-    Builder.resolve_alg(jose_jwk, opts)
+    Proof.resolve_alg(jose_jwk, opts)
   end
-
-  defp normalize_htm(htm) do
-    case String.trim(htm) do
-      "" -> {:error, :invalid_htm}
-      method -> {:ok, String.upcase(method)}
-    end
-  end
-
-  # RFC 9449 §4.2: `htu` is the request URI without query or fragment.
-  defp normalize_htu(htu) do
-    case URI.new(htu) do
-      {:ok, %URI{scheme: scheme, host: host} = uri}
-      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
-        {:ok, URI.to_string(%{uri | query: nil, fragment: nil})}
-
-      _ ->
-        {:error, :invalid_htu}
-    end
-  end
-
-  # Reuse the verifier's `ath` computation so client and server agree on the
-  # exact SHA-256/base64url encoding. An explicitly supplied invalid token is a
-  # caller error; silently dropping it would produce an unbound resource proof.
-  defp access_token_hash(opts) do
-    case Keyword.fetch(opts, :access_token) do
-      :error ->
-        {:ok, nil}
-
-      {:ok, access_token} when is_binary(access_token) and access_token != "" ->
-        {:ok, Verify.compute_ath(access_token)}
-
-      {:ok, _invalid} ->
-        {:error, :invalid_access_token}
-    end
-  end
-
-  defp nonce(opts) do
-    case Keyword.fetch(opts, :nonce) do
-      :error -> {:ok, nil}
-      {:ok, nonce} when is_binary(nonce) and byte_size(nonce) in 1..4_096 -> {:ok, nonce}
-      {:ok, _invalid} -> {:error, :invalid_nonce}
-    end
-  end
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 end
