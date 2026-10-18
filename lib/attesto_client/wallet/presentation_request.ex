@@ -30,6 +30,9 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   alias AttestoClient.Wallet.Presentation.{CertificateTrust, DCQL, Encryption, Formats}
 
   @wallet_algorithms ~w(ES256 ES384 ES512 PS256 EdDSA Ed25519)
+  # Matches `Attesto.RequestObject`: a signed request is read before its
+  # verifier is known, so its size is bounded first.
+  @max_request_object_bytes 64 * 1_024
 
   @enforce_keys [:client_id, :nonce, :response_uri, :response_mode, :dcql_query]
   defstruct [
@@ -140,7 +143,8 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   end
 
   defp verified_claims(jwt, trusted, opts) do
-    with {:ok, claims} <- JWS.peek_json(jwt, :payload) do
+    with {:ok, claims} <-
+           JWS.peek_json(jwt, :payload, max_compact_bytes: @max_request_object_bytes) do
       case Map.get(claims, "client_id") do
         "x509_hash:" <> _hash ->
           verify_x509(jwt, claims, opts)
@@ -193,7 +197,8 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   end
 
   defp verify_x509(jwt, unverified, opts) do
-    with {:ok, header} <- JWS.peek_json(jwt, :protected),
+    with {:ok, header} <-
+           JWS.peek_json(jwt, :protected, max_compact_bytes: @max_request_object_bytes),
          true <- header["typ"] == "oauth-authz-req+jwt",
          :ok <- JWS.reject_unsupported_crit(header),
          {:ok, chain} <- CertificateTrust.decode_x5c(header["x5c"]),

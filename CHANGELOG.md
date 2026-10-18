@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reject duplicate JSON object members in discovery metadata, JWKS documents,
   credential offers, and credential responses before protocol validation.
 
+- Bound OpenID4VP request objects to 64 KiB before reading their unverified
+  claims, matching Attesto core's Request Object limit.
+
 ### Changed
 
 - Require Attesto 2.6.0 or later in the 2.x line for the shared JWS candidate,
