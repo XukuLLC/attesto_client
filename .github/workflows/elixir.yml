@@ -42,7 +42,7 @@ jobs:
     env:
       MIX_ENV: test
       ATTESTO_PATH: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && '1' || '0' }}
-      REVIEWED_CORE_REF: 95a11b27ae3119b74c8c4db7f505603794de148a
+      REVIEWED_CORE_REF: 3c3936af092233c8895abcce5ae0245600c339d4
 
     steps:
       - name: Checkout code
