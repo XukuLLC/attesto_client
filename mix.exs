@@ -109,7 +109,11 @@ defmodule AttestoClient.MixProject do
         "AttestoClient.OAuthHTTP",
         "AttestoClient.OAuthHTTP.get_json/2",
         "AttestoClient.OAuthHTTP.get_text/2",
-        "AttestoClient.OAuthHTTP.post_form_open/3"
+        "AttestoClient.OAuthHTTP.post_form_open/3",
+        # Deprecated 2.x compatibility entry points named in the changelog.
+        "AttestoClient.CryptoJWE",
+        "AttestoClient.OpenIDMetadata.validate/2",
+        "AttestoClient.Verifier.compact_segments/0"
       ],
       extras: [
         "README.md",

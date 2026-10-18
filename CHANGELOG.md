@@ -40,11 +40,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and remove nested request deadlines and repeat DPoP signing probes.
 - Call `Attesto.JWE` directly internally now that every supported core version
   provides the bounded implementation. The deprecated
-  <code>AttestoClient.CryptoJWE</code> compatibility wrapper remains available
+  `AttestoClient.CryptoJWE` compatibility wrapper remains available
   throughout the 2.x line.
-- Retain the public <code>AttestoClient.OpenIDMetadata.validate/2</code>
+- Retain the public `AttestoClient.OpenIDMetadata.validate/2`
   validation entry point, the hidden DCQL matching/path helpers, and the
-  <code>AttestoClient.Verifier.compact_segments/0</code> remote type throughout
+  `AttestoClient.Verifier.compact_segments/0` remote type throughout
   the 2.x line.
 
 ## [2.9.0] - 2026-10-17
