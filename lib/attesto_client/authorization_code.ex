@@ -57,8 +57,9 @@ defmodule AttestoClient.AuthorizationCode do
   Resource Indicators): one absolute URI without a fragment, or a list of
   them. Each is sent as a `resource` parameter on the authorization request
   (or the pushed request), pinned in the transaction, and repeated on the
-  token request; `callback/3` may narrow the token request to a subset.
-  `resource` cannot be supplied through `:authorization_params`.
+  token request; `callback/3` may narrow the token request to a subset. A
+  `"resource"` entry in `:authorization_params` is treated the same way;
+  supplying both is `{:error, :invalid_authorization_params}`.
 
   Use `protocol: :oauth` for a plain OAuth flow, including OID4VCI issuance.
   It does not require the `openid` scope, OIDC metadata, or an ID Token; the
@@ -112,7 +113,7 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, scopes} <- scopes(opts, protocol),
          :ok <- profile_scope(profile, scopes),
          {:ok, extra_params} <- authorization_params(opts),
-         {:ok, resources} <- resources(opts),
+         {:ok, resources, extra_params} <- resources(opts, extra_params),
          {:ok, ttl_ms} <- positive_integer(opts, :transaction_ttl_ms, default_ttl_ms),
          {:ok, requested_id_token_alg} <- protocol_id_token_alg(opts, protocol, profile),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
@@ -600,12 +601,23 @@ defmodule AttestoClient.AuthorizationCode do
 
   # RFC 8707 §2.1: one or more absolute URIs without a fragment, de-duplicated.
   # A present but empty value fails closed rather than meaning "none".
-  defp resources(opts) do
-    case Keyword.get(opts, :resource) do
-      nil -> {:ok, []}
-      value -> validate_resources(value)
+  # A `"resource"` authorization parameter predates the option and is read as
+  # the same indicator, so it is pinned and repeated on the token request too.
+  # It leaves the extra parameters either way: the validated list is added back
+  # as the request's only `resource` values.
+  defp resources(opts, extra_params) do
+    {legacy, extra_params} = Map.pop(extra_params, "resource")
+
+    case {Keyword.get(opts, :resource), legacy} do
+      {nil, nil} -> {:ok, [], extra_params}
+      {nil, value} -> with_params(validate_resources(value), extra_params)
+      {value, nil} -> with_params(validate_resources(value), extra_params)
+      {_option, _param} -> {:error, :invalid_authorization_params}
     end
   end
+
+  defp with_params({:ok, resources}, extra_params), do: {:ok, resources, extra_params}
+  defp with_params(error, _extra_params), do: error
 
   defp validate_resources(value) do
     case Attesto.ResourceIndicator.validate(value) do

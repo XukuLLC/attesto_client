@@ -201,8 +201,9 @@ the token with that audience, so a token obtained for one resource is refused
 at another. It is sent on the authorization request (or the pushed request),
 pinned in the transaction, and repeated on the token request. Pass a list to
 request several; `callback/3` can then narrow the token request to a subset
-with its own `resource:` option. `resource` is a protocol-bound parameter and
-cannot be set through `:authorization_params`.
+with its own `resource:` option. A `"resource"` entry in `:authorization_params`
+is read as the same indicator and also reaches the token request; supply it in
+one place only.
 
 ## Handle the callback
 

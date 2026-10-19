@@ -339,6 +339,18 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:ok, _result} = exchange.(none, [])
     assert_receive {:token_body, body}
     assert query_values(body, "resource") == []
+
+    # A resource passed as an authorization parameter, as earlier releases
+    # documented, reaches the token request as well.
+    assert {:ok, legacy} =
+             start_flow(store, authorization_params: %{"resource" => "https://rs.example/mcp"})
+
+    assert query_values(legacy.url |> URI.parse() |> Map.fetch!(:query), "resource") ==
+             ["https://rs.example/mcp"]
+
+    assert {:ok, _result} = exchange.(legacy, [])
+    assert_receive {:token_body, body}
+    assert query_values(body, "resource") == ["https://rs.example/mcp"]
   end
 
   test "rejects malformed resource indicators and resource outside the authorized set" do
@@ -349,8 +361,16 @@ defmodule AttestoClient.AuthorizationCodeTest do
       assert {:error, :invalid_resource} = start_flow(store, resource: bad), inspect(bad)
     end
 
+    # An authorization parameter is read as the same indicator, so it is
+    # validated too; supplying it in both places is ambiguous.
+    assert {:error, :invalid_resource} =
+             start_flow(store, authorization_params: %{"resource" => "not a uri"})
+
     assert {:error, :invalid_authorization_params} =
-             start_flow(store, authorization_params: %{"resource" => "https://rs.example/mcp"})
+             start_flow(store,
+               resource: "https://rs.example/mcp",
+               authorization_params: %{"resource" => "https://rs.example/mcp"}
+             )
 
     assert {:ok, started} = start_flow(store, resource: "https://rs.example/mcp")
 

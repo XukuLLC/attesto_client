@@ -31,10 +31,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `resource` is now a protocol-bound parameter name: it is rejected in
-  `:authorization_params` and in discovered endpoint query strings, so a
-  resource indicator reaches both requests through the `:resource` option
-  rather than the authorization request alone.
+- A `"resource"` entry in `:authorization_params` is read as the `:resource`
+  option: it is validated as an RFC 8707 indicator, pinned, and repeated on the
+  token request, which previously never carried it. Supplying both is
+  `{:error, :invalid_authorization_params}`.
 - Form bodies are encoded from parameter pairs, so a repeated parameter such
   as `resource` is sent once per value.
 
