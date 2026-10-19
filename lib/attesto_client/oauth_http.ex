@@ -744,8 +744,6 @@ defmodule AttestoClient.OAuthHTTP do
     end)
   end
 
-  defp form_pairs(form), do: form
-
   defp open_request(target, form, req_options, timeout_ms, response_mode \\ :json) do
     options =
       req_options ++
