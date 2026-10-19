@@ -5,7 +5,7 @@ defmodule AttestoClient.ProtocolParams do
     client_id redirect_uri response_type response_mode scope state nonce
     code_challenge code_challenge_method dpop_jkt request_uri request request_uri_method
     client_secret client_assertion client_assertion_type grant_type code code_verifier
-    refresh_token pre-authorized_code tx_code token token_type_hint
+    refresh_token pre-authorized_code tx_code token token_type_hint resource
   )
 
   @spec protected() :: [String.t()]

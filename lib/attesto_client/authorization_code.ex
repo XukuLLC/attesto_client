@@ -53,6 +53,13 @@ defmodule AttestoClient.AuthorizationCode do
   protocol-bound parameters and client-authentication fields cannot be
   overridden, including bracket aliases decoded by web frameworks.
 
+  `:resource` names the protected resource(s) the token is for (RFC 8707
+  Resource Indicators): one absolute URI without a fragment, or a list of
+  them. Each is sent as a `resource` parameter on the authorization request
+  (or the pushed request), pinned in the transaction, and repeated on the
+  token request; `callback/3` may narrow the token request to a subset.
+  `resource` cannot be supplied through `:authorization_params`.
+
   Use `protocol: :oauth` for a plain OAuth flow, including OID4VCI issuance.
   It does not require the `openid` scope, OIDC metadata, or an ID Token; the
   callback returns `id_token_claims: nil`. The protocol is pinned in the
@@ -105,6 +112,7 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, scopes} <- scopes(opts, protocol),
          :ok <- profile_scope(profile, scopes),
          {:ok, extra_params} <- authorization_params(opts),
+         {:ok, resources} <- resources(opts),
          {:ok, ttl_ms} <- positive_integer(opts, :transaction_ttl_ms, default_ttl_ms),
          {:ok, requested_id_token_alg} <- protocol_id_token_alg(opts, protocol, profile),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
@@ -129,7 +137,8 @@ defmodule AttestoClient.AuthorizationCode do
                dpop_jkt: dpop_jkt,
                require_response_issuer: profile != :generic,
                profile: profile,
-               client_auth_binding: client_auth_binding
+               client_auth_binding: client_auth_binding,
+               resources: resources
              },
              ttl_ms
            ) do
@@ -148,6 +157,10 @@ defmodule AttestoClient.AuthorizationCode do
         )
         |> Attesto.MapParams.put_optional("nonce", if(protocol == :oidc, do: transaction.nonce))
         |> Attesto.MapParams.put_optional("dpop_jkt", dpop_jkt)
+        |> Attesto.MapParams.put_optional(
+          "resource",
+          if(resources == [], do: nil, else: resources)
+        )
 
       finish_start(store, state, transaction, params, par?, deadline, opts)
     end
@@ -179,6 +192,11 @@ defmodule AttestoClient.AuthorizationCode do
   whose client assertion differs from the defaults; `:client_id` is always
   pinned to the stored transaction.
 
+  `:resource` narrows the token request to a subset of the resource indicators
+  the transaction was started with (RFC 8707 §2.2); by default every pinned
+  indicator is repeated. A value outside that set fails with
+  `{:error, :invalid_resource}` after state is consumed.
+
   A timeout leaves the remote outcome unknown and the transaction consumed; do
   not retry an authorization code.
   """
@@ -209,8 +227,9 @@ defmodule AttestoClient.AuthorizationCode do
          :ok <- AuthorizationProfile.dpop_policy(transaction_profile(transaction), opts),
          :ok <- check_response_issuer(params, transaction),
          {:ok, code} <- callback_code(params),
+         {:ok, resources} <- token_resources(transaction, opts),
          {:ok, _timeout_ms} <- HTTPPolicy.timeout(opts) do
-      exchange_and_verify(transaction, code, dpop_jkt, opts)
+      exchange_and_verify(transaction, code, dpop_jkt, resources, opts)
     end
   end
 
@@ -301,13 +320,15 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
-  defp exchange_and_verify(transaction, code, dpop_jkt, opts) do
-    form = %{
-      "grant_type" => "authorization_code",
-      "code" => code,
-      "redirect_uri" => transaction.redirect_uri,
-      "code_verifier" => transaction.code_verifier
-    }
+  defp exchange_and_verify(transaction, code, dpop_jkt, resources, opts) do
+    form =
+      %{
+        "grant_type" => "authorization_code",
+        "code" => code,
+        "redirect_uri" => transaction.redirect_uri,
+        "code_verifier" => transaction.code_verifier
+      }
+      |> Attesto.MapParams.put_optional("resource", if(resources == [], do: nil, else: resources))
 
     http_opts = http_options(transaction, opts)
 
@@ -577,6 +598,48 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
+  # RFC 8707 §2.1: one or more absolute URIs without a fragment, de-duplicated.
+  # A present but empty value fails closed rather than meaning "none".
+  defp resources(opts) do
+    case Keyword.get(opts, :resource) do
+      nil -> {:ok, []}
+      value -> validate_resources(value)
+    end
+  end
+
+  defp validate_resources(value) do
+    case Attesto.ResourceIndicator.validate(value) do
+      {:ok, resources} -> {:ok, resources}
+      {:error, :invalid_target} -> {:error, :invalid_resource}
+    end
+  end
+
+  # RFC 8707 §2.2: the token request names the resource(s) the token is for.
+  # By default it repeats what the authorization request asked; `:resource`
+  # narrows that to a subset, since a token cannot be minted for a resource the
+  # user never authorized. A transaction stored before this field existed
+  # carries none.
+  defp token_resources(transaction, opts) do
+    pinned = Map.get(transaction, :resources, [])
+
+    case Keyword.get(opts, :resource) do
+      nil ->
+        {:ok, pinned}
+
+      value ->
+        with {:ok, requested} <- validate_resources(value) do
+          authorize_resources(requested, pinned)
+        end
+    end
+  end
+
+  defp authorize_resources(requested, pinned) do
+    case Attesto.ResourceIndicator.authorize(requested, pinned) do
+      {:ok, resources} -> {:ok, resources}
+      {:error, :invalid_target} -> {:error, :invalid_resource}
+    end
+  end
+
   defp authorization_params(opts) do
     case Keyword.get(opts, :authorization_params, %{}) do
       %{} = params ->
@@ -714,7 +777,21 @@ defmodule AttestoClient.AuthorizationCode do
   defp put_query(endpoint, params) do
     uri = URI.parse(endpoint)
     existing = if uri.query, do: URI.decode_query(uri.query), else: %{}
-    %{uri | query: URI.encode_query(Map.merge(existing, params))} |> URI.to_string()
+
+    pairs =
+      (Map.to_list(Map.drop(existing, Map.keys(params))) ++ query_pairs(params))
+      |> Enum.sort_by(&elem(&1, 0))
+
+    %{uri | query: URI.encode_query(pairs)} |> URI.to_string()
+  end
+
+  # A multi-valued parameter (RFC 8707 `resource`) is repeated once per value;
+  # a map cannot hold a repeated key, so the query is built from pairs.
+  defp query_pairs(params) do
+    Enum.flat_map(params, fn
+      {key, values} when is_list(values) -> Enum.map(values, &{key, &1})
+      {key, value} -> [{key, value}]
+    end)
   end
 
   defp validate_endpoint_queries(metadata) do

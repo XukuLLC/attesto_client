@@ -39,7 +39,8 @@ defmodule AttestoClient.AuthorizationTransaction do
                 dpop_jkt: nil,
                 require_response_issuer: false,
                 profile: :generic,
-                client_auth_binding: nil
+                client_auth_binding: nil,
+                resources: []
               ]
 
   @type t :: %__MODULE__{
@@ -57,6 +58,7 @@ defmodule AttestoClient.AuthorizationTransaction do
           dpop_jkt: String.t() | nil,
           require_response_issuer: boolean(),
           profile: :generic | :haip | :fapi,
-          client_auth_binding: map() | nil
+          client_auth_binding: map() | nil,
+          resources: [String.t()]
         }
 end

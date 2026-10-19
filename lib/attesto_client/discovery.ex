@@ -1,12 +1,23 @@
 defmodule AttestoClient.Discovery do
   @moduledoc """
   Fetch and read OAuth 2.0 / OpenID Connect authorization-server metadata
-  (RFC 8414 / OpenID Connect Discovery 1.0).
+  (RFC 8414 / OpenID Connect Discovery 1.0) and OAuth 2.0 protected resource
+  metadata (RFC 9728).
 
   A thin lookup: it fetches the discovery document (and, separately, the JWKS)
   and returns the parsed JSON. It runs no flow and holds no state - the host
   reads the endpoint URLs and capabilities it needs (and, for verifying JARM
   responses, passes the fetched JWKS to `AttestoClient.JARM.verify/3`).
+
+  ## Protected resources
+
+  A resource server names the authorization servers that issue its tokens in
+  its RFC 9728 metadata. `fetch_resource/2` reads that document for a resource
+  identifier, and `authorization_server/2` follows it to the issuer's own
+  metadata, so a client that knows only the resource URL, or has just received
+  its `WWW-Authenticate` challenge, reaches the authorization and token
+  endpoints without being configured with the issuer. The same transport
+  rules below apply to those requests.
 
   ## URL construction
 
@@ -43,12 +54,18 @@ defmodule AttestoClient.Discovery do
 
   @oidc_segment "/.well-known/openid-configuration"
   @oauth_segment "/.well-known/oauth-authorization-server"
+  @protected_resource_segment "/.well-known/oauth-protected-resource"
+  @resource_string_lists ~w(authorization_servers scopes_supported bearer_methods_supported
+    resource_signing_alg_values_supported dpop_signing_alg_values_supported
+    authorization_details_types_supported)
+  @resource_booleans ~w(dpop_bound_access_tokens_required tls_client_certificate_bound_access_tokens)
   @default_max_response_bytes 512 * 1024
 
   alias Attesto.IPAddress
   alias AttestoClient.Deadline
   alias AttestoClient.HTTPPolicy
   alias AttestoClient.PinnedRequest
+  alias AttestoClient.WWWAuthenticate
 
   @type well_known :: :openid_configuration | :oauth_authorization_server
   @type opt ::
@@ -58,6 +75,12 @@ defmodule AttestoClient.Discovery do
           | {:timeout, pos_integer()}
           | {:resolver,
              (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
+          | {:metadata_url, String.t()}
+          | {:www_authenticate, String.t() | [String.t()]}
+          | {:issuer, String.t()}
+
+  @typedoc "A protected resource's metadata, the issuer selected from it, and that issuer's metadata."
+  @type resolution :: %{resource: map(), issuer: String.t(), authorization_server: map()}
 
   @type error ::
           :invalid_issuer
@@ -65,6 +88,12 @@ defmodule AttestoClient.Discovery do
           | :invalid_jwks_uri
           | :issuer_mismatch
           | :invalid_metadata
+          | :invalid_resource
+          | :invalid_metadata_url
+          | :resource_mismatch
+          | :no_authorization_server
+          | :unadvertised_authorization_server
+          | {:select_authorization_server, [String.t()]}
           | :response_too_large
           | :blocked_host
           | :unsafe_transport_options
@@ -91,6 +120,84 @@ defmodule AttestoClient.Discovery do
          {:ok, well_known} <- well_known(opts),
          {:ok, body} <- get_json(metadata_url(uri, well_known), opts) do
       check_issuer(body, canonical)
+    end
+  end
+
+  @doc """
+  Fetch the RFC 9728 protected resource metadata for `resource`, returning
+  `{:ok, metadata}` (a string-keyed map) or `{:error, reason}`.
+
+  `resource` is the resource identifier: an `https` URL with no fragment
+  (RFC 9728 §1.2). Without a `:metadata_url`, the document is requested from
+  the well-known location derived from it (§3.1): the
+  `/.well-known/oauth-protected-resource` segment is inserted between the host
+  and the path, after any terminating slash is removed, so
+  `https://rs.example/mcp` reads
+  `https://rs.example/.well-known/oauth-protected-resource/mcp`. A query
+  component is kept.
+
+  Options:
+
+    * `:metadata_url` - the URL a `WWW-Authenticate` challenge advertised in
+      its `resource_metadata` parameter (§5.1);
+      `AttestoClient.WWWAuthenticate.resource_metadata/1` reads it from the
+      header. It must be an `https` URL without userinfo or fragment.
+    * `:req_options`, `:timeout`, `:max_response_bytes`, and `:resolver` - as
+      for `fetch/2`.
+
+  The document's `resource` member must be identical to `resource` (§3.3,
+  §7.3) whichever URL it was fetched from; otherwise the document is not used
+  and the result is `{:error, :resource_mismatch}`. Every member of
+  `authorization_servers` must be a valid issuer identifier (RFC 8414 §2),
+  `jwks_uri` must be `https`, and the other registered members are
+  type-checked; a violation is `{:error, :invalid_metadata}`. Unregistered
+  members are kept (§3.2).
+  """
+  @spec fetch_resource(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
+  def fetch_resource(resource, opts \\ []) when is_list(opts) do
+    with {:ok, uri} <- validate_resource(resource),
+         {:ok, url} <- resource_metadata_url(uri, opts),
+         {:ok, body} <- get_json(url, opts) do
+      check_resource(body, resource)
+    end
+  end
+
+  @doc """
+  Find the authorization server for a protected resource and fetch its
+  metadata.
+
+  Reads the resource's RFC 9728 metadata with `fetch_resource/2`, selects an
+  issuer from its `authorization_servers`, and fetches that issuer's metadata
+  with `fetch/2`. Returns `{:ok, %{resource: resource_metadata, issuer: issuer,
+  authorization_server: issuer_metadata}}`, where the issuer metadata carries
+  the `authorization_endpoint` and `token_endpoint` to use, or
+  `{:error, reason}`.
+
+  Options, in addition to those of `fetch_resource/2` and `fetch/2`:
+
+    * `:www_authenticate` - the `WWW-Authenticate` value(s) of the 401 or 403
+      response that prompted discovery. A challenge advertising a valid
+      `resource_metadata` URL supplies `:metadata_url`; otherwise the
+      well-known location derived from `resource` is used. An explicit
+      `:metadata_url` takes precedence.
+    * `:issuer` - the issuer to use when the resource advertises more than
+      one. It must be among them.
+    * `:well_known` - which issuer document to fetch. Without it, the RFC 8414
+      `oauth-authorization-server` document is tried first and the OpenID
+      Connect `openid-configuration` document when that returns 404.
+
+  Errors are `:no_authorization_server` when the resource advertises none,
+  `{:select_authorization_server, issuers}` when it advertises several and no
+  `:issuer` was given, `:unadvertised_authorization_server` when the given
+  `:issuer` is not among them, and those of `fetch_resource/2` and `fetch/2`.
+  `:timeout` bounds each HTTP request separately.
+  """
+  @spec authorization_server(String.t(), [opt()]) :: {:ok, resolution()} | {:error, error()}
+  def authorization_server(resource, opts \\ []) when is_list(opts) do
+    with {:ok, metadata} <- fetch_resource(resource, resource_opts(opts)),
+         {:ok, issuer} <- select_issuer(metadata, opts),
+         {:ok, issuer_metadata} <- fetch_issuer(issuer, opts) do
+      {:ok, %{resource: metadata, issuer: issuer, authorization_server: issuer_metadata}}
     end
   end
 
@@ -174,6 +281,118 @@ defmodule AttestoClient.Discovery do
   end
 
   defp validate_issuer(_other), do: {:error, :invalid_issuer}
+
+  # RFC 9728 §1.2: an https URL with no fragment. A query component is allowed
+  # (the RFC advises against one) and travels into the derived well-known URL.
+  defp validate_resource(resource) when is_binary(resource) do
+    if Attesto.URI.https_identifier?(resource),
+      do: {:ok, URI.parse(resource)},
+      else: {:error, :invalid_resource}
+  end
+
+  defp validate_resource(_other), do: {:error, :invalid_resource}
+
+  # RFC 9728 §3.1: the well-known segment goes between the host and the path,
+  # with the terminating slash removed first - the same placement RFC 8414 uses.
+  defp resource_metadata_url(uri, opts) do
+    case Keyword.fetch(opts, :metadata_url) do
+      :error ->
+        {:ok, URI.to_string(%{uri | path: @protected_resource_segment <> issuer_path(uri)})}
+
+      {:ok, url} ->
+        validate_https(url, :invalid_metadata_url)
+    end
+  end
+
+  # RFC 9728 §3.3 / §7.3: the document's `resource` MUST be identical to the
+  # identifier the metadata was requested for, or its contents must not be
+  # used. Exact comparison, as for the issuer: a slash-normalising match would
+  # accept a subtly different identifier.
+  defp check_resource(%{"resource" => resource} = metadata, resource) do
+    if valid_resource_members?(metadata), do: {:ok, metadata}, else: {:error, :invalid_metadata}
+  end
+
+  defp check_resource(%{"resource" => other}, _resource) when is_binary(other),
+    do: {:error, :resource_mismatch}
+
+  defp check_resource(_metadata, _resource), do: {:error, :invalid_metadata}
+
+  defp valid_resource_members?(metadata) do
+    Enum.all?(@resource_string_lists, &optional_string_list?(Map.get(metadata, &1))) and
+      Enum.all?(@resource_booleans, &optional_boolean?(Map.get(metadata, &1))) and
+      optional_string?(Map.get(metadata, "resource_name")) and
+      valid_issuers?(Map.get(metadata, "authorization_servers")) and
+      optional_https?(Map.get(metadata, "jwks_uri"))
+  end
+
+  defp optional_string_list?(nil), do: true
+  defp optional_string_list?(list) when is_list(list), do: Enum.all?(list, &is_binary/1)
+  defp optional_string_list?(_other), do: false
+
+  defp optional_boolean?(value), do: is_nil(value) or is_boolean(value)
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
+
+  defp valid_issuers?(nil), do: true
+
+  defp valid_issuers?(issuers) when is_list(issuers),
+    do: Enum.all?(issuers, &match?({:ok, _uri, _canonical}, validate_issuer(&1)))
+
+  defp valid_issuers?(_other), do: false
+
+  defp optional_https?(nil), do: true
+  defp optional_https?(url), do: Attesto.URI.https_identifier?(url)
+
+  # An explicit :metadata_url wins. Otherwise a challenge's resource_metadata
+  # pointer is used when it is a valid URL, and the well-known location when
+  # there is none: §3.1 is always available as the fallback.
+  defp resource_opts(opts) do
+    with :error <- Keyword.fetch(opts, :metadata_url),
+         {:ok, header} <- Keyword.fetch(opts, :www_authenticate),
+         {:ok, url} <- WWWAuthenticate.resource_metadata(header) do
+      Keyword.put(opts, :metadata_url, url)
+    else
+      _other -> opts
+    end
+  end
+
+  defp select_issuer(metadata, opts) do
+    issuers = metadata |> Map.get("authorization_servers", []) |> Enum.uniq()
+
+    case {Keyword.get(opts, :issuer), issuers} do
+      {_issuer, []} ->
+        {:error, :no_authorization_server}
+
+      {nil, [issuer]} ->
+        {:ok, issuer}
+
+      {nil, issuers} ->
+        {:error, {:select_authorization_server, issuers}}
+
+      {issuer, issuers} ->
+        if issuer in issuers,
+          do: {:ok, issuer},
+          else: {:error, :unadvertised_authorization_server}
+    end
+  end
+
+  # RFC 8414 §5: an OAuth authorization server publishes one or both documents.
+  # A caller that names one gets exactly that one; otherwise the OAuth document
+  # is tried first and the OpenID one only when the first is absent.
+  defp fetch_issuer(issuer, opts) do
+    case Keyword.fetch(opts, :well_known) do
+      {:ok, _well_known} ->
+        fetch(issuer, opts)
+
+      :error ->
+        case fetch(issuer, Keyword.put(opts, :well_known, :oauth_authorization_server)) do
+          {:error, {:http_status, 404}} ->
+            fetch(issuer, Keyword.put(opts, :well_known, :openid_configuration))
+
+          result ->
+            result
+        end
+    end
+  end
 
   defp validate_https(url, error) when is_binary(url) do
     if Attesto.URI.https_identifier?(url), do: {:ok, url}, else: {:error, error}

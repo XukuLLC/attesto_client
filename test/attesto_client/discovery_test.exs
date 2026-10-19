@@ -148,6 +148,350 @@ defmodule AttestoClient.DiscoveryTest do
     end
   end
 
+  describe "fetch_resource/2" do
+    @resource "https://rs.example.com/mcp"
+
+    defp resource_doc(resource, extra \\ %{}) do
+      Map.merge(%{"resource" => resource, "authorization_servers" => [@issuer]}, extra)
+    end
+
+    test "requests the well-known location with the segment before the path (RFC 9728 §3.1)" do
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/oauth-protected-resource/mcp"
+        json_plug(200, resource_doc(@resource)).(conn)
+      end
+
+      assert {:ok, %{"authorization_servers" => [@issuer]}} =
+               Discovery.fetch_resource(@resource, req_options: [plug: plug])
+    end
+
+    test "uses the bare well-known path for a resource without a path" do
+      resource = "https://rs.example.com"
+
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/oauth-protected-resource"
+        json_plug(200, resource_doc(resource)).(conn)
+      end
+
+      assert {:ok, _} = Discovery.fetch_resource(resource, req_options: [plug: plug])
+    end
+
+    test "removes the terminating slash for the request URL but matches the resource exactly" do
+      resource = "https://rs.example.com/mcp/"
+
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/oauth-protected-resource/mcp"
+        json_plug(200, resource_doc(resource)).(conn)
+      end
+
+      assert {:ok, %{"resource" => ^resource}} =
+               Discovery.fetch_resource(resource, req_options: [plug: plug])
+    end
+
+    test "keeps a query component in the derived URL" do
+      resource = "https://rs.example.com/mcp?tenant=a"
+
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/oauth-protected-resource/mcp"
+        assert conn.query_string == "tenant=a"
+        json_plug(200, resource_doc(resource)).(conn)
+      end
+
+      assert {:ok, _} = Discovery.fetch_resource(resource, req_options: [plug: plug])
+    end
+
+    test "fetches an advertised :metadata_url instead of deriving one" do
+      plug = fn conn ->
+        assert conn.request_path == "/custom/prm"
+        json_plug(200, resource_doc(@resource)).(conn)
+      end
+
+      assert {:ok, _} =
+               Discovery.fetch_resource(@resource,
+                 metadata_url: "https://rs.example.com/custom/prm",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects a non-https :metadata_url before any request" do
+      plug = fn _conn -> flunk("no request expected") end
+
+      assert {:error, :invalid_metadata_url} =
+               Discovery.fetch_resource(@resource,
+                 metadata_url: "http://rs.example.com/prm",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects a resource identifier that is not an https URL without fragment (RFC 9728 §1.2)" do
+      plug = fn _conn -> flunk("no request expected") end
+
+      for resource <- [
+            "http://rs.example.com/mcp",
+            "https://rs.example.com/mcp#x",
+            "rs.example.com",
+            nil
+          ] do
+        assert {:error, :invalid_resource} =
+                 Discovery.fetch_resource(resource, req_options: [plug: plug])
+      end
+    end
+
+    test "refuses a document whose resource differs from the requested identifier (RFC 9728 §3.3)" do
+      plug = json_plug(200, resource_doc("https://rs.example.com/other"))
+
+      assert {:error, :resource_mismatch} =
+               Discovery.fetch_resource(@resource, req_options: [plug: plug])
+
+      # From an advertised URL too: the pointer does not relax the identity check.
+      assert {:error, :resource_mismatch} =
+               Discovery.fetch_resource(@resource,
+                 metadata_url: "https://rs.example.com/custom/prm",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects a document without a resource member, or with malformed registered members" do
+      assert {:error, :invalid_metadata} =
+               Discovery.fetch_resource(@resource,
+                 req_options: [plug: json_plug(200, %{"authorization_servers" => []})]
+               )
+
+      for bad <- [
+            %{"authorization_servers" => ["http://op.example.com"]},
+            %{"authorization_servers" => ["https://op.example.com?x=1"]},
+            %{"authorization_servers" => "https://op.example.com"},
+            %{"jwks_uri" => "http://rs.example.com/jwks"},
+            %{"scopes_supported" => "read"},
+            %{"dpop_bound_access_tokens_required" => "yes"},
+            %{"resource_name" => 1}
+          ] do
+        plug = json_plug(200, resource_doc(@resource, bad))
+
+        assert {:error, :invalid_metadata} =
+                 Discovery.fetch_resource(@resource, req_options: [plug: plug])
+      end
+    end
+
+    test "keeps unregistered members and accepts a document without authorization_servers" do
+      doc = %{"resource" => @resource, "x_custom" => true}
+
+      assert {:ok, ^doc} =
+               Discovery.fetch_resource(@resource, req_options: [plug: json_plug(200, doc)])
+    end
+
+    test "rejects duplicate members before validation" do
+      body = ~s({"resource":"#{@resource}","resource":"https://rs.example.com/other"})
+
+      assert {:error, :invalid_metadata} =
+               Discovery.fetch_resource(@resource, req_options: [plug: raw_json_plug(200, body)])
+    end
+
+    test "surfaces a non-200 status and does not follow redirects" do
+      assert {:error, {:http_status, 404}} =
+               Discovery.fetch_resource(@resource, req_options: [plug: json_plug(404, %{})])
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "https://rs.example.com/elsewhere")
+        |> Plug.Conn.send_resp(302, "")
+      end
+
+      assert {:error, {:http_status, 302}} =
+               Discovery.fetch_resource(@resource, req_options: [plug: plug])
+    end
+  end
+
+  describe "authorization_server/2" do
+    @resource "https://rs.example.com/mcp"
+    @prm_path "/.well-known/oauth-protected-resource/mcp"
+    @oauth_path "/.well-known/oauth-authorization-server"
+    @oidc_path "/.well-known/openid-configuration"
+
+    # One plug serves every host in these tests, so it routes on the path the
+    # resource document and the issuer documents are requested from.
+    defp router(routes) do
+      fn conn ->
+        case Map.fetch(routes, conn.request_path) do
+          {:ok, {status, body}} -> json_plug(status, body).(conn)
+          :error -> json_plug(404, %{}).(conn)
+        end
+      end
+    end
+
+    defp issuer_doc(issuer \\ @issuer) do
+      %{
+        "issuer" => issuer,
+        "authorization_endpoint" => "#{issuer}/authorize",
+        "token_endpoint" => "#{issuer}/token"
+      }
+    end
+
+    test "follows the resource document to the single advertised issuer" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oauth_path => {200, issuer_doc()}
+        })
+
+      assert {:ok, %{resource: resource, issuer: @issuer, authorization_server: metadata}} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+
+      assert resource["resource"] == @resource
+      assert metadata["token_endpoint"] == "#{@issuer}/token"
+    end
+
+    test "falls back to the OpenID Connect document when the OAuth one is absent" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oidc_path => {200, issuer_doc()}
+        })
+
+      assert {:ok, %{authorization_server: %{"issuer" => @issuer}}} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+    end
+
+    test "fetches only the named issuer document when :well_known is given" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oidc_path => {200, issuer_doc()}
+        })
+
+      assert {:error, {:http_status, 404}} =
+               Discovery.authorization_server(@resource,
+                 well_known: :oauth_authorization_server,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "does not hide an issuer document failure other than 404 behind the fallback" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oauth_path => {500, %{}},
+          @oidc_path => {200, issuer_doc()}
+        })
+
+      assert {:error, {:http_status, 500}} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+    end
+
+    test "still requires the issuer document to name the selected issuer" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oauth_path => {200, issuer_doc("https://other.example.com")}
+        })
+
+      assert {:error, :issuer_mismatch} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+    end
+
+    test "requires a choice among several advertised issuers and honors it" do
+      other = "https://other.example.com"
+      doc = resource_doc(@resource, %{"authorization_servers" => [@issuer, other, @issuer]})
+      plug = router(%{@prm_path => {200, doc}, @oauth_path => {200, issuer_doc()}})
+
+      assert {:error, {:select_authorization_server, [@issuer, ^other]}} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+
+      assert {:ok, %{issuer: @issuer}} =
+               Discovery.authorization_server(@resource,
+                 issuer: @issuer,
+                 req_options: [plug: plug]
+               )
+
+      assert {:error, :unadvertised_authorization_server} =
+               Discovery.authorization_server(@resource,
+                 issuer: "https://unlisted.example.com",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "fails when the resource advertises no authorization server" do
+      for doc <- [
+            %{"resource" => @resource},
+            resource_doc(@resource, %{"authorization_servers" => []})
+          ] do
+        plug = router(%{@prm_path => {200, doc}})
+
+        assert {:error, :no_authorization_server} =
+                 Discovery.authorization_server(@resource, req_options: [plug: plug])
+      end
+    end
+
+    test "reads the metadata URL from a WWW-Authenticate challenge (RFC 9728 §5.1)" do
+      plug =
+        router(%{
+          "/custom/prm" => {200, resource_doc(@resource)},
+          @oauth_path => {200, issuer_doc()}
+        })
+
+      challenge =
+        ~s(Bearer error="invalid_token", resource_metadata="https://rs.example.com/custom/prm")
+
+      assert {:ok, %{issuer: @issuer}} =
+               Discovery.authorization_server(@resource,
+                 www_authenticate: challenge,
+                 req_options: [plug: plug]
+               )
+
+      assert {:ok, %{issuer: @issuer}} =
+               Discovery.authorization_server(@resource,
+                 www_authenticate: [~s(Basic realm="x"), challenge],
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "derives the well-known location when the challenge carries no usable pointer" do
+      plug =
+        router(%{
+          @prm_path => {200, resource_doc(@resource)},
+          @oauth_path => {200, issuer_doc()}
+        })
+
+      for header <- [
+            ~s(Bearer error="invalid_token"),
+            ~s(Bearer resource_metadata="http://rs.example.com/prm")
+          ] do
+        assert {:ok, %{issuer: @issuer}} =
+                 Discovery.authorization_server(@resource,
+                   www_authenticate: header,
+                   req_options: [plug: plug]
+                 )
+      end
+    end
+
+    test "an explicit :metadata_url takes precedence over the challenge" do
+      plug =
+        router(%{
+          "/explicit/prm" => {200, resource_doc(@resource)},
+          @oauth_path => {200, issuer_doc()}
+        })
+
+      assert {:ok, _} =
+               Discovery.authorization_server(@resource,
+                 metadata_url: "https://rs.example.com/explicit/prm",
+                 www_authenticate:
+                   ~s(Bearer resource_metadata="https://rs.example.com/custom/prm"),
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "a challenge pointing at a document for another resource is refused" do
+      plug = router(%{"/custom/prm" => {200, resource_doc("https://rs.example.com/other")}})
+      challenge = ~s(Bearer resource_metadata="https://rs.example.com/custom/prm")
+
+      assert {:error, :resource_mismatch} =
+               Discovery.authorization_server(@resource,
+                 www_authenticate: challenge,
+                 req_options: [plug: plug]
+               )
+    end
+  end
+
   describe "fetch_jwks/2" do
     test "returns a keys document" do
       jwks = %{"keys" => [%{"kty" => "EC", "crv" => "P-256", "kid" => "k1"}]}

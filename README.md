@@ -84,15 +84,19 @@ the tool for DPoP-binding arbitrary outgoing requests.
 - `AttestoClient.UserInfo` — verify signed OpenID Connect UserInfo responses
   and bind them to a verified ID Token subject when supplied.
 - `AttestoClient.Discovery` — fetch and read authorization-server metadata and
-  JWKS (RFC 8414 / OpenID Connect Discovery 1.0).
+  JWKS (RFC 8414 / OpenID Connect Discovery 1.0), and find the authorization
+  server for a protected resource from its RFC 9728 metadata.
+- `AttestoClient.WWWAuthenticate` — read `WWW-Authenticate` challenges,
+  including the RFC 9728 `resource_metadata` pointer.
 - `AttestoClient.ResourceServer` — verify remote-issuer RFC 9068 JWT access
   tokens, coordinate JWKS refresh, and enforce exact OAuth scopes.
 - `AttestoClient.ResourceServer.Plug` — authenticate Bearer, DPoP, and mTLS
   requests, fail closed on missing sender-constraint evidence, and assign
   verified claims.
 - `AttestoClient.AuthorizationCode` — OAuth or OIDC Authorization Code flow
-  with S256 PKCE, PAR, DPoP, issuer and browser-session binding, and one-time
-  state; OIDC additionally verifies nonce and the ID Token.
+  with S256 PKCE, PAR, DPoP, RFC 8707 resource indicators, issuer and
+  browser-session binding, and one-time state; OIDC additionally verifies nonce
+  and the ID Token.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
   single-node transaction store with atomic consumption.
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,

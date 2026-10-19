@@ -163,6 +163,47 @@ Benign fixed endpoint parameters remain supported.
 See the [Credential wallet guide](credential-wallet.md#3-use-authorization-code-issuance-with-par-and-dpop)
 for a complete plain OAuth/PAR integration example.
 
+## Discover the authorization server from a protected resource
+
+A client that holds only a resource server's URL, or has just received its
+401, can learn the issuer from the resource's RFC 9728 metadata instead of
+configuration. `AttestoClient.Discovery.authorization_server/2` reads that
+document, from the `resource_metadata` pointer in the challenge when there is
+one and otherwise from the well-known location derived from the resource
+identifier, selects the advertised issuer, and fetches the issuer's metadata:
+
+```elixir
+{:ok, %{issuer: issuer, authorization_server: metadata, resource: resource}} =
+  AttestoClient.Discovery.authorization_server("https://rs.example/mcp",
+    www_authenticate: Req.Response.get_header(response, "www-authenticate")
+  )
+
+{:ok, request} =
+  AttestoClient.AuthorizationCode.start(store,
+    protocol: :oauth,
+    issuer: issuer,
+    metadata: metadata,
+    client_id: "my-client",
+    browser_binding: browser_binding,
+    redirect_uri: "https://app.example.com/oauth/callback",
+    scopes: resource["scopes_supported"] || [],
+    resource: resource["resource"]
+  )
+```
+
+A document whose `resource` differs from the identifier it was requested for
+is refused whichever URL advertised it. When the resource lists several
+issuers the call returns `{:error, {:select_authorization_server, issuers}}`;
+pass the chosen one as `:issuer`.
+
+`resource:` is the RFC 8707 resource indicator: the authorization server mints
+the token with that audience, so a token obtained for one resource is refused
+at another. It is sent on the authorization request (or the pushed request),
+pinned in the transaction, and repeated on the token request. Pass a list to
+request several; `callback/3` can then narrow the token request to a subset
+with its own `resource:` option. `resource` is a protocol-bound parameter and
+cannot be set through `:authorization_params`.
+
 ## Handle the callback
 
 Pass the original callback URI or raw URL-encoded query whenever it is

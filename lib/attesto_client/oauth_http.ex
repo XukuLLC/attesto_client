@@ -389,7 +389,7 @@ defmodule AttestoClient.OAuthHTTP do
            [
              url: target.url,
              method: :post,
-             form: form2,
+             form: form_pairs(form2),
              redirect: false,
              retry: false,
              receive_timeout: timeout_ms,
@@ -734,13 +734,25 @@ defmodule AttestoClient.OAuthHTTP do
     _error -> {:error, :transport_error}
   end
 
+  # A form value may be a list for a parameter that repeats (RFC 8707
+  # `resource`); a map cannot hold a repeated key, so the body is encoded from
+  # pairs with each value sent once.
+  defp form_pairs(form) when is_map(form) do
+    Enum.flat_map(form, fn
+      {key, values} when is_list(values) -> Enum.map(values, &{key, &1})
+      {key, value} -> [{key, value}]
+    end)
+  end
+
+  defp form_pairs(form), do: form
+
   defp open_request(target, form, req_options, timeout_ms, response_mode \\ :json) do
     options =
       req_options ++
         [
           url: target.url,
           method: :post,
-          form: form,
+          form: form_pairs(form),
           redirect: false,
           retry: false,
           receive_timeout: timeout_ms,

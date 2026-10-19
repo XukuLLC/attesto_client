@@ -267,6 +267,125 @@ defmodule AttestoClient.AuthorizationCodeTest do
              )
   end
 
+  test "sends RFC 8707 resource indicators on the authorization and token requests" do
+    store = start_supervised!(ETS)
+    resources = ["https://rs.example/mcp", "https://files.example/api?tenant=a"]
+    parent = self()
+
+    # The stub token endpoint mints an ID Token for the flow's nonce, so each
+    # exchange gets a plug that closes over the started request.
+    exchange = fn started, callback_opts ->
+      nonce =
+        started.url
+        |> URI.parse()
+        |> Map.fetch!(:query)
+        |> URI.decode_query()
+        |> Map.fetch!("nonce")
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/token" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(parent, {:token_body, body})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              JSON.encode!(%{
+                "access_token" => "access-1",
+                "token_type" => "Bearer",
+                "id_token" => id_token(nonce, "access-1", %{"c_hash" => hash_claim("code-1")})
+              })
+            )
+
+          "/jwks" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, JSON.encode!(public_jwks()))
+        end
+      end
+
+      callback(
+        {ETS, store},
+        %{"state" => started.state, "code" => "code-1", "iss" => @issuer},
+        [req_options: [plug: plug], timeout: 30_000] ++ callback_opts
+      )
+    end
+
+    assert {:ok, started} = start_flow(store, resource: resources)
+    query = started.url |> URI.parse() |> Map.fetch!(:query)
+    assert query_values(query, "resource") == resources
+
+    assert {:ok, _result} = exchange.(started, [])
+    assert_receive {:token_body, body}
+    assert query_values(body, "resource") == resources
+    assert URI.decode_query(body)["grant_type"] == "authorization_code"
+
+    # The token request may narrow to a subset of what was authorized.
+    assert {:ok, narrowed} = start_flow(store, resource: resources)
+    assert {:ok, _result} = exchange.(narrowed, resource: "https://rs.example/mcp")
+    assert_receive {:token_body, body}
+    assert query_values(body, "resource") == ["https://rs.example/mcp"]
+
+    # A single indicator is sent once, and a flow without one sends none.
+    assert {:ok, single} = start_flow(store, resource: "https://rs.example/mcp")
+
+    assert query_values(single.url |> URI.parse() |> Map.fetch!(:query), "resource") ==
+             ["https://rs.example/mcp"]
+
+    assert {:ok, none} = start_flow(store)
+    assert query_values(none.url |> URI.parse() |> Map.fetch!(:query), "resource") == []
+    assert {:ok, _result} = exchange.(none, [])
+    assert_receive {:token_body, body}
+    assert query_values(body, "resource") == []
+  end
+
+  test "rejects malformed resource indicators and resource outside the authorized set" do
+    store = start_supervised!(ETS)
+    no_request = fn _conn -> flunk("no token request expected") end
+
+    for bad <- ["", "not a uri", "https://rs.example/mcp#frag", ["https://rs.example", 1], []] do
+      assert {:error, :invalid_resource} = start_flow(store, resource: bad), inspect(bad)
+    end
+
+    assert {:error, :invalid_authorization_params} =
+             start_flow(store, authorization_params: %{"resource" => "https://rs.example/mcp"})
+
+    assert {:ok, started} = start_flow(store, resource: "https://rs.example/mcp")
+
+    assert {:error, :invalid_resource} =
+             callback(
+               {ETS, store},
+               %{"state" => started.state, "code" => "code-1", "iss" => @issuer},
+               resource: "https://other.example/api",
+               req_options: [plug: no_request]
+             )
+
+    # The transaction was consumed by the refused callback.
+    assert {:error, {:invalid_state, :not_found}} =
+             callback({ETS, store}, %{"state" => started.state, "code" => "code-1"},
+               req_options: [plug: no_request]
+             )
+
+    assert {:ok, unpinned} = start_flow(store)
+
+    assert {:error, :invalid_resource} =
+             callback(
+               {ETS, store},
+               %{"state" => unpinned.state, "code" => "code-1", "iss" => @issuer},
+               resource: "https://rs.example/mcp",
+               req_options: [plug: no_request]
+             )
+  end
+
+  defp query_values(query, name) do
+    query
+    |> URI.query_decoder()
+    |> Enum.filter(&(elem(&1, 0) == name))
+    |> Enum.map(&elem(&1, 1))
+  end
+
   test "forwards the callback resolver to the stored metadata's JWKS fetch" do
     store = start_supervised!(ETS)
     assert {:ok, started} = start_flow(store)

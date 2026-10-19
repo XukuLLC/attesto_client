@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `AttestoClient.Discovery.fetch_resource/2` reads a protected resource's
+  RFC 9728 metadata, from the well-known location derived from its identifier
+  or from the URL a `WWW-Authenticate` challenge advertised, and refuses a
+  document whose `resource` differs from the identifier it was requested for.
+  Advertised authorization servers must be valid issuer identifiers and
+  `jwks_uri` must be `https`.
+- `AttestoClient.Discovery.authorization_server/2` follows that document to
+  the issuer's own metadata: it selects the single advertised authorization
+  server or the `:issuer` chosen among several, tries the RFC 8414 document
+  before the OpenID Connect one, and returns both documents with the issuer.
+- `AttestoClient.WWWAuthenticate` parses `WWW-Authenticate` challenges
+  (RFC 9110 §11.6.1), several per field, and reads the RFC 9728
+  `resource_metadata` pointer. The DPoP nonce retry now reads challenges
+  through it.
+- `AttestoClient.AuthorizationCode.start/2` takes `:resource`, one or more
+  RFC 8707 resource indicators. Each is sent as a `resource` parameter on the
+  authorization request or the pushed request, pinned in the transaction, and
+  repeated on the token request; `callback/3` takes `:resource` to narrow the
+  token request to a subset of the pinned indicators. A malformed indicator,
+  or one outside the pinned set, is `{:error, :invalid_resource}`.
+
+### Changed
+
+- `resource` is now a protocol-bound parameter name: it is rejected in
+  `:authorization_params` and in discovered endpoint query strings, so a
+  resource indicator reaches both requests through the `:resource` option
+  rather than the authorization request alone.
+- Form bodies are encoded from parameter pairs, so a repeated parameter such
+  as `resource` is sent once per value.
+
 ## [2.10.0] - 2026-10-18
 
 ### Security

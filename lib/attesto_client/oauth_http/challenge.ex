@@ -2,6 +2,7 @@ defmodule AttestoClient.OAuthHTTP.Challenge do
   @moduledoc false
 
   alias AttestoClient.Wallet.CredentialJSON
+  alias AttestoClient.WWWAuthenticate
 
   @spec attestation_error?(Req.Response.t()) :: boolean()
   def attestation_error?(%Req.Response{
@@ -46,72 +47,16 @@ defmodule AttestoClient.OAuthHTTP.Challenge do
 
   defp dpop_error(%Req.Response{} = response), do: dpop_authenticate_error(response)
 
+  # RFC 9449 §8: the nonce demand arrives as a DPoP challenge carrying
+  # error="use_dpop_nonce". Only a DPoP-scheme challenge counts; a Bearer
+  # challenge, or the same text inside another parameter's value, does not.
   defp dpop_authenticate_error(response) do
-    response
-    |> Req.Response.get_header("www-authenticate")
-    |> Enum.find_value(fn header -> if dpop_nonce_error?(header), do: "use_dpop_nonce" end)
-  end
+    nonce_required? =
+      response
+      |> Req.Response.get_header("www-authenticate")
+      |> WWWAuthenticate.parse()
+      |> Enum.any?(&(&1.scheme == "dpop" and &1.params["error"] == "use_dpop_nonce"))
 
-  defp dpop_nonce_error?(header) when is_binary(header) do
-    header
-    |> auth_header_parts()
-    |> Enum.reduce_while(nil, &reduce_auth_header_part/2)
-    |> Kernel.==(true)
-  end
-
-  defp dpop_nonce_error?(_invalid), do: false
-
-  defp reduce_auth_header_part(part, scheme) do
-    case auth_header_part(part) do
-      {:challenge, next_scheme, params} -> auth_header_result(next_scheme, params)
-      {:params, params} -> auth_header_result(scheme, params)
-    end
-  end
-
-  defp auth_header_result(scheme, params) do
-    if dpop_scheme?(scheme) and dpop_nonce_error_param?(params),
-      do: {:halt, true},
-      else: {:cont, scheme}
-  end
-
-  defp auth_header_parts(header), do: split_auth_header(header, false, false, [], [])
-
-  defp split_auth_header(<<>>, _quoted?, _escaped?, current, parts) do
-    [current |> Enum.reverse() |> IO.iodata_to_binary() | parts]
-    |> Enum.reverse()
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp split_auth_header(<<?,, rest::binary>>, false, _escaped?, current, parts) do
-    part = current |> Enum.reverse() |> IO.iodata_to_binary()
-    split_auth_header(rest, false, false, [], [part | parts])
-  end
-
-  defp split_auth_header(<<?", rest::binary>>, quoted?, false, current, parts),
-    do: split_auth_header(rest, not quoted?, false, [?" | current], parts)
-
-  defp split_auth_header(<<?\\, rest::binary>>, true, false, current, parts),
-    do: split_auth_header(rest, true, true, [?\\ | current], parts)
-
-  defp split_auth_header(<<char, rest::binary>>, quoted?, _escaped?, current, parts),
-    do: split_auth_header(rest, quoted?, false, [char | current], parts)
-
-  defp auth_header_part(part) do
-    case Regex.run(~r/^([!#$%&'*+\-.^_`|~0-9A-Za-z]+)(.*)$/s, part, capture: :all_but_first) do
-      [token, rest] ->
-        rest = String.trim_leading(rest)
-        if String.starts_with?(rest, "="), do: {:params, part}, else: {:challenge, token, rest}
-
-      _invalid ->
-        {:params, part}
-    end
-  end
-
-  defp dpop_scheme?(scheme) when is_binary(scheme), do: String.downcase(scheme) == "dpop"
-  defp dpop_scheme?(_other), do: false
-
-  defp dpop_nonce_error_param?(params) do
-    Regex.match?(~r/^\s*(?i:error)\s*=\s*(?:"use_dpop_nonce"|use_dpop_nonce)\s*$/, params)
+    if nonce_required?, do: "use_dpop_nonce"
   end
 end

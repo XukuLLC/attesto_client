@@ -121,6 +121,43 @@ defmodule AttestoClient.AuthorizationCodeOAuthTest do
            }
   end
 
+  test "repeats RFC 8707 resource indicators in a pushed authorization request" do
+    parent = self()
+    resources = ["https://rs.example/mcp", "https://files.example/api"]
+
+    plug = fn conn ->
+      assert conn.request_path == "/par"
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:par_body, body})
+
+      conn
+      |> Plug.Conn.put_status(201)
+      |> Req.Test.json(%{
+        "request_uri" => "urn:ietf:params:oauth:request_uri:opaque",
+        "expires_in" => 90
+      })
+    end
+
+    assert {:ok, _started} =
+             AuthorizationCode.start(
+               store(),
+               opts(
+                 par: true,
+                 resource: resources,
+                 metadata:
+                   metadata(%{"pushed_authorization_request_endpoint" => @issuer <> "/par"}),
+                 req_options: [plug: plug]
+               )
+             )
+
+    assert_receive {:par_body, body}
+
+    assert body
+           |> URI.query_decoder()
+           |> Enum.filter(&(elem(&1, 0) == "resource"))
+           |> Enum.map(&elem(&1, 1)) == resources
+  end
+
   test "required PAR cannot be downgraded and missing or malformed PAR configuration fails" do
     required =
       metadata(%{
