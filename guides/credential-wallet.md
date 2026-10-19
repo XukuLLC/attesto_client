@@ -392,7 +392,7 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 ## Development and verification
 
 When developing both libraries in sibling source checkouts, use
-`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.10.0
+`ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient 2.11.0
 requires Attesto 2.6.0 or later, including for unencrypted wallet operations,
 so installations use the shared JWS, DPoP, URI, and outbound-address policy.
 

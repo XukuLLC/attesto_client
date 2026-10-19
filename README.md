@@ -190,7 +190,7 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.10`.
+a new major version. Pin to `~> 2.11`.
 
 ## Requirements
 
@@ -202,7 +202,7 @@ compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
 working older-Elixir installation.
 
-Deploy AttestoClient 2.10.0 with Attesto 2.6.0 or later in the 2.x line. The core
+Deploy AttestoClient 2.11.0 with Attesto 2.6.0 or later in the 2.x line. The core
 floor supplies the shared strict JWS verifier, DPoP proof builder, URI policy,
 and outbound-address policy used by this release.
 
