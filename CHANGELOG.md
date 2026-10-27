@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] - 2026-10-27
+
+### Security
+
+- Require JOSE 1.11.13 or later, which fixes CVE-2026-65625 through
+  CVE-2026-65632. With earlier JOSE releases, ID token and request-object
+  verification accepted ECDSA signatures padded with leading zero bytes.
+  AttestoClient decrypts no JWEs, and wallet response encryption already
+  accepted only a public P-256 verifier key.
+
 ## [2.11.0] - 2026-10-19
 
 ### Added

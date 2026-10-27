@@ -195,7 +195,7 @@ a new major version. Pin to `~> 2.11`.
 ## Requirements
 
 AttestoClient requires Elixir 1.18 or later, Attesto 2.6.0 or later within the
-Attesto 2.x line, and JOSE 1.11.12 or later within the JOSE 1.x line.
+Attesto 2.x line, and JOSE 1.11.13 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
 compatible releases. Both this package and `attesto` use Elixir's built-in
