@@ -42,15 +42,18 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @behaviour Elixir.Plug
 
-    import Elixir.Plug.Conn
-
-    alias Attesto.DPoP
-    alias Attesto.MTLS
-    alias Attesto.Plug.OAuthError
+    alias Attesto.Plug.Authenticate, as: AttestoAuthenticate
     alias AttestoClient.ResourceServer
 
     @default_claims_key :attesto_claims
-    @transport_keys [:resource_metadata, :send_error, :www_authenticate, :no_store]
+    @policy_keys [
+      :required_scopes,
+      :allowed_subjects,
+      :allowed_client_ids,
+      :max_token_age_seconds,
+      :max_token_lifetime_seconds,
+      :now
+    ]
 
     @impl Elixir.Plug
     def init(opts) when is_list(opts) do
@@ -82,370 +85,51 @@ if Code.ensure_loaded?(Plug.Conn) do
               "AttestoClient.ResourceServer.Plug: :nonce_check requires :nonce_issue"
       end
 
-      opts
+      AttestoAuthenticate.init(core_opts(opts))
     end
 
     @impl Elixir.Plug
     def call(conn, opts) do
-      with {:ok, scheme, token} <- authorization(conn),
-           {:ok, dpop_jkt, dpop_replay_key, dpop_jti, replay_ttl} <-
-             verify_dpop(conn, scheme, token, opts),
-           {:ok, mtls_thumbprint} <- certificate_thumbprint(conn, opts),
-           {:ok, claims} <-
-             ResourceServer.verify(resolve_server(opts), token,
-               required_scopes: Keyword.get(opts, :required_scopes, []),
-               allowed_subjects: Keyword.get(opts, :allowed_subjects),
-               allowed_client_ids: Keyword.get(opts, :allowed_client_ids),
-               max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
-               max_token_lifetime_seconds: Keyword.get(opts, :max_token_lifetime_seconds),
-               dpop_jkt: dpop_jkt,
-               mtls_cert_thumbprint: mtls_thumbprint,
-               now: Keyword.get(opts, :now)
-             ),
-           :ok <- claim_dpop_jti(dpop_replay_key, dpop_jti, replay_ttl, opts) do
-        assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
-      else
-        :missing ->
-          missing_credentials(conn, opts)
-
-        :malformed ->
-          OAuthError.unauthorized(
-            conn,
-            :bearer,
-            "invalid_token",
-            error_opts(opts, description: "malformed Authorization header")
-          )
-
-        {:dpop_error, :use_dpop_nonce} ->
-          dpop_nonce_challenge(conn, opts)
-
-        {:dpop_error, _reason} ->
-          OAuthError.unauthorized(
-            conn,
-            :dpop,
-            "invalid_dpop_proof",
-            error_opts(opts)
-          )
-
-        {:certificate_error, _reason} ->
-          OAuthError.unauthorized(
-            conn,
-            :bearer,
-            "invalid_token",
-            error_opts(opts)
-          )
-
-        {:error, {:jwks_refresh_failed, _reason}} ->
-          service_unavailable(conn, opts)
-
-        {:error, :insufficient_scope} ->
-          OAuthError.insufficient_scope(
-            conn,
-            Keyword.get(opts, :required_scopes, []),
-            request_scheme(conn),
-            error_opts(opts)
-          )
-
-        {:error, reason} ->
-          OAuthError.unauthorized(
-            conn,
-            token_error_scheme(conn, reason),
-            "invalid_token",
-            error_opts(opts)
-          )
-      end
+      AttestoAuthenticate.call(conn, ensure_core_opts(opts))
     end
 
-    defp authorization(conn) do
-      case get_req_header(conn, "authorization") do
-        [value] -> parse_authorization(value)
-        [] -> :missing
-        _multiple -> :malformed
-      end
+    @doc false
+    def verify_token(server, token, verify_opts, policy_opts) do
+      ResourceServer.verify(
+        server,
+        token,
+        Keyword.merge(policy_opts, Keyword.take(verify_opts, [:dpop_jkt, :mtls_cert_thumbprint]))
+      )
     end
 
-    defp parse_authorization(value) do
-      case String.split(value, " ", parts: 2) do
-        [raw_scheme, raw_token] ->
-          token = String.trim(raw_token)
-
-          case {String.downcase(raw_scheme), token} do
-            {_scheme, ""} -> :malformed
-            {"bearer", token} -> {:ok, :bearer, token}
-            {"dpop", token} -> {:ok, :dpop, token}
-            _other -> :malformed
-          end
-
-        _other ->
-          :malformed
-      end
+    defp ensure_core_opts(opts) do
+      if Keyword.has_key?(opts, :verify), do: opts, else: init(opts)
     end
 
-    defp verify_dpop(conn, :bearer, _token, _opts) do
-      case get_req_header(conn, "dpop") do
-        [] -> {:ok, nil, nil, nil, nil}
-        _present -> {:dpop_error, :dpop_scheme_required}
-      end
-    end
+    defp core_opts(opts) do
+      policy =
+        opts
+        |> Keyword.take(@policy_keys)
+        |> Keyword.put_new(:required_scopes, [])
 
-    defp verify_dpop(conn, :dpop, token, opts) do
-      case get_req_header(conn, "dpop") do
-        [proof] -> verify_dpop_proof(conn, proof, token, opts)
-        _other -> {:dpop_error, :missing_proof}
-      end
-    end
-
-    defp verify_dpop_proof(conn, proof, token, opts) do
-      if replay_protected?(opts) do
-        case htu(conn, opts) do
-          {:ok, http_uri} -> verify_dpop_signature(conn, proof, token, http_uri, opts)
-          {:error, reason} -> {:dpop_error, reason}
-        end
-      else
-        {:dpop_error, :replay_check_unconfigured}
-      end
-    end
-
-    defp verify_dpop_signature(conn, proof, token, http_uri, opts) do
-      verify_opts =
-        [http_method: conn.method, http_uri: http_uri, access_token: token]
-        |> put_if_present(:nonce_check, Keyword.get(opts, :nonce_check))
-        |> put_if_present(:now, Keyword.get(opts, :now))
-        |> put_if_present(:max_age_seconds, Keyword.get(opts, :dpop_max_age_seconds))
-
-      case DPoP.verify_proof(proof, verify_opts) do
-        {:ok, %{jkt: jkt, replay_key: replay_key, jti: jti, replay_ttl: ttl}} ->
-          {:ok, jkt, replay_key, jti, ttl}
-
-        {:error, reason} ->
-          {:dpop_error, reason}
-      end
-    end
-
-    # A proof is signed by a caller-controlled key, so proof validation alone
-    # does not authenticate the caller. Claim its replay identity only after
-    # the access token and its cnf binding have verified; otherwise arbitrary
-    # requests can write one replay-store row apiece.
-    defp claim_dpop_jti(nil, _jti, _ttl, _opts), do: :ok
-
-    defp claim_dpop_jti(replay_key, jti, ttl_seconds, opts) when is_binary(replay_key) do
-      case Keyword.fetch!(opts, :replay_check).(replay_key, ttl_seconds) do
-        :ok ->
-          :ok
-
-        {:error, :replay} ->
-          Attesto.Telemetry.dpop_replay_detected(jti)
-          {:dpop_error, :replay}
-
-        _other ->
-          raise ArgumentError,
-                "AttestoClient.ResourceServer.Plug :replay_check must return :ok or " <>
-                  "{:error, :replay}"
-      end
-    end
-
-    defp replay_protected?(opts) do
-      is_function(Keyword.get(opts, :replay_check), 2)
-    end
-
-    defp certificate_thumbprint(conn, opts) do
-      case Keyword.get(opts, :cert_der) do
-        nil ->
-          {:ok, nil}
-
-        callback when is_function(callback, 1) ->
-          case callback.(conn) do
-            nil -> {:ok, nil}
-            der when is_binary(der) -> wrap_thumbprint(MTLS.compute_thumbprint(der))
-            _invalid -> {:certificate_error, :invalid_certificate}
-          end
-
-        _invalid ->
-          {:certificate_error, :invalid_certificate_callback}
-      end
-    end
-
-    defp wrap_thumbprint({:ok, thumbprint}), do: {:ok, thumbprint}
-    defp wrap_thumbprint({:error, reason}), do: {:certificate_error, reason}
-
-    defp resolve_server(opts) do
-      case Keyword.fetch!(opts, :server) do
-        callback when is_function(callback, 0) -> callback.()
-        server -> server
-      end
-    end
-
-    defp htu(conn, opts) do
-      case Keyword.get(opts, :htu) do
-        callback when is_function(callback, 1) ->
-          case callback.(conn) do
-            value when is_binary(value) and value != "" -> {:ok, value}
-            _invalid -> {:error, :invalid_http_uri}
-          end
-
-        _other ->
-          scheme = Atom.to_string(conn.scheme)
-
-          uri = %URI{
-            scheme: scheme,
-            host: unbracket_host(conn.host),
-            port: conn.port,
-            path: conn.request_path
-          }
-
-          {:ok, URI.to_string(uri)}
-      end
-    end
-
-    defp unbracket_host("[" <> rest) do
-      if String.ends_with?(rest, "]"), do: String.trim_trailing(rest, "]"), else: "[" <> rest
-    end
-
-    defp unbracket_host(host), do: host
-
-    defp request_scheme(conn) do
-      case get_req_header(conn, "authorization") do
-        [value] ->
-          if String.starts_with?(String.downcase(value), "dpop "), do: :dpop, else: :bearer
-
-        _other ->
-          :bearer
-      end
-    end
-
-    defp token_error_scheme(_conn, :dpop_proof_required), do: :dpop
-    defp token_error_scheme(conn, _reason), do: request_scheme(conn)
-
-    defp issue_nonce(opts) do
-      case Keyword.get(opts, :nonce_issue) do
-        callback when is_function(callback, 0) ->
-          case callback.() do
-            nonce when is_binary(nonce) and nonce != "" -> {:ok, nonce}
-            _invalid -> {:error, :invalid_nonce}
-          end
-
-        _other ->
-          {:error, :invalid_nonce}
-      end
-    end
-
-    defp dpop_nonce_challenge(conn, opts) do
-      case issue_nonce(opts) do
-        {:ok, nonce} ->
-          OAuthError.unauthorized(
-            conn,
-            :dpop,
-            "use_dpop_nonce",
-            error_opts(opts, dpop_nonce: nonce)
-          )
-
-        {:error, _reason} ->
-          OAuthError.unauthorized(
-            conn,
-            :dpop,
-            "invalid_dpop_proof",
-            error_opts(opts)
-          )
-      end
-    end
-
-    defp missing_credentials(conn, opts) do
-      transport_opts = error_opts(opts)
-
-      conn
-      |> put_no_store(transport_opts)
-      |> put_www_authenticate(bearer_challenge(opts), transport_opts)
-      |> send_transport_response(401, %{}, transport_opts)
-    end
-
-    defp bearer_challenge(opts) do
-      case Keyword.get(opts, :resource_metadata) do
-        url when is_binary(url) ->
-          if metadata_url?(url),
-            do: ~s(Bearer resource_metadata="#{escape_challenge_value(url)}"),
-            else: "Bearer"
-
-        _other ->
-          "Bearer"
-      end
-    end
-
-    defp metadata_url?(url) do
-      Attesto.URI.https_identifier?(url)
-    end
-
-    defp escape_challenge_value(value) do
-      value
-      |> String.replace("\\", "\\\\")
-      |> String.replace("\"", "\\\"")
-    end
-
-    defp service_unavailable(conn, opts) do
-      transport_opts = error_opts(opts)
-
-      conn
-      |> put_no_store(transport_opts)
-      |> send_service_unavailable(transport_opts)
-    end
-
-    defp send_service_unavailable(conn, opts) do
-      send_transport_response(conn, 503, %{"error" => "temporarily_unavailable"}, opts)
-    end
-
-    defp send_transport_response(conn, status, body, opts) do
-      case Keyword.get(opts, :send_error) do
-        callback when is_function(callback, 3) ->
-          callback.(conn, status, body)
-
-        {module, function} when is_atom(module) and is_atom(function) ->
-          apply(module, function, [conn, status, body])
-
-        {module, function, extra}
-        when is_atom(module) and is_atom(function) and is_list(extra) ->
-          apply(module, function, [conn, status, body | extra])
-
-        _other ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(status, JSON.encode!(body))
-          |> halt()
-      end
-    end
-
-    defp put_www_authenticate(conn, challenge, opts) do
-      case Keyword.get(opts, :www_authenticate) do
-        callback when is_function(callback, 2) ->
-          callback.(conn, challenge)
-
-        {module, function} when is_atom(module) and is_atom(function) ->
-          apply(module, function, [conn, challenge])
-
-        {module, function, extra}
-        when is_atom(module) and is_atom(function) and is_list(extra) ->
-          apply(module, function, [conn, challenge | extra])
-
-        _other ->
-          put_resp_header(conn, "www-authenticate", challenge)
-      end
-    end
-
-    defp put_no_store(conn, opts) do
-      case Keyword.get(opts, :no_store) do
-        callback when is_function(callback, 1) ->
-          callback.(conn)
-
-        {module, function} when is_atom(module) and is_atom(function) ->
-          apply(module, function, [conn])
-
-        {module, function, extra}
-        when is_atom(module) and is_atom(function) and is_list(extra) ->
-          apply(module, function, [conn | extra])
-
-        _other ->
-          conn
-          |> put_resp_header("cache-control", "no-store")
-          |> put_resp_header("pragma", "no-cache")
-      end
+      opts
+      |> Keyword.drop([
+        :server,
+        :dpop_replay_unprotected_acknowledged?,
+        :allow_http | @policy_keys
+      ])
+      |> Keyword.merge(
+        config: Keyword.fetch!(opts, :server),
+        verify: {__MODULE__, :verify_token, [policy]},
+        required_scopes: Keyword.get(opts, :required_scopes, []),
+        claims_key: Keyword.get(opts, :claims_key, @default_claims_key),
+        bearer_methods: [:header],
+        dpop_replay_unprotected_acknowledged?: false,
+        allow_ambient_mtls: true,
+        missing_credentials_challenge: :bare_bearer,
+        include_error_description: false,
+        now: Keyword.get(opts, :now)
+      )
     end
 
     defp validate_optional_callback!(opts, key, arity) do
@@ -514,15 +198,6 @@ if Code.ensure_loaded?(Plug.Conn) do
           raise ArgumentError,
                 "AttestoClient.ResourceServer.Plug: #{inspect(key)} must be a list"
       end
-    end
-
-    defp put_if_present(opts, _key, nil), do: opts
-    defp put_if_present(opts, key, value), do: Keyword.put(opts, key, value)
-
-    defp error_opts(opts, extra \\ []) do
-      opts
-      |> Keyword.take(@transport_keys)
-      |> Keyword.merge(extra)
     end
   end
 end

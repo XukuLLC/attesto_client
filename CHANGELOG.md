@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.0] - 2026-10-31
+
+### Changed
+
+- `AttestoClient.ResourceServer.Plug` now delegates bearer, DPoP, and mTLS
+  request authentication, challenge formatting, and scope enforcement to
+  `Attesto.Plug.Authenticate`, and `AttestoClient.ResourceServer` delegates
+  `cnf` sender-constraint checks to `Attesto.Token.check_confirmation/2` while
+  preserving the client's documented challenges, status codes, and error atoms.
+- `AttestoClient.Discovery` delegates outbound endpoint URL validation, DNS
+  resolution, and public-IP screening to `Attesto.OutboundTarget.screen/2`, and
+  the client's internal strict JSON decoder delegates duplicate-key and
+  depth-bounded decoding to `Attesto.StrictJSON.decode/1`.
+- Require Attesto `>= 2.8.0 and < 3.0.0` in the 2.x line for the shared
+  `Attesto.OutboundTarget`, `Attesto.StrictJSON`, `Attesto.Plug.Authenticate`,
+  and `Attesto.Token.check_confirmation/2` APIs.
+
 ## [2.11.1] - 2026-10-27
 
 ### Security

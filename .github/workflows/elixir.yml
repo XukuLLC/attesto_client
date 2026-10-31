@@ -30,19 +30,19 @@ jobs:
       matrix:
         include:
           - elixir: "1.18.1"
-            otp: "27.2"
+            otp: "27.3.4.19"
           - elixir: "1.18.4"
-            otp: "28.0"
+            otp: "28.5.0.8"
           - elixir: "1.19.4"
-            otp: "28.3"
+            otp: "28.5.0.8"
           - elixir: "1.20.1"
-            otp: "29.0.2"
+            otp: "29.1.2"
             lint: true
 
     env:
       MIX_ENV: test
       ATTESTO_PATH: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && '1' || '0' }}
-      REVIEWED_CORE_REF: 5df398e193a0db1e94b2f804beec596d41503669
+      REVIEWED_CORE_REF: a41ced091692626c919e0edaebb265a90ef30911
 
     steps:
       - name: Checkout code
@@ -132,7 +132,7 @@ jobs:
         run: >-
           mix run --no-compile -e 'dep = Enum.find(Mix.Dep.cached(), &(&1.app == :attesto));
           unless dep && dep.scm == Mix.SCM.Path && Path.expand(dep.opts[:dest]) == Path.expand("../attesto"), do: System.halt(1);
-          unless Application.spec(:attesto, :vsn) |> to_string() == "2.6.0", do: System.halt(1)'
+          unless Application.spec(:attesto, :vsn) |> to_string() == "2.8.0", do: System.halt(1)'
 
       - name: Run tests
         run: mix test --trace
@@ -162,7 +162,7 @@ jobs:
         run: mix dialyzer
 
   attesto-2-hex:
-    name: Published Attesto 2.6.0 compatibility
+    name: Published Attesto 2.8.0 compatibility
     if: github.event_name != 'pull_request' && inputs.dependency_source != 'candidate'
     runs-on: ubuntu-latest
 
@@ -177,7 +177,7 @@ jobs:
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: "1.20.1"
-          otp-version: "29.0.2"
+          otp-version: "29.1.2"
 
       - name: Set up Python (PyJWT parity leg)
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -200,7 +200,7 @@ jobs:
       - name: Assert published hardened Attesto dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
-          unless Version.match?(version, ">= 2.6.0 and < 3.0.0"), do: System.halt(1)'
+          unless Version.match?(version, ">= 2.8.0 and < 3.0.0"), do: System.halt(1)'
 
       - name: Run tests against published Attesto 2
         run: mix test --trace

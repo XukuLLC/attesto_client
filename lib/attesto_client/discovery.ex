@@ -61,7 +61,7 @@ defmodule AttestoClient.Discovery do
   @resource_booleans ~w(dpop_bound_access_tokens_required tls_client_certificate_bound_access_tokens)
   @default_max_response_bytes 512 * 1024
 
-  alias Attesto.IPAddress
+  alias Attesto.OutboundTarget
   alias AttestoClient.Deadline
   alias AttestoClient.HTTPPolicy
   alias AttestoClient.PinnedRequest
@@ -543,26 +543,26 @@ defmodule AttestoClient.Discovery do
 
   def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
     if Attesto.URI.https_identifier?(url),
-      do: screen_uri(URI.parse(url), opts),
+      do: screen_uri(url, URI.parse(url), opts),
       else: {:error, :blocked_host}
   end
 
   def screen_endpoint(_url, _opts), do: {:error, :blocked_host}
 
-  defp screen_uri(%URI{host: host} = uri, opts) do
+  defp screen_uri(url, %URI{host: host} = uri, opts) do
     with {:ok, test_transport?} <- req_test_transport?(opts) do
-      if test_transport?, do: {:ok, target(uri, host)}, else: screen_resolved(uri, opts)
+      if test_transport?,
+        do:
+          {:ok, %{url: URI.to_string(uri), host: host, authority: OutboundTarget.authority(uri)}},
+        else: screen_resolved(url, opts)
     end
   end
 
-  defp screen_resolved(%URI{host: host} = uri, opts) do
-    with {:ok, resolver} <- resolver(opts),
-         {:ok, addresses} <- resolve_addrs(host, resolver),
-         false <- Enum.any?(addresses, &blocked_ip?/1) do
-      {:ok, target(uri, hd(addresses))}
-    else
+  defp screen_resolved(url, opts) do
+    case OutboundTarget.screen(url, Keyword.take(opts, [:resolver])) do
+      {:ok, target} -> {:ok, target}
       {:error, :invalid_resolver} = error -> error
-      _other -> {:error, :blocked_host}
+      {:error, _reason} -> {:error, :blocked_host}
     end
   end
 
@@ -581,52 +581,4 @@ defmodule AttestoClient.Discovery do
         {:error, :unsafe_transport_options}
     end
   end
-
-  defp resolve_addrs(host, resolver) do
-    charlist = String.to_charlist(host)
-    v4 = lookup(resolver, charlist, :inet)
-    v6 = lookup(resolver, charlist, :inet6)
-
-    case v4 ++ v6 do
-      [] -> {:error, :unresolvable}
-      addrs -> {:ok, addrs}
-    end
-  end
-
-  defp resolver(opts) do
-    case Keyword.fetch(opts, :resolver) do
-      :error -> {:ok, &:inet.getaddrs/2}
-      {:ok, nil} -> {:ok, &:inet.getaddrs/2}
-      {:ok, resolver} when is_function(resolver, 2) -> {:ok, resolver}
-      {:ok, _invalid} -> {:error, :invalid_resolver}
-    end
-  end
-
-  defp lookup(resolver, host, family) do
-    case resolver.(host, family) do
-      {:ok, addresses} when is_list(addresses) -> addresses
-      _other -> []
-    end
-  end
-
-  defp target(uri, host) when is_binary(host) do
-    %{url: URI.to_string(uri), host: host, authority: authority(uri)}
-  end
-
-  defp target(uri, ip) do
-    host = ip |> :inet.ntoa() |> List.to_string()
-    %{url: URI.to_string(%{uri | host: host}), host: uri.host, authority: authority(uri)}
-  end
-
-  defp authority(%URI{host: host, port: port, scheme: scheme}) do
-    host = if String.contains?(host, ":"), do: "[" <> host <> "]", else: host
-
-    if default_port?(scheme, port), do: host, else: host <> ":" <> Integer.to_string(port)
-  end
-
-  defp default_port?("https", 443), do: true
-  defp default_port?("http", 80), do: true
-  defp default_port?(_scheme, _port), do: false
-
-  defp blocked_ip?(address), do: not IPAddress.public_fetch_destination?(address)
 end

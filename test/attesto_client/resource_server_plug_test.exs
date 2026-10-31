@@ -226,6 +226,60 @@ defmodule AttestoClient.ResourceServerPlugTest do
     refute_receive {:unexpected_replay_claim, _replay_key, _ttl}
   end
 
+  test "writes no DPoP replay row when token signature, expiry, or cnf.jkt binding fails", ctx do
+    table = :ets.new(:dpop_replay_regression, [:set, :public])
+
+    replay_check = fn replay_key, ttl ->
+      if :ets.insert_new(table, {replay_key, ttl}), do: :ok, else: {:error, :replayed}
+    end
+
+    proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
+    other_key = JOSE.JWK.generate_key({:ec, "P-256"})
+    jkt = Attesto.DPoP.compute_jkt(proof_key)
+    other_jkt = Attesto.DPoP.compute_jkt(other_key)
+
+    expired_token = access_token(ctx.key, %{"cnf" => %{"jkt" => jkt}, "exp" => @now - 10})
+    mismatched_token = access_token(ctx.key, %{"cnf" => %{"jkt" => other_jkt}})
+    valid_token = access_token(ctx.key, %{"cnf" => %{"jkt" => jkt}})
+
+    opts =
+      ResourceServerPlug.init(
+        server: ctx.server,
+        replay_check: replay_check,
+        now: @now
+      )
+
+    for token <- ["not-a-jwt", expired_token, mismatched_token] do
+      proof = dpop_proof(proof_key, token, "https://api.example/documents")
+
+      conn =
+        :get
+        |> conn("/documents")
+        |> external_https_conn()
+        |> put_req_header("authorization", "DPoP #{token}")
+        |> put_req_header("dpop", proof)
+        |> ResourceServerPlug.call(opts)
+
+      assert conn.halted
+      assert conn.status == 401
+      assert :ets.info(table, :size) == 0
+    end
+
+    # The same proof JTI ("proof-123") on a valid token now succeeds and claims exactly 1 row.
+    valid_proof = dpop_proof(proof_key, valid_token, "https://api.example/documents")
+
+    conn =
+      :get
+      |> conn("/documents")
+      |> external_https_conn()
+      |> put_req_header("authorization", "DPoP #{valid_token}")
+      |> put_req_header("dpop", valid_proof)
+      |> ResourceServerPlug.call(opts)
+
+    refute conn.halted
+    assert :ets.info(table, :size) == 1
+  end
+
   test "canonicalizes an IPv6 request authority when verifying DPoP htu", ctx do
     proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
     jkt = Attesto.DPoP.compute_jkt(proof_key)

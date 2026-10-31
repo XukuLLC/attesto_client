@@ -63,7 +63,7 @@ defmodule AttestoClient.ResourceServer do
 
   use GenServer
 
-  alias Attesto.{NumericDate, SecureCompare, SigningAlg}
+  alias Attesto.{NumericDate, SigningAlg}
   alias AttestoClient.{ClaimValidation, Discovery, Verifier}
 
   @default_fresh_ttl :timer.minutes(5)
@@ -500,38 +500,20 @@ defmodule AttestoClient.ResourceServer do
 
   defp check_required_scopes(_granted, _invalid), do: {:error, :insufficient_scope}
 
-  defp check_confirmation(%{"cnf" => %{"jkt" => expected} = confirmation}, opts)
-       when is_binary(expected) and map_size(confirmation) == 1 do
-    presented = Keyword.get(opts, :dpop_jkt)
+  defp check_confirmation(claims, opts) do
+    confirm_opts = [
+      dpop_jkt: Keyword.get(opts, :dpop_jkt),
+      mtls_cert_thumbprint: Keyword.get(opts, :mtls_cert_thumbprint),
+      allow_ambient_mtls: true
+    ]
 
-    cond do
-      not Attesto.MTLS.thumbprint_shape?(expected) -> {:error, :unsupported_confirmation}
-      presented == nil -> {:error, :dpop_proof_required}
-      not Attesto.MTLS.thumbprint_shape?(presented) -> {:error, :dpop_key_mismatch}
-      SecureCompare.equal?(expected, presented) -> :ok
-      true -> {:error, :dpop_key_mismatch}
+    case Attesto.Token.check_confirmation(claims, confirm_opts) do
+      :ok -> :ok
+      {:error, :dpop_binding_mismatch} -> {:error, :dpop_key_mismatch}
+      {:error, :mtls_cert_required} -> {:error, :mtls_certificate_required}
+      {:error, :mtls_binding_mismatch} -> {:error, :mtls_certificate_mismatch}
+      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp check_confirmation(%{"cnf" => %{"x5t#S256" => expected} = confirmation}, opts)
-       when is_binary(expected) and map_size(confirmation) == 1 do
-    presented = Keyword.get(opts, :mtls_cert_thumbprint)
-
-    cond do
-      Keyword.get(opts, :dpop_jkt) != nil -> {:error, :dpop_proof_unexpected}
-      not Attesto.MTLS.thumbprint_shape?(expected) -> {:error, :unsupported_confirmation}
-      presented == nil -> {:error, :mtls_certificate_required}
-      not Attesto.MTLS.thumbprint_shape?(presented) -> {:error, :mtls_certificate_mismatch}
-      SecureCompare.equal?(expected, presented) -> :ok
-      true -> {:error, :mtls_certificate_mismatch}
-    end
-  end
-
-  defp check_confirmation(%{"cnf" => _unsupported}, _opts),
-    do: {:error, :unsupported_confirmation}
-
-  defp check_confirmation(_claims, opts) do
-    if Keyword.get(opts, :dpop_jkt) != nil, do: {:error, :dpop_proof_unexpected}, else: :ok
   end
 
   defp fetch_snapshot(state) do
