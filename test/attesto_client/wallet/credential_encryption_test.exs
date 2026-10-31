@@ -273,6 +273,21 @@ defmodule AttestoClient.Wallet.CredentialEncryptionTest do
              )
   end
 
+  test "skips a request-encryption key that is not a usable P-256 point", ctx do
+    # The same recipient rules apply as for OID4VP response encryption: the
+    # key must decode to a point on P-256 and carry no private members.
+    off_curve = Map.put(ctx.public, "y", ctx.public["x"])
+    short = Map.put(ctx.public, "x", "AAAA")
+    with_private = Map.put(ctx.public, "d", ctx.public["x"])
+
+    for key <- [off_curve, short, with_private] do
+      metadata = put_in(ctx.metadata, ["credential_request_encryption", "jwks", "keys"], [key])
+
+      assert {:error, :unsupported_request_encryption_key} =
+               CredentialEncryption.prepare(credential_issuer_metadata: metadata)
+    end
+  end
+
   test "issuer and endpoint mismatches fail before HTTP", ctx do
     opts = [
       credential_issuer_metadata: ctx.metadata,

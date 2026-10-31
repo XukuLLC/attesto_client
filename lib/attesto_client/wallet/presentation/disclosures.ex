@@ -1,8 +1,10 @@
 defmodule AttestoClient.Wallet.Presentation.Disclosures do
   @moduledoc false
-  alias Attesto.JWS
+  alias Attesto.{JWS, SdJwt}
 
   @max_bytes 1_048_576
+  @max_disclosure_bytes 262_144
+  @hash_algorithms %{"sha-256" => :sha256, "sha-384" => :sha384, "sha-512" => :sha512}
 
   def filter(credential, paths)
       when is_binary(credential) and byte_size(credential) <= @max_bytes do
@@ -14,39 +16,39 @@ defmodule AttestoClient.Wallet.Presentation.Disclosures do
 
   def filter(_credential, _paths), do: {:error, :invalid_credential}
 
+  # Disclosures are decoded and validated by `Attesto.SdJwt.decode_disclosures/2`,
+  # the same rules the Verifier applies, so the Holder never presents a
+  # Disclosure the Verifier would reject. Each is kept with its encoded form so
+  # the presentation carries the issuer's exact bytes.
   defp filter_parts(issuer, rest, paths) do
+    encoded = Enum.drop(rest, -1)
+
     with true <- List.last(rest) == "" and length(rest) <= 1001,
+         true <- Enum.all?(encoded, &(byte_size(&1) <= @max_disclosure_bytes)),
          {:ok, claims} <- JWS.peek_json(issuer, :payload),
-         {:ok, alg} <- hash_algorithm(claims),
-         {:ok, disclosures} <- decode_disclosures(Enum.drop(rest, -1), alg) do
+         {:ok, sd_alg, hash_alg} <- hash_algorithm(claims),
+         {:ok, by_digest} <- SdJwt.decode_disclosures(encoded, sd_alg) do
+      disclosures =
+        Map.new(encoded, fn disclosure ->
+          digest = SdJwt.digest(disclosure, sd_alg)
+          {digest, {disclosure, Map.fetch!(by_digest, digest)}}
+        end)
+
       locations = locate(claims, [], disclosures, %{}, 0)
-      kept = Enum.filter(Enum.drop(rest, -1), &keep?(&1, locations, paths))
-      {:ok, Enum.join([issuer | kept] ++ [""], "~"), alg}
+      kept = Enum.filter(encoded, &keep?(&1, locations, paths))
+      {:ok, Enum.join([issuer | kept] ++ [""], "~"), hash_alg}
     else
       _ -> {:error, :invalid_credential}
     end
   end
 
   defp hash_algorithm(claims) do
-    case Map.get(claims, "_sd_alg", "sha-256") do
-      "sha-256" -> {:ok, :sha256}
-      "sha-384" -> {:ok, :sha384}
-      "sha-512" -> {:ok, :sha512}
-      _ -> {:error, :unsupported_sd_alg}
-    end
-  end
+    sd_alg = Map.get(claims, "_sd_alg", "sha-256")
 
-  defp decode_disclosures(encoded, alg) do
-    Enum.reduce_while(encoded, {:ok, %{}}, fn disclosure, {:ok, acc} ->
-      with true <- byte_size(disclosure) <= 262_144,
-           {:ok, bytes} <- JWS.decode64(disclosure),
-           {:ok, value} when is_list(value) and length(value) in [2, 3] <- JSON.decode(bytes) do
-        digest = :crypto.hash(alg, disclosure) |> Base.url_encode64(padding: false)
-        {:cont, {:ok, Map.put(acc, digest, {disclosure, value})}}
-      else
-        _ -> {:halt, {:error, :invalid_credential}}
-      end
-    end)
+    case Map.fetch(@hash_algorithms, sd_alg) do
+      {:ok, hash_alg} -> {:ok, sd_alg, hash_alg}
+      :error -> {:error, :unsupported_sd_alg}
+    end
   end
 
   defp locate(_value, _path, _disclosures, locations, depth) when depth > 64, do: locations

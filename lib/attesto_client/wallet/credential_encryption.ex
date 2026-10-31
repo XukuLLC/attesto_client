@@ -3,10 +3,10 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
 
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.Wallet.CredentialJSON
+  alias AttestoClient.Wallet.RecipientKey
 
   @encs ~w(A256GCM A128GCM)
   @max_bytes 2_000_000
-  @private_fields ~w(d p q dp dq qi oth k)
 
   @spec prepare(keyword()) :: {:ok, map()} | {:error, term()}
   def prepare(opts) do
@@ -119,7 +119,7 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
 
   defp valid_private_key?(%{"kty" => "EC", "crv" => "P-256", "d" => d} = key),
     do:
-      is_binary(d) and d != "" and allowed_key_use?(key) and
+      is_binary(d) and d != "" and RecipientKey.ecdh_usage?(key) and
         Map.get(key, "alg") in [nil, "ECDH-ES"]
 
   defp valid_private_key?(_key), do: false
@@ -140,7 +140,7 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
 
   defp select_recipient(%{"jwks" => %{"keys" => keys}}) when is_list(keys) do
     with :ok <- unambiguous_keys(keys) do
-      case Enum.find(keys, &valid_recipient?/1) do
+      case Enum.find(keys, &RecipientKey.usable?/1) do
         nil -> {:error, :unsupported_request_encryption_key}
         public -> {:ok, public}
       end
@@ -149,33 +149,13 @@ defmodule AttestoClient.Wallet.CredentialEncryption do
 
   defp select_recipient(_section), do: {:error, :invalid_credential_encryption_metadata}
 
+  # Every advertised key carries a distinct kid (checked before any is chosen),
+  # and the chosen one must be a usable ECDH-ES P-256 recipient.
   defp unambiguous_keys(keys) do
-    if keys != [] and length(keys) <= 128 and Enum.all?(keys, &valid_kid?/1) and
-         length(Enum.uniq_by(keys, & &1["kid"])) == length(keys),
-       do: :ok,
-       else: {:error, :invalid_credential_encryption_metadata}
+    if keys != [] and length(keys) <= 128 and RecipientKey.distinct_kids?(keys),
+      do: :ok,
+      else: {:error, :invalid_credential_encryption_metadata}
   end
-
-  defp valid_recipient?(%{"kty" => "EC", "crv" => "P-256", "alg" => "ECDH-ES"} = key) do
-    Enum.all?(~w(x y), &(is_binary(key[&1]) and key[&1] != "")) and
-      not Enum.any?(@private_fields, &Map.has_key?(key, &1)) and allowed_key_use?(key) and
-      valid_kid?(key)
-  end
-
-  defp valid_recipient?(_key), do: false
-
-  defp valid_kid?(%{"kid" => kid}), do: is_binary(kid) and byte_size(kid) in 1..256
-  defp valid_kid?(_key), do: false
-
-  defp allowed_key_use?(key),
-    do: Map.get(key, "use", "enc") == "enc" and valid_key_ops?(Map.get(key, "key_ops"))
-
-  defp valid_key_ops?(nil), do: true
-
-  defp valid_key_ops?(operations) when is_list(operations) and operations != [],
-    do: Enum.all?(operations, &(&1 in ~w(deriveKey deriveBits)))
-
-  defp valid_key_ops?(_operations), do: false
 
   defp encode(body, %{request: nil}), do: {:ok, {:json, body}}
 

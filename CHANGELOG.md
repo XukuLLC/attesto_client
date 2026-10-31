@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-10-31
+
+### Changed
+
+- `AttestoClient.Wallet` builds the `mso_mdoc` session transcript and
+  `DeviceAuthentication` bytes with `Attesto.Mdoc`, decodes SD-JWT
+  Disclosures with `Attesto.SdJwt.decode_disclosures/2`, and checks DCQL claim
+  paths with `Attesto.PresentationRequest.claim_path?/2`, so the Wallet applies
+  the same rules as the Verifier. A held SD-JWT whose Disclosures name a
+  reserved claim, repeat a digest, or carry a non-string salt or name is now
+  refused before presentation, and a DCQL path element may be any string.
+- An `mso_mdoc` presentation given an unusable `:response_encryption_jwk`
+  returns `{:error, :invalid_key}`; it leaked `:malformed_jwk` before.
+- Credential request encryption chooses a key only if it is a P-256 point on
+  the curve with 32-byte coordinates and no private members, the rule OID4VP
+  response encryption already applied. Such a key was selected before and
+  failed later at encryption.
+- Require Attesto `>= 2.9.0 and < 3.0.0` for those functions.
+
 ## [2.12.0] - 2026-10-31
 
 ### Changed

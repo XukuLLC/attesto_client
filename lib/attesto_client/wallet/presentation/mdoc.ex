@@ -17,7 +17,7 @@ if Code.ensure_loaded?(CBOR) do
     Unencrypted responses use a null thumbprint.
     """
 
-    alias Attesto.{Cose, JWS, Thumbprint}
+    alias Attesto.{Cose, JWS}
 
     @doc_status 0
     @version "1.0"
@@ -69,9 +69,11 @@ if Code.ensure_loaded?(CBOR) do
         device_namespaces_tagged = embedded_cbor(%{})
 
         device_authentication_bytes =
-          ["DeviceAuthentication", session_transcript, doc_type, device_namespaces_tagged]
-          |> embedded_cbor()
-          |> CBOR.encode()
+          Attesto.Mdoc.device_authentication_bytes(
+            session_transcript,
+            doc_type,
+            device_namespaces_tagged
+          )
 
         {:ok, device_auth_cose, ""} =
           pem |> Cose.sign1_detached(device_authentication_bytes, []) |> CBOR.decode()
@@ -129,36 +131,28 @@ if Code.ensure_loaded?(CBOR) do
 
     defp holder_pem(_other), do: {:error, :invalid_key}
 
-    # OID4VP "Handover and SessionTranscript Definitions" (redirect flow):
-    # SessionTranscript = [null, null, OpenID4VPHandover], where
-    # OpenID4VPHandover = ["OpenID4VPHandover", sha256(OpenID4VPHandoverInfo)]
-    # and OpenID4VPHandoverInfo = [client_id, nonce, jwkThumbprint, response_uri].
-    # Encrypted responses use the recipient JWK's raw SHA-256 thumbprint bytes.
+    # The OID4VP 1.0 redirect-flow SessionTranscript comes from Attesto, which
+    # rebuilds it from the same request values when it verifies the response.
+    # An encrypted response binds the recipient key's JWK thumbprint.
     defp session_transcript(
            %{client_id: client_id, nonce: nonce, response_uri: response_uri},
            opts
-         )
-         when is_binary(client_id) and client_id != "" and is_binary(nonce) and nonce != "" and
-                is_binary(response_uri) and response_uri != "" do
-      with {:ok, thumbprint} <- encryption_thumbprint(Keyword.get(opts, :response_encryption_jwk)) do
-        hash =
-          [client_id, nonce, thumbprint, response_uri]
-          |> CBOR.encode()
-          |> then(&:crypto.hash(:sha256, &1))
+         ) do
+      context = [
+        client_id: client_id,
+        nonce: nonce,
+        response_uri: response_uri,
+        response_encryption_jwk: Keyword.get(opts, :response_encryption_jwk)
+      ]
 
-        {:ok, [nil, nil, ["OpenID4VPHandover", bytes(hash)]]}
+      case Attesto.Mdoc.session_transcript(context) do
+        {:ok, transcript} -> {:ok, transcript}
+        {:error, :invalid_key} -> {:error, :invalid_key}
+        {:error, :invalid_context} -> {:error, :invalid_credential}
       end
     end
 
     defp session_transcript(_request, _opts), do: {:error, :invalid_credential}
-
-    defp encryption_thumbprint(nil), do: {:ok, nil}
-
-    defp encryption_thumbprint(jwk) do
-      with {:ok, encoded} <- Thumbprint.of_jwk(jwk),
-           {:ok, raw} <- JWS.decode64(encoded),
-           do: {:ok, bytes(raw)}
-    end
 
     defp filter_namespaces(issuer_signed, :all), do: {:ok, issuer_signed}
 

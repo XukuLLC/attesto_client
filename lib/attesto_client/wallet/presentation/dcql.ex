@@ -146,21 +146,11 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
     do: not Map.has_key?(query, "claims") and not Map.has_key?(query, "claim_sets")
 
   defp valid_claim?(%{"path" => path} = claim, format) when is_list(path) and path != [] do
-    length(path) <= 32 and valid_path?(path, format) and
+    length(path) <= 32 and Attesto.PresentationRequest.claim_path?(path, format) and
       (not Map.has_key?(claim, "id") or valid_id?(claim["id"])) and valid_values?(claim)
   end
 
   defp valid_claim?(_claim, _format), do: false
-
-  defp valid_path?([namespace, element], "mso_mdoc")
-       when is_binary(namespace) and namespace != "" and is_binary(element) and element != "",
-       do: true
-
-  defp valid_path?(_path, "mso_mdoc"), do: false
-  defp valid_path?(path, _format), do: Enum.all?(path, &path_segment?/1)
-
-  defp path_segment?(value),
-    do: (is_binary(value) and value != "") or is_nil(value) or (is_integer(value) and value >= 0)
 
   defp valid_values?(%{"values" => values}) when is_list(values) and values != [],
     do: Enum.all?(values, &(is_binary(&1) or is_integer(&1) or is_boolean(&1)))
