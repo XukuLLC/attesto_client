@@ -3,14 +3,20 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/attesto_client)](https://hex.pm/packages/attesto_client)
 [![Hexdocs.pm](https://img.shields.io/badge/docs-hexdocs.pm-blue)](https://hexdocs.pm/attesto_client)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![OpenID Certified](https://img.shields.io/badge/OpenID-Certified-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
+[![OpenID RP Certified — Attesto 1.0 (2026-07-07)](https://img.shields.io/badge/OpenID_RP-Certified_(v1.0,_2026--07--07)-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
+[![OpenID4VCI 1.0 + HAIP 1.0 Wallet Certified — Attesto Client 2.7.0 / Attesto 2.3.1 (2026-10-08)](https://img.shields.io/badge/OpenID4VCI_1.0_%2B_HAIP_1.0-Wallet_Certified_(v2.7.0_/_v2.3.1,_2026--10--08)-F78C40)](https://openid.net/certification/certified-oid4vci-haip-final/)
+[![OpenID4VP 1.0 + HAIP 1.0 Wallet Certified — Attesto Client 2.7.0 / Attesto 2.3.1 (2026-10-08)](https://img.shields.io/badge/OpenID4VP_1.0_%2B_HAIP_1.0-Wallet_Certified_(v2.7.0_/_v2.3.1,_2026--10--08)-F78C40)](https://openid.net/certification/certified-oid4vp-haip-final/)
 
 <a href="https://openid.net/certification/certified-openid-relying-parties-profiles/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
 AttestoClient is
 [OpenID Certified](https://openid.net/certification/certified-openid-relying-parties-profiles/)
 as a Relying Party library to the **Basic**, **Config**, and **Dynamic** RP
-profiles, run against the OpenID Foundation's conformance suite.
+profiles (`Attesto 1.0`, certified `2026-07-07`), and as an
+[**OpenID4VCI 1.0 + HAIP 1.0 Wallet**](https://openid.net/certification/certified-oid4vci-haip-final/)
+and [**OpenID4VP 1.0 + HAIP 1.0 Wallet**](https://openid.net/certification/certified-oid4vp-haip-final/)
+(`Attesto Client 2.7.0` / `Attesto 2.3.1`, certified `2026-10-08`), run against
+the OpenID Foundation's conformance suite.
 
 Run a secure OpenID Connect Authorization Code + PKCE exchange, refresh and
 revoke tokens, build RP-Initiated Logout requests, and build or verify the OAuth
@@ -134,9 +140,10 @@ authorization, encryption, deferred polling and HAIP integration. The
 [interactive wallet Livebook](guides/digital_wallet.livemd) runs a local
 SD-JWT VC example and an encrypted presentation without an HTTP server.
 
-The RP certification above covers the listed OpenID Connect profiles.
-Wallet-role OID4VCI/HAIP and OID4VP/HAIP certification is a separate submission;
-these wallet features do not extend the existing certification claim.
+The RP certification above covers the listed OpenID Connect profiles (`Attesto 1.0`, certified `2026-07-07`).
+Wallet-role [**OpenID4VCI 1.0 + HAIP 1.0**](https://openid.net/certification/certified-oid4vci-haip-final/)
+and [**OpenID4VP 1.0 + HAIP 1.0**](https://openid.net/certification/certified-oid4vp-haip-final/)
+certification was completed under `Attesto Client 2.7.0` (`Attesto 2.3.1`) on `2026-10-08`, covering SD-JWT VC and ISO mdoc for wallet-initiated, issuer-initiated, and pre-authorized code issuance flows and `direct_post.jwt` presentations.
 
 ## Example
 
