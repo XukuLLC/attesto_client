@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.13.1] - 2026-11-05
 
 ### Security
 
@@ -17,8 +17,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A recipient encryption key's `use` and `key_ops`, which now make the key
     unusable instead of reading as omitted.
 
-  Once Attesto returns JSON `null` as `nil` for every JOSE backend, these
-  members would otherwise widen the match under the default backend as well.
+- Require Attesto `>= 2.11.0 and < 3.0.0`. `AttestoClient.ResourceServer`
+  checks sender constraints through `Attesto.Token.check_confirmation/2`, which
+  in earlier Attesto releases accepted a `"cnf": null` access token as an
+  unbound bearer token under the Jason or Poison JOSE backend.
+
+### Changed
+
+- Verified claims carry JSON `null` as `nil` whichever JSON backend JOSE uses,
+  following Attesto 2.11.0. Under JOSE's builtin OTP backend they previously
+  carried `:null`.
 
 ## [2.13.0] - 2026-10-31
 

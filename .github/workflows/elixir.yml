@@ -42,7 +42,7 @@ jobs:
     env:
       MIX_ENV: test
       ATTESTO_PATH: ${{ (github.event_name == 'pull_request' || inputs.dependency_source == 'candidate') && '1' || '0' }}
-      REVIEWED_CORE_REF: 7fd2244a3d793c5e4081e5a811573dd29bf8f7a8
+      REVIEWED_CORE_REF: 60b6f414d4225b1e8bc118b8d49b13287d244b0c
 
     steps:
       - name: Checkout code
@@ -132,7 +132,7 @@ jobs:
         run: >-
           mix run --no-compile -e 'dep = Enum.find(Mix.Dep.cached(), &(&1.app == :attesto));
           unless dep && dep.scm == Mix.SCM.Path && Path.expand(dep.opts[:dest]) == Path.expand("../attesto"), do: System.halt(1);
-          unless Application.spec(:attesto, :vsn) |> to_string() == "2.9.0", do: System.halt(1)'
+          unless Application.spec(:attesto, :vsn) |> to_string() == "2.11.0", do: System.halt(1)'
 
       - name: Run tests
         run: mix test --trace
@@ -162,7 +162,7 @@ jobs:
         run: mix dialyzer
 
   attesto-2-hex:
-    name: Published Attesto 2.9.0 compatibility
+    name: Published Attesto 2.11.0 compatibility
     if: github.event_name != 'pull_request' && inputs.dependency_source != 'candidate'
     runs-on: ubuntu-latest
 
@@ -200,7 +200,7 @@ jobs:
       - name: Assert published hardened Attesto dependency
         run: >-
           mix run --no-compile -e 'version = Application.spec(:attesto, :vsn) |> to_string();
-          unless Version.match?(version, ">= 2.9.0 and < 3.0.0"), do: System.halt(1)'
+          unless Version.match?(version, ">= 2.11.0 and < 3.0.0"), do: System.halt(1)'
 
       - name: Run tests against published Attesto 2
         run: mix test --trace
