@@ -125,6 +125,21 @@ defmodule AttestoClient.Wallet.PresentationDCQLTest do
     end
   end
 
+  test "a present null restriction is malformed rather than lifting the restriction" do
+    mdoc = %{"id" => "mdl", "format" => "mso_mdoc", "meta" => %{"doctype_value" => nil}}
+
+    for q <- [
+          query(Map.put(credential(), "trusted_authorities", nil)),
+          query(Map.put(credential(), "meta", %{"vct_values" => nil})),
+          query(mdoc)
+        ] do
+      assert {:error, :invalid_dcql_query} = Presentation.select(q, [held()])
+    end
+
+    assert {:ok, _selection} =
+             Presentation.select(query(Map.delete(credential(), "meta")), [held()])
+  end
+
   test "mdoc paths are exactly namespace plus element and claim-set IDs are mandatory" do
     mdoc = %{
       format: "mso_mdoc",

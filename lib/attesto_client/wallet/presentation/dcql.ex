@@ -121,9 +121,10 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
 
   defp valid_query?(%{"id" => id, "format" => format} = query) do
     valid_id?(id) and is_binary(format) and format != "" and
-      valid_optional_map?(query, "meta") and valid_boolean?(query, "multiple") and
+      valid_optional_map?(query, "meta") and valid_meta?(Map.get(query, "meta", %{})) and
+      valid_boolean?(query, "multiple") and
       valid_boolean?(query, "require_cryptographic_holder_binding") and
-      valid_claims?(query) and valid_authorities?(Map.get(query, "trusted_authorities"))
+      valid_claims?(query) and valid_authorities?(Map.fetch(query, "trusted_authorities"))
   end
 
   defp valid_query?(_query), do: false
@@ -182,9 +183,11 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
 
   defp valid_options?(_options, _ids), do: false
 
-  defp valid_authorities?(nil), do: true
+  # An omitted `trusted_authorities` places no restriction; a present JSON null
+  # is malformed rather than a way to lift one.
+  defp valid_authorities?(:error), do: true
 
-  defp valid_authorities?(authorities) when is_list(authorities) and authorities != [] do
+  defp valid_authorities?({:ok, authorities}) when is_list(authorities) and authorities != [] do
     Enum.all?(authorities, fn
       %{"type" => type, "values" => values} ->
         is_binary(type) and is_list(values) and values != [] and Enum.all?(values, &is_binary/1)
@@ -195,6 +198,26 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
   end
 
   defp valid_authorities?(_authorities), do: false
+
+  # `doctype_value` and `vct_values` narrow which credentials match. Omitted,
+  # they place no restriction; present, they must be well-typed, so a JSON null
+  # cannot widen the match.
+  defp valid_meta?(meta) when is_map(meta),
+    do:
+      valid_doctype?(Map.fetch(meta, "doctype_value")) and
+        valid_vct_values?(Map.fetch(meta, "vct_values"))
+
+  defp valid_meta?(_meta), do: false
+
+  defp valid_doctype?(:error), do: true
+  defp valid_doctype?({:ok, doctype}), do: is_binary(doctype) and doctype != ""
+
+  defp valid_vct_values?(:error), do: true
+
+  defp valid_vct_values?({:ok, values}) when is_list(values) and values != [],
+    do: Enum.all?(values, &(is_binary(&1) and &1 != ""))
+
+  defp valid_vct_values?(_values), do: false
 
   defp choose_sets(%{"credential_sets" => sets}, matches) do
     Enum.reduce_while(sets, {:ok, %{}}, fn set, {:ok, selected} ->

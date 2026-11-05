@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Refuse a present JSON `null` where an omitted member places no restriction:
+  - DCQL `trusted_authorities`, `meta.doctype_value`, and `meta.vct_values` in
+    `AttestoClient.Wallet.Presentation.select/2`, which now return
+    `:invalid_dcql_query` instead of treating the null as unrestricted and
+    widening which held credentials match. `doctype_value` must be a non-empty
+    string and `vct_values` a non-empty list of non-empty strings when present.
+  - A recipient encryption key's `use` and `key_ops`, which now make the key
+    unusable instead of reading as omitted.
+
+  Once Attesto returns JSON `null` as `nil` for every JOSE backend, these
+  members would otherwise widen the match under the default backend as well.
+
 ## [2.13.0] - 2026-10-31
 
 ### Changed

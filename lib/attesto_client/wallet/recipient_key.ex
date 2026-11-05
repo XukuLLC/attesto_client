@@ -26,8 +26,9 @@ defmodule AttestoClient.Wallet.RecipientKey do
   @doc false
   # `use` absent or `enc`, and `key_ops` absent or limited to key agreement.
   @spec ecdh_usage?(map()) :: boolean()
+  # A present JSON null `use` or `key_ops` is malformed, not omitted.
   def ecdh_usage?(key) when is_map(key),
-    do: Map.get(key, "use") in [nil, "enc"] and key_ops?(Map.get(key, "key_ops"))
+    do: Map.fetch(key, "use") in [:error, {:ok, "enc"}] and key_ops?(Map.fetch(key, "key_ops"))
 
   @doc false
   @spec kid?(term()) :: boolean()
@@ -40,9 +41,9 @@ defmodule AttestoClient.Wallet.RecipientKey do
   def distinct_kids?(keys) when is_list(keys),
     do: Enum.all?(keys, &kid?/1) and length(Enum.uniq_by(keys, & &1["kid"])) == length(keys)
 
-  defp key_ops?(nil), do: true
+  defp key_ops?(:error), do: true
 
-  defp key_ops?(ops) when is_list(ops) and ops != [],
+  defp key_ops?({:ok, ops}) when is_list(ops) and ops != [],
     do: Enum.all?(ops, &(&1 in ["deriveKey", "deriveBits"]))
 
   defp key_ops?(_ops), do: false
