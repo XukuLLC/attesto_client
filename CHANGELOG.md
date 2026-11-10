@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   differs from the deep link's now returns `{:error, :invalid_client_id}` before
   any `request_uri` is fetched. Without a caller `:client_id`, the deep link's
   value is still bound to the signed request.
+- An SD-JWT presentation numbered array positions over the issuer's raw array,
+  counting decoy digests and other placeholders the credential holds no
+  Disclosure for, while DCQL matching and the held claims shown for consent
+  number the reconstructed array, where those placeholders are absent. A
+  claims path with an array index then disclosed a different element from the
+  one selected. Array indexes are now counted over the reconstructed array.
 
 ## [2.13.1] - 2026-11-05
 

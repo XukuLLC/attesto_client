@@ -73,27 +73,30 @@ defmodule AttestoClient.Wallet.Presentation.Disclosures do
 
   defp locate(list, path, disclosures, locations, depth) when is_list(list) do
     list
+    |> Enum.flat_map(&array_element(&1, disclosures))
     |> Enum.with_index()
-    |> Enum.reduce(locations, fn {value, index}, acc ->
+    |> Enum.reduce(locations, fn {{value, encoded}, index}, acc ->
       next = path ++ [index]
-      locate_array_item(value, next, disclosures, acc, depth)
+      acc = if encoded, do: Map.put(acc, encoded, next), else: acc
+      locate(value, next, disclosures, acc, depth + 1)
     end)
   end
 
   defp locate(_value, _path, _disclosures, locations, _depth), do: locations
 
-  defp locate_array_item(%{"..." => digest}, path, disclosures, locations, depth) do
+  # Follows SD-JWT reconstruction (`Attesto.SdJwt`): a `{"...": digest}`
+  # placeholder becomes its Disclosure's value, and a placeholder the credential
+  # holds no Disclosure for, such as a decoy, is removed from the array. Indexes
+  # are counted over the elements that remain, the same array the held claims
+  # and a DCQL claims path index into.
+  defp array_element(%{"..." => digest} = element, disclosures) when map_size(element) == 1 do
     case Map.get(disclosures, digest) do
-      {encoded, [_salt, disclosed]} ->
-        locate(disclosed, path, disclosures, Map.put(locations, encoded, path), depth + 1)
-
-      _ ->
-        locations
+      {encoded, [_salt, disclosed]} -> [{disclosed, encoded}]
+      _ -> []
     end
   end
 
-  defp locate_array_item(value, path, disclosures, locations, depth),
-    do: locate(value, path, disclosures, locations, depth + 1)
+  defp array_element(value, _disclosures), do: [{value, nil}]
 
   defp keep?(encoded, locations, :all), do: Map.has_key?(locations, encoded)
 

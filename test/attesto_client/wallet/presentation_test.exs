@@ -295,6 +295,77 @@ defmodule AttestoClient.Wallet.PresentationTest do
       refute String.contains?(presentation, nested)
     end
 
+    defp held_from_payload(issuer_key, holder_public, subject, disclosures) do
+      payload =
+        Map.merge(subject, %{
+          "iss" => "https://issuer.example.com",
+          "vct" => "identity",
+          "cnf" => %{"jwk" => holder_public},
+          "iat" => @now
+        })
+
+      header = %{"alg" => "ES256", "typ" => "dc+sd-jwt"}
+      issuer_jwt = Attesto.JWS.sign_compact_jwk(issuer_key, header, payload)
+      credential = Enum.join([issuer_jwt | disclosures] ++ [""], "~")
+      {_type, issuer_public} = JOSE.JWK.to_public_map(issuer_key)
+      {:ok, %{claims: claims}} = SdJwtVc.verify(credential, issuer_public, now: @now)
+
+      %{
+        format: "dc+sd-jwt",
+        credential: credential,
+        claims: claims,
+        holder_binding: %{"jwk" => holder_public}
+      }
+    end
+
+    defp present_path(held, issuer_key, holder_jwk, path) do
+      query = %{"id" => "identity", "format" => "dc+sd-jwt", "claims" => [%{"path" => path}]}
+      req = request(%{dcql_query: %{"credentials" => [query]}})
+
+      {:ok, vp_token} =
+        Presentation.build_vp_token(%{"identity" => held}, req,
+          holder_keys: %{"identity" => holder_jwk},
+          now: @now
+        )
+
+      {_type, issuer_public} = JOSE.JWK.to_public_map(issuer_key)
+
+      VpToken.verify(vp_token,
+        nonce: req.nonce,
+        audience: req.client_id,
+        issuer_jwks: issuer_public,
+        now: @now
+      )
+    end
+
+    test "array indexes skip decoy digests, so the selected element is the one disclosed" do
+      issuer_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {holder_jwk, holder_public} = ec_keypair()
+      de = Attesto.SdJwt.array_disclosure("salt-de", "DE")
+      us = Attesto.SdJwt.array_disclosure("salt-us", "US")
+
+      nationalities = [
+        %{"..." => digest("decoy")},
+        %{"..." => digest(de)},
+        %{"..." => digest(us)}
+      ]
+
+      held =
+        held_from_payload(issuer_key, holder_public, %{"nationalities" => nationalities}, [de, us])
+
+      assert held.claims["nationalities"] == ["DE", "US"]
+
+      assert {:ok, %{"identity" => [result]}} =
+               present_path(held, issuer_key, holder_jwk, ["nationalities", 1])
+
+      assert result.claims["nationalities"] == ["US"]
+
+      assert {:ok, %{"identity" => [result]}} =
+               present_path(held, issuer_key, holder_jwk, ["nationalities", 0])
+
+      assert result.claims["nationalities"] == ["DE"]
+    end
+
     test "submit/3 refuses plaintext downgrade without encryption metadata" do
       req = request(%{response_mode: "direct_post.jwt"})
 
