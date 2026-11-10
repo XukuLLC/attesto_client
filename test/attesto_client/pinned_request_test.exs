@@ -167,6 +167,81 @@ defmodule AttestoClient.PinnedRequestTest do
     end)
   end
 
+  test "requests to distinct hostnames leave no connection pool behind" do
+    pools = fn -> DynamicSupervisor.count_children(Req.FinchSupervisor).active end
+    before = pools.()
+
+    for index <- 1..20 do
+      host = "host-#{index}.example.test"
+      # Nothing listens on port 1, so each connection is refused locally.
+      target = %{url: "https://127.0.0.1:1/document", host: host, authority: host}
+      assert {:ok, options} = PinnedRequest.prepare(target, [])
+
+      request =
+        options
+        |> Keyword.merge(url: target.url, method: :get, retry: false)
+        |> PinnedRequest.new()
+
+      assert {:error, %Req.TransportError{}} = Req.request(request)
+    end
+
+    assert pools.() == before
+  end
+
+  @tag :capture_log
+  test "a pinned request dials the screened address and verifies TLS for the original host" do
+    curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
+    san = {:Extension, {2, 5, 29, 17}, false, [dNSName: ~c"service.example.test"]}
+
+    data =
+      :public_key.pkix_test_data(%{
+        root: [key: curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: curve, digest: :sha256, extensions: [san]]
+      })
+
+    server_config = [cert: data[:cert], key: data[:key]]
+    port = start_tls_server(server_config, ["pinned body", String.duplicate("a", 64), ""])
+    url = "https://127.0.0.1:#{port}/document?view=full"
+
+    fetch = fn host ->
+      target = %{url: url, host: host, authority: "#{host}:#{port}"}
+
+      assert {:ok, options} =
+               PinnedRequest.prepare(target,
+                 connect_options: [transport_opts: [cacerts: data[:cacerts]]]
+               )
+
+      options
+      |> Keyword.merge(
+        url: url,
+        method: :get,
+        retry: false,
+        raw: true,
+        into: PinnedRequest.bounded_response_into(32)
+      )
+      |> PinnedRequest.new()
+      |> Req.request()
+    end
+
+    assert {:ok, %Req.Response{status: 200, body: "pinned body"}} =
+             fetch.("service.example.test")
+
+    assert_receive {:served, ~c"service.example.test", head}
+    assert head =~ "GET /document?view=full HTTP/1.1\r\n"
+    assert head =~ "\r\nhost: service.example.test:#{port}\r\n"
+
+    assert {:ok, %Req.Response{private: %{attesto_client_response_too_large: true}}} =
+             fetch.("service.example.test")
+
+    assert_receive {:served, ~c"service.example.test", _head}
+
+    assert {:error, %Req.TransportError{reason: {:tls_alert, _alert}}} =
+             fetch.("other.example.test")
+
+    assert_receive {:handshake_failed, _reason}
+  end
+
   test "pinning rejects a custom adapter even for a direct public IP" do
     target = %{
       url: "https://93.184.216.34/document",
@@ -178,5 +253,52 @@ defmodule AttestoClient.PinnedRequestTest do
 
     assert {:error, :unsafe_transport_options} =
              PinnedRequest.prepare(target, adapter: adapter)
+  end
+
+  defp start_tls_server(server_config, bodies) do
+    parent = self()
+
+    spawn_link(fn ->
+      options = [ip: {127, 0, 0, 1}, active: false, mode: :binary, reuseaddr: true]
+      {:ok, listener} = :ssl.listen(0, options ++ server_config)
+      {:ok, {_address, port}} = :ssl.sockname(listener)
+      send(parent, {:tls_port, port})
+      Enum.each(bodies, &serve_once(listener, parent, &1))
+    end)
+
+    assert_receive {:tls_port, port}
+    port
+  end
+
+  defp serve_once(listener, parent, body) do
+    {:ok, socket} = :ssl.transport_accept(listener, 5_000)
+
+    case :ssl.handshake(socket, 5_000) do
+      {:ok, socket} ->
+        {:ok, [sni_hostname: sni]} = :ssl.connection_information(socket, [:sni_hostname])
+        head = read_head(socket, "")
+
+        :ok =
+          :ssl.send(socket, [
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nconnection: close\r\n",
+            "content-length: #{byte_size(body)}\r\n\r\n",
+            body
+          ])
+
+        send(parent, {:served, sni, head})
+        :ssl.close(socket)
+
+      {:error, reason} ->
+        send(parent, {:handshake_failed, reason})
+    end
+  end
+
+  defp read_head(socket, acc) do
+    if String.contains?(acc, "\r\n\r\n") do
+      acc
+    else
+      {:ok, data} = :ssl.recv(socket, 0, 5_000)
+      read_head(socket, acc <> data)
+    end
   end
 end

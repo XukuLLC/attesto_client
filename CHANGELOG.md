@@ -23,6 +23,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   number the reconstructed array, where those placeholders are absent. A
   claims path with an array index then disclosed a different element from the
   one selected. Array indexes are now counted over the reconstructed array.
+- Outbound requests to DNS-screened addresses started one Finch instance under
+  Req per distinct hostname, because the TLS hostname was part of the
+  connection options Req keys its pools on, and Req never stops those
+  instances. Each hostname left about 8 processes, 9 atoms and 0.45 MB behind
+  for the life of the VM. Hostnames come from untrusted inputs such as
+  `request_uri`, `credential_offer_uri`, `WWW-Authenticate` `resource_metadata`
+  and `jwks_uri`, so a wildcard DNS zone could exhaust memory and then the atom
+  table. Screened requests now open one Mint connection to the checked address
+  and close it when the response completes. Connections are no longer reused
+  across requests, and Finch pool options such as `:pool_timeout` have no
+  effect on them.
 
 ### Fixed
 
