@@ -3,7 +3,8 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   Verify signed OID4VP 1.0 wallet authorization requests.
 
   `from_uri/3` binds the outer `client_id` to the signed request and ignores
-  other outer authorization parameters. Request URI POST sends a fresh wallet
+  other outer authorization parameters. A caller-supplied `:client_id` must
+  equal the outer `client_id`. Request URI POST sends a fresh wallet
   nonce, which must be echoed in the signed object. Requests using `x509_hash`
   require explicit DER trust anchors in `:trusted_certificates`; the embedded
   leaf certificate supplies the signing key, never the trust decision.
@@ -86,16 +87,34 @@ defmodule AttestoClient.Wallet.PresentationRequest do
          do: verify(jwt, trusted, verify_opts)
   end
 
-  @doc "Parse an authorization deep link and verify its by-value or by-reference signed request."
+  @doc """
+  Parse an authorization deep link and verify its by-value or by-reference signed request.
+
+  A `:client_id` passed by the caller is the expected verifier identity and must
+  equal the deep link's `client_id`; a different outer value returns
+  `{:error, :invalid_client_id}` before any request URI is fetched. Without a
+  caller `:client_id`, the outer value is bound to the signed request.
+  """
   def from_uri(uri, trusted, opts \\ []) when is_binary(uri) and is_list(opts) do
     with true <- byte_size(uri) <= 65_536,
          {:ok, params} <- outer_params(uri),
-         {:ok, client_id} <- required_string(params, "client_id", :invalid_client_id) do
+         {:ok, client_id} <- required_string(params, "client_id", :invalid_client_id),
+         :ok <- expected_outer_client_id(client_id, opts) do
       verify_opts = Keyword.put(opts, :client_id, client_id)
       resolve_outer(params, trusted, verify_opts)
     else
       {:error, _} = error -> error
       _ -> {:error, :invalid_request_object}
+    end
+  end
+
+  # The outer client_id is unauthenticated. It may supply the identity only
+  # when the caller has none from registration; it can never replace one.
+  defp expected_outer_client_id(outer, opts) do
+    case Keyword.get(opts, :client_id) do
+      nil -> :ok
+      ^outer -> :ok
+      _expected -> {:error, :invalid_client_id}
     end
   end
 

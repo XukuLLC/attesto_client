@@ -59,6 +59,41 @@ defmodule AttestoClient.Wallet.PresentationPolicyRegressionTest do
              )
   end
 
+  test "deep link client_id cannot replace the caller's expected client_id", context do
+    other = "https://other-verifier.example"
+    jwt = sign(context.key, Map.put(claims(), "client_id", other))
+    by_value = "openid4vp://?" <> URI.encode_query(%{"client_id" => other, "request" => jwt})
+
+    assert {:error, :invalid_client_id} =
+             PresentationRequest.from_uri(by_value, context.public, options())
+
+    plug = fn _conn -> flunk("request_uri fetched for a mismatched client_id") end
+
+    by_reference =
+      "openid4vp://?" <>
+        URI.encode_query(%{
+          "client_id" => other,
+          "request_uri" => "https://other-verifier.example/request"
+        })
+
+    assert {:error, :invalid_client_id} =
+             PresentationRequest.from_uri(
+               by_reference,
+               context.public,
+               Keyword.put(options(), :req_options, plug: plug)
+             )
+
+    matching =
+      "openid4vp://?" <>
+        URI.encode_query(%{"client_id" => @client, "request" => sign(context.key, claims())})
+
+    assert {:ok, %PresentationRequest{client_id: @client}} =
+             PresentationRequest.from_uri(matching, context.public, options())
+
+    assert {:ok, %PresentationRequest{client_id: ^other}} =
+             PresentationRequest.from_uri(by_value, context.public, now: @now)
+  end
+
   test "registered type is mandatory and caller accepted_typ/profile cannot weaken it", context do
     for header <- [
           %{"alg" => "ES256"},

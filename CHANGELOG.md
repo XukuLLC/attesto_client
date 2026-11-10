@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- `AttestoClient.Wallet.PresentationRequest.from_uri/3` replaced a
+  caller-supplied `:client_id` with the unauthenticated `client_id` from the
+  deep link. A verifier whose keys the caller passed as trusted could sign a
+  request naming another verifier's `client_id`; the request verified as that
+  other verifier, so the presentation's audience and nonce were bound to it and
+  the response went to the signer's `response_uri`. A caller `:client_id` that
+  differs from the deep link's now returns `{:error, :invalid_client_id}` before
+  any `request_uri` is fetched. Without a caller `:client_id`, the deep link's
+  value is still bound to the signed request.
+
 ## [2.13.1] - 2026-11-05
 
 ### Security
