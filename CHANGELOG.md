@@ -50,6 +50,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `select/2` reported a match, but the verifier rejected the presentation with
   `:unused_disclosure`, or saw an empty array when the elements were disclosed
   whole. Those element Disclosures are now kept.
+- `AttestoClient.Wallet.request_credential/3` returned
+  `{:error, {:notification, reason}}` when the OID4VCI Notification POST failed
+  after the credentials had been issued and verified, discarding them. A
+  pre-authorized code is single-use, so the wallet could not request them
+  again. The result now carries the credentials, and the failure reason in a
+  new `:notification_error` field, which is `nil` when the Notification
+  succeeded or was not sent. `{:error, {:notification, reason}}` is no longer
+  returned.
 
 ## [2.13.1] - 2026-11-05
 

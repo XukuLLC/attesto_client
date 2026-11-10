@@ -579,7 +579,7 @@ defmodule AttestoClient.WalletTest do
         end
       end
 
-      assert {:ok, %{credentials: [_held], notification_id: "n-42"}} =
+      assert {:ok, %{credentials: [_held], notification_id: "n-42", notification_error: nil}} =
                Wallet.request_credential(offer(), holder_key(),
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
@@ -639,6 +639,57 @@ defmodule AttestoClient.WalletTest do
                )
 
       refute_receive :unexpected_notification
+    end
+
+    test "returns the issued credentials when the notification fails" do
+      {issuer_pem, issuer_jwk} = issuer_keypair()
+
+      plug = fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/token"} ->
+            json(conn, 200, %{"access_token" => @access_token, "token_type" => "Bearer"})
+
+          {"POST", "/credential"} ->
+            {request, conn} = read_json_body!(conn)
+
+            {:ok, %{jwk: holder_jwk}} =
+              Attesto.CredentialProof.verify_jwt(hd(request["proofs"]["jwt"]), issuer: @issuer)
+
+            credential =
+              Attesto.SdJwtVc.issue([iss: @issuer, vct: @configuration_id, pem: issuer_pem],
+                claims: %{"given_name" => "Jane"},
+                cnf: %{"jwk" => holder_jwk}
+              )
+
+            body =
+              credential
+              |> Attesto.CredentialResponse.build()
+              |> Map.put("notification_id", "n-7")
+
+            json(conn, 200, body)
+
+          {"POST", "/notification"} ->
+            Plug.Conn.send_resp(conn, 500, "")
+        end
+      end
+
+      assert {:ok,
+              %{
+                credentials: [held],
+                notification_id: "n-7",
+                notification_error: {:http_status, 500}
+              }} =
+               Wallet.request_credential(offer(), holder_key(),
+                 token_endpoint: "#{@issuer}/token",
+                 credential_endpoint: "#{@issuer}/credential",
+                 notification_endpoint: "#{@issuer}/notification",
+                 client_id: @client_id,
+                 format: "vc+sd-jwt",
+                 trusted: issuer_jwk,
+                 req_options: [plug: plug]
+               )
+
+      assert held.claims["given_name"] == "Jane"
     end
   end
 

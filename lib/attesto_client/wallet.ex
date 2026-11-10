@@ -57,6 +57,7 @@ defmodule AttestoClient.Wallet do
 
   @type result :: %{
           notification_id: String.t() | nil,
+          notification_error: term() | nil,
           credentials: [held_credential() | pending_credential()],
           c_nonce: String.t() | nil
         }
@@ -143,7 +144,10 @@ defmodule AttestoClient.Wallet do
   Notification acknowledging the credential once issuance succeeds and the
   response carried a `notification_id`; `:notification_event` overrides the
   default `"credential_accepted"`. The returned result always includes the
-  issuer's `notification_id` (or `nil`).
+  issuer's `notification_id` (or `nil`). A failed Notification does not discard
+  the issued credentials: the result carries the failure reason, such as
+  `{:http_status, 500}`, in `:notification_error`, which is `nil` when the
+  Notification succeeded or was not sent.
 
   `:credential_issuer_metadata` accepts metadata already fetched and validated
   by the caller. Its `credential_issuer` must equal the offer's issuer. Endpoint
@@ -599,7 +603,8 @@ defmodule AttestoClient.Wallet do
        %{
          credentials: [pending],
          c_nonce: c_nonce,
-         notification_id: notification_id
+         notification_id: notification_id,
+         notification_error: nil
        }}
     end
   end
@@ -616,13 +621,13 @@ defmodule AttestoClient.Wallet do
        when is_list(credentials) and credentials != [] do
     with {:ok, notification_id} <- notification_id(response),
          {:ok, held} <-
-           verify_credentials(credentials, format, holder_publics, opts, type_binding),
-         :ok <- maybe_notify(notification_id, access_token, opts) do
+           verify_credentials(credentials, format, holder_publics, opts, type_binding) do
       {:ok,
        %{
          credentials: held,
          c_nonce: c_nonce,
-         notification_id: notification_id
+         notification_id: notification_id,
+         notification_error: maybe_notify(notification_id, access_token, opts)
        }}
     end
   end
@@ -653,7 +658,10 @@ defmodule AttestoClient.Wallet do
 
   # OID4VCI §10: when the caller supplies a `:notification_endpoint` and the
   # issuer returned a `notification_id`, POST a Notification acknowledging the
-  # credential. No endpoint or no id means nothing to notify.
+  # credential. No endpoint or no id means nothing to notify. Returns the
+  # failure reason, or `nil`. The credentials are already issued and verified,
+  # and the grant that obtained them may be single-use, so a failed
+  # notification is reported beside them rather than in place of them.
   defp maybe_notify(notification_id, access_token, opts) do
     endpoint = Keyword.get(opts, :notification_endpoint)
 
@@ -663,11 +671,9 @@ defmodule AttestoClient.Wallet do
       body = %{"notification_id" => notification_id, "event" => event}
 
       case OAuthHTTP.post_json_unit(endpoint, body, access_token, opts) do
-        :ok -> :ok
-        {:error, reason} -> {:error, {:notification, reason}}
+        :ok -> nil
+        {:error, reason} -> reason
       end
-    else
-      :ok
     end
   end
 
