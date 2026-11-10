@@ -301,6 +301,35 @@ defmodule AttestoClient.ResourceServerTest do
     assert length(requests(ctx.state)) == 4
   end
 
+  test "applies the refresh retry cooldown before the first snapshot", ctx do
+    stop_supervised!({ResourceServer, @issuer})
+    Agent.update(ctx.state, &%{&1 | mode: :unavailable})
+
+    server =
+      start_supervised!(
+        {ResourceServer,
+         issuer: @issuer,
+         audience: @audience,
+         accepted_algs: ["RS256"],
+         req_options: [plug: issuer_plug(ctx.state)],
+         refresh_retry_interval: 60_000}
+      )
+
+    token = access_token(ctx.key)
+
+    for _attempt <- 1..5 do
+      assert {:error, {:jwks_refresh_failed, {:http_status, 503}}} =
+               ResourceServer.verify(server, token, now: @now)
+    end
+
+    assert requests(ctx.state) == ["/.well-known/openid-configuration", "/jwks"]
+
+    Agent.update(ctx.state, &%{&1 | mode: :ok})
+    assert :ok = ResourceServer.warm(server)
+    assert {:ok, _claims} = ResourceServer.verify(server, token, now: @now)
+    assert length(requests(ctx.state)) == 4
+  end
+
   test "does not use stale keys after the stale interval expires", ctx do
     stop_supervised!({ResourceServer, @issuer})
 

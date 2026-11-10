@@ -58,7 +58,10 @@ defmodule AttestoClient.ResourceServer do
   fresh interval ends. `refresh_retry_interval` avoids retrying a failed
   upstream refresh on every request. During that interval, a transient failure
   may use a still-valid stale snapshot; a hard failure or an exhausted stale
-  interval returns the remembered refresh error without another fetch.
+  interval returns the remembered refresh error without another fetch. The
+  same applies before the first successful refresh: verification returns the
+  remembered error until the interval ends, while `warm/1` and `refresh/1`
+  still fetch.
   """
 
   use GenServer
@@ -221,7 +224,8 @@ defmodule AttestoClient.ResourceServer do
        refresh_task: nil,
        refresh_timer: nil,
        refresh_waiters: [],
-       next_unknown_refresh_at: nil
+       next_unknown_refresh_at: nil,
+       initial_refresh_failure: nil
      })}
   end
 
@@ -592,6 +596,13 @@ defmodule AttestoClient.ResourceServer do
        when is_integer(next_refresh),
        do: monotonic_ms() < next_refresh
 
+  defp refresh_suppressed?(%{snapshot: nil} = state, :initial) do
+    case Map.get(state, :initial_refresh_failure) do
+      {_reason, retry_after} -> monotonic_ms() < retry_after
+      nil -> false
+    end
+  end
+
   defp refresh_suppressed?(_state, _reason), do: false
 
   defp refresh_suppressed_reply(state, :expired) do
@@ -600,6 +611,9 @@ defmodule AttestoClient.ResourceServer do
       result -> result
     end
   end
+
+  defp refresh_suppressed_reply(%{initial_refresh_failure: {reason, _retry_after}}, :initial),
+    do: {:error, reason}
 
   defp refresh_suppressed_reply(state, _reason), do: {:ok, state.snapshot}
 
@@ -750,7 +764,14 @@ defmodule AttestoClient.ResourceServer do
 
   defp now(opts), do: NumericDate.now(opts, default: :system, invalid_override: :fallback)
 
-  defp record_refresh_failure(%{snapshot: nil} = state, _reason), do: state
+  # Before the first snapshot there is nothing to annotate, so the failure and
+  # its cooldown are kept on the server state; until it expires, verification
+  # returns the remembered error instead of starting another fetch. An explicit
+  # `refresh/1` or `warm/1` still fetches.
+  defp record_refresh_failure(%{snapshot: nil} = state, reason) do
+    retry_after = monotonic_ms() + state.refresh_retry_interval
+    Map.put(state, :initial_refresh_failure, {reason, retry_after})
+  end
 
   defp record_refresh_failure(state, reason) do
     now = monotonic_ms()

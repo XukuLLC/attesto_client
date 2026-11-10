@@ -34,6 +34,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and close it when the response completes. Connections are no longer reused
   across requests, and Finch pool options such as `:pool_timeout` have no
   effect on them.
+- `AttestoClient.ResourceServer` applied `refresh_retry_interval` only after
+  its first successful key refresh. While the issuer failed before then, every
+  `verify/3` call started its own discovery and JWKS fetch and waited for it,
+  so each unauthenticated request cost an outbound request. A failure before
+  the first snapshot now starts the same cooldown: `verify/3` returns the
+  remembered `{:error, {:jwks_refresh_failed, reason}}` until it ends.
+  `warm/1` and `refresh/1` still fetch.
 
 ### Fixed
 
