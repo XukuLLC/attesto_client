@@ -4,10 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.14.0] - 2026-11-09
 
 ### Security
 
+- Require Attesto `>= 2.12.0 and < 3.0.0`. Attesto 2.12.0 refuses a JWK Set
+  where one JWK is expected. Earlier releases accepted such a value as a key
+  in DPoP proofs, credentials and trusted key material, and computing the
+  thumbprint of a set did not return.
 - `AttestoClient.Wallet.PresentationRequest.from_uri/3` replaced a
   caller-supplied `:client_id` with the unauthenticated `client_id` from the
   deep link. A verifier whose keys the caller passed as trusted could sign a
