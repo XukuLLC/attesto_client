@@ -366,6 +366,43 @@ defmodule AttestoClient.Wallet.PresentationTest do
       assert result.claims["nationalities"] == ["DE"]
     end
 
+    test "a wildcard path keeps the array element disclosures its selected claims sit in" do
+      issuer_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {holder_jwk, holder_public} = ec_keypair()
+      path = ["degrees", nil, "type"]
+      bsc = Attesto.SdJwt.object_disclosure("salt-t0", "type", "BSc")
+      msc = Attesto.SdJwt.object_disclosure("salt-t1", "type", "MSc")
+      year = Attesto.SdJwt.object_disclosure("salt-y0", "year", 2020)
+      first = Attesto.SdJwt.array_disclosure("salt-e0", %{"_sd" => [digest(bsc), digest(year)]})
+      second = Attesto.SdJwt.array_disclosure("salt-e1", %{"_sd" => [digest(msc)]})
+      degrees = [%{"..." => digest(first)}, %{"..." => digest(second)}]
+
+      held =
+        held_from_payload(issuer_key, holder_public, %{"degrees" => degrees}, [
+          first,
+          second,
+          bsc,
+          msc,
+          year
+        ])
+
+      assert {:ok, %{"identity" => [result]}} = present_path(held, issuer_key, holder_jwk, path)
+      assert result.claims["degrees"] == [%{"type" => "BSc"}, %{"type" => "MSc"}]
+
+      whole_first = Attesto.SdJwt.array_disclosure("salt-w0", %{"type" => "BSc"})
+      whole_second = Attesto.SdJwt.array_disclosure("salt-w1", %{"type" => "MSc"})
+      degrees = [%{"..." => digest(whole_first)}, %{"..." => digest(whole_second)}]
+
+      held =
+        held_from_payload(issuer_key, holder_public, %{"degrees" => degrees}, [
+          whole_first,
+          whole_second
+        ])
+
+      assert {:ok, %{"identity" => [result]}} = present_path(held, issuer_key, holder_jwk, path)
+      assert result.claims["degrees"] == [%{"type" => "BSc"}, %{"type" => "MSc"}]
+    end
+
     test "submit/3 refuses plaintext downgrade without encryption metadata" do
       req = request(%{response_mode: "direct_post.jwt"})
 

@@ -24,6 +24,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   claims path with an array index then disclosed a different element from the
   one selected. Array indexes are now counted over the reconstructed array.
 
+### Fixed
+
+- An SD-JWT presentation for a DCQL claims path with a `null` (all elements)
+  component, such as `["degrees", null, "type"]`, left out the Disclosures of
+  the selectively disclosable array elements the selected claims sit in.
+  `select/2` reported a match, but the verifier rejected the presentation with
+  `:unused_disclosure`, or saw an empty array when the elements were disclosed
+  whole. Those element Disclosures are now kept.
+
 ## [2.13.1] - 2026-11-05
 
 ### Security

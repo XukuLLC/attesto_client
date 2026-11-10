@@ -102,13 +102,18 @@ defmodule AttestoClient.Wallet.Presentation.Disclosures do
 
   defp keep?(encoded, locations, paths) do
     case Map.fetch(locations, encoded) do
-      {:ok, path} -> Enum.any?(paths, &(prefix?(&1, path) or prefix?(path, &1)))
+      {:ok, location} -> Enum.any?(paths, &on_path?(&1, location))
       :error -> false
     end
   end
 
-  defp prefix?([], _path), do: true
-  defp prefix?([nil | rest], [_index | path]), do: prefix?(rest, path)
-  defp prefix?([key | rest], [key | path]), do: prefix?(rest, path)
-  defp prefix?(_prefix, _path), do: false
+  # A Disclosure is kept when its location lies under a requested path (the
+  # requested claim and its contents) or above it (an enclosing claim or array
+  # element the verifier needs to reach it). A `nil` path component selects
+  # every array element, in both directions.
+  defp on_path?([], _location), do: true
+  defp on_path?(_requested, []), do: true
+  defp on_path?([nil | requested], [_index | location]), do: on_path?(requested, location)
+  defp on_path?([key | requested], [key | location]), do: on_path?(requested, location)
+  defp on_path?(_requested, _location), do: false
 end
