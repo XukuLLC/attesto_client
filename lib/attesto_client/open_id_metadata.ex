@@ -75,6 +75,16 @@ defmodule AttestoClient.OpenIDMetadata do
         {:error, :invalid_metadata}
 
       :error ->
+        fetch(issuer, opts)
+    end
+  end
+
+  # With `issuer: {AttestoClient.Issuer, name}` the metadata comes from that
+  # cache (`AttestoClient.Issuer.expand_option/1` recorded it); otherwise it is
+  # fetched for this call.
+  defp fetch(issuer, opts) do
+    case Keyword.get(opts, :issuer_cache) do
+      nil ->
         Discovery.fetch(
           issuer,
           Keyword.take(opts, [
@@ -92,6 +102,9 @@ defmodule AttestoClient.OpenIDMetadata do
             )
           )
         )
+
+      server ->
+        AttestoClient.Issuer.metadata(server)
     end
   end
 

@@ -253,6 +253,47 @@ defmodule AttestoClient.ResourceServerTest do
     assert length(requests(ctx.state)) == 4
   end
 
+  test "exp has no leeway unless :expiry_leeway_seconds is configured", ctx do
+    expired = access_token(ctx.key, %{"exp" => @now - 30})
+
+    # The default server, with its 60-second clock skew, still rejects at exp.
+    assert {:error, :expired} = ResourceServer.verify(ctx.server, expired, now: @now)
+
+    stop_supervised!({ResourceServer, @issuer})
+
+    server =
+      start_supervised!(
+        {ResourceServer,
+         issuer: @issuer,
+         audience: @audience,
+         accepted_algs: ["RS256"],
+         req_options: [plug: issuer_plug(ctx.state)],
+         expiry_leeway_seconds: 31}
+      )
+
+    assert {:ok, _claims} = ResourceServer.verify(server, expired, now: @now)
+
+    assert {:error, :expired} =
+             ResourceServer.verify(server, access_token(ctx.key, %{"exp" => @now - 31}),
+               now: @now
+             )
+  end
+
+  test ":expiry_leeway_seconds is an integer from 0 to 300" do
+    for bad <- [-1, 301, 1.5, "30"] do
+      assert_raise ArgumentError,
+                   ~r/:expiry_leeway_seconds must be an integer from 0 to 300/,
+                   fn ->
+                     ResourceServer.start_link(
+                       issuer: @issuer,
+                       audience: @audience,
+                       accepted_algs: ["RS256"],
+                       expiry_leeway_seconds: bad
+                     )
+                   end
+    end
+  end
+
   test "uses stale known keys for transient refresh failure", ctx do
     stop_supervised!({ResourceServer, @issuer})
 

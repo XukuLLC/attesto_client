@@ -13,7 +13,8 @@ defmodule AttestoClient.IDToken do
       Attesto's supported asymmetric algorithms.
     * JOSE `typ`, when present, must be `"JWT"`; an access-token type such as
       `"at+jwt"` is rejected.
-    * `iss` equals `:issuer`.
+    * `iss` equals `:issuer`, or one of `:issuer_aliases` when the caller
+      opted into that deviation (see "Issuer aliases").
     * `aud` equals, or is an all-string array containing, `:client_id`.
     * `azp` equals `:client_id` whenever present, and is required when `aud`
       contains multiple audiences.
@@ -22,13 +23,46 @@ defmodule AttestoClient.IDToken do
     * a supplied `:nonce` must match the token's `nonce` claim.
     * `auth_time`, when present, must not be meaningfully in the future; a
       supplied `:max_age` requires `auth_time` and enforces the age.
+      `require_auth_time: true` requires the claim even without `:max_age`
+      (OIDC Core §3.1.3.7 item 13), for a client that registered
+      `require_auth_time` or otherwise depends on the claim.
+    * a supplied `:max_token_age_seconds` rejects a token whose `iat` is
+      older than that many seconds, plus `:clock_skew_seconds`
+      (§3.1.3.7 item 10), with `{:error, :token_too_old}`. It is the option
+      `AttestoClient.ResourceServer` takes, with the same rule.
     * supplied `:access_token`, `:code`, and `:state` are checked against
       `at_hash`, `c_hash`, and `s_hash` respectively using the ID Token signing
       algorithm and the verified issuer key's left-half hash construction.
 
   `:jwks` may be supplied directly. Otherwise the verifier can fetch through
   `AttestoClient.Discovery`: pass `:metadata`, `:jwks_uri`, or just `:issuer`
-  with optional `:req_options` / `:well_known`.
+  with optional `:req_options` / `:well_known`. Those fetches happen on every
+  call. To cache the keys, start an `AttestoClient.Issuer` and pass
+  `issuer: {AttestoClient.Issuer, name}`: the keys come from that process,
+  which refreshes them once when a token names a `kid` it does not hold, and
+  the expected `iss` is the issuer the process was started with.
+
+  ## Issuer aliases
+
+  OIDC Core §3.1.3.7 item 2 says the issuer identifier "MUST exactly match" the
+  `iss` claim, and that is what this module does by default. Some providers
+  break the rule and put more than one value in `iss`. Google issues ID Tokens
+  with both `https://accounts.google.com` and `accounts.google.com`; the
+  second is not a valid issuer identifier at all, since it has no `https`
+  scheme. `:issuer_aliases` is an opt-in interop workaround for such a
+  provider: a list of extra exact strings accepted as `iss`. It deviates from
+  §3.1.3.7 and is empty by default. Discovery, the JWKS, and the RFC 9207
+  authorization-response `iss` check all stay pinned to `:issuer`; an alias
+  only widens the comparison against the ID Token's `iss` claim.
+
+  ## Clock tolerance
+
+  `:clock_skew_seconds` bounds how far in the future `iat`, `nbf`, and
+  `auth_time` may lie. It defaults to `60`. `:expiry_leeway_seconds` is how
+  long past `exp` a token is still accepted (RFC 7519 §4.1.4); it defaults to
+  `0`, so an expired token is rejected at `exp`. Each is an integer from `0`
+  to `300`. `AttestoClient.ResourceServer` takes the same two options with the
+  same meanings.
 
   ## Unsigned ID Tokens (`alg: "none"`)
 
@@ -44,7 +78,7 @@ defmodule AttestoClient.IDToken do
 
   alias Attesto.SecureCompare
   alias Attesto.SigningAlg
-  alias AttestoClient.{ClaimValidation, Verifier}
+  alias AttestoClient.{ClaimValidation, Issuer, Verifier}
 
   @clock_skew_seconds 60
   @id_token_typ "JWT"
@@ -52,7 +86,7 @@ defmodule AttestoClient.IDToken do
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
 
   @type verify_opt ::
-          {:issuer, String.t()}
+          {:issuer, String.t() | Issuer.ref()}
           | {:client_id, String.t()}
           | {:jwks, jwks()}
           | {:metadata, map()}
@@ -60,6 +94,11 @@ defmodule AttestoClient.IDToken do
           | {:nonce, String.t()}
           | {:subject, String.t()}
           | {:max_age, non_neg_integer()}
+          | {:require_auth_time, boolean()}
+          | {:max_token_age_seconds, non_neg_integer()}
+          | {:issuer_aliases, [String.t()]}
+          | {:clock_skew_seconds, 0..300}
+          | {:expiry_leeway_seconds, 0..300}
           | {:access_token, String.t()}
           | {:require_at_hash, boolean()}
           | {:code, String.t()}
@@ -86,6 +125,12 @@ defmodule AttestoClient.IDToken do
           | :unsupported_critical_header
           | :unexpected_typ
           | :invalid_issuer
+          | :invalid_issuer_aliases
+          | :invalid_clock_skew_seconds
+          | :invalid_expiry_leeway_seconds
+          | :invalid_max_token_age_seconds
+          | :invalid_require_auth_time
+          | :token_too_old
           | :invalid_audience
           | :missing_azp
           | :invalid_azp
@@ -108,6 +153,7 @@ defmodule AttestoClient.IDToken do
           | :invalid_c_hash
           | :missing_s_hash
           | :invalid_s_hash
+          | Issuer.refresh_error()
           | AttestoClient.Discovery.error()
 
   @doc """
@@ -115,7 +161,9 @@ defmodule AttestoClient.IDToken do
 
   Required options:
 
-    * `:issuer` - expected OpenID Provider issuer.
+    * `:issuer` - expected OpenID Provider issuer, or
+      `{AttestoClient.Issuer, name}` to take the issuer and its keys from a
+      running cache.
     * `:client_id` - this relying party's client id.
 
   Pass `:subject` when a later ID Token (for example, from refresh) must remain
@@ -127,18 +175,25 @@ defmodule AttestoClient.IDToken do
     * `:metadata` - discovery metadata containing matching `issuer` and
       `jwks_uri`.
     * `:jwks_uri` - fetch only the JWKS.
-    * no JWKS option - fetch discovery from `:issuer`, then fetch its JWKS.
+    * no JWKS option - fetch discovery from `:issuer`, then fetch its JWKS;
+      with an `AttestoClient.Issuer`, use its cached keys.
   """
   @spec verify(String.t(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(id_token, opts) when is_binary(id_token) and is_list(opts) do
     now = Verifier.now(opts)
 
-    with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
+    with {:ok, opts} <- Issuer.expand_option(opts),
+         {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
+         {:ok, aliases} <- issuer_aliases(opts),
+         {:ok, skew} <-
+           tolerance(opts, :clock_skew_seconds, @clock_skew_seconds, :invalid_clock_skew_seconds),
+         {:ok, leeway} <-
+           tolerance(opts, :expiry_leeway_seconds, 0, :invalid_expiry_leeway_seconds),
          {:ok, claims, header, verified_jwk} <- verify_or_decode(id_token, opts, issuer),
          :ok <- check_header_typ(header),
          :ok <- check_token_purpose(claims),
-         :ok <- check_issuer(claims, issuer),
+         :ok <- check_issuer(claims, [issuer | aliases]),
          :ok <- check_audience_and_azp(claims, client_id),
          :ok <- check_required_claims(claims),
          :ok <- check_subject(claims, Keyword.get(opts, :subject)),
@@ -146,23 +201,33 @@ defmodule AttestoClient.IDToken do
            ClaimValidation.expiration(claims, now,
              missing_error: :missing_exp,
              invalid_error: :missing_exp,
-             expired_error: :expired
+             expired_error: :expired,
+             leeway: leeway
            ),
          :ok <-
            ClaimValidation.issued_at(claims, now,
              missing_error: :invalid_iat,
              invalid_error: :invalid_iat,
              future_error: :not_yet_valid,
-             skew: @clock_skew_seconds
+             skew: skew
            ),
          :ok <-
            ClaimValidation.not_before(claims, now,
              invalid_error: :invalid_nbf,
              future_error: :not_yet_valid,
-             skew: @clock_skew_seconds
+             skew: skew
+           ),
+         :ok <-
+           ClaimValidation.issued_within(
+             claims["iat"],
+             now,
+             Keyword.get(opts, :max_token_age_seconds),
+             skew,
+             too_old_error: :token_too_old,
+             invalid_error: :invalid_max_token_age_seconds
            ),
          :ok <- check_nonce(claims, Keyword.get(opts, :nonce)),
-         :ok <- check_max_age(claims, opts, now),
+         :ok <- check_max_age(claims, opts, now, skew),
          :ok <-
            check_detached_hash(
              claims,
@@ -180,6 +245,26 @@ defmodule AttestoClient.IDToken do
 
   def verify(_id_token, _opts), do: {:error, :invalid_token}
 
+  @doc false
+  # The `:issuer_aliases` option, validated: a list of non-empty strings, `[]`
+  # when absent. Shared with `AttestoClient.AuthorizationCode.start/2`, which
+  # pins the aliases on the transaction.
+  @spec issuer_aliases(keyword()) :: {:ok, [String.t()]} | {:error, :invalid_issuer_aliases}
+  def issuer_aliases(opts) when is_list(opts) do
+    case Keyword.get(opts, :issuer_aliases) do
+      nil ->
+        {:ok, []}
+
+      aliases when is_list(aliases) ->
+        if Enum.all?(aliases, &(is_binary(&1) and &1 != "")),
+          do: {:ok, aliases},
+          else: {:error, :invalid_issuer_aliases}
+
+      _invalid ->
+        {:error, :invalid_issuer_aliases}
+    end
+  end
+
   # The signature path resolves the issuer JWKS and verifies against it. The
   # unsigned path is taken only under the explicit `allow_unsigned: true`
   # opt-in AND a header alg of exactly "none" (OIDC Core §3.1.3.7, token
@@ -192,11 +277,11 @@ defmodule AttestoClient.IDToken do
         {:ok, claims, header, nil}
       end
     else
-      with {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
-           {:ok, algs} <- Verifier.accepted_algs(opts) do
-        Verifier.verify_signature(
+      with {:ok, algs} <- Verifier.accepted_algs(opts) do
+        Issuer.verify_signature(
           id_token,
-          jwks,
+          opts,
+          issuer,
           algs,
           Keyword.take(opts, [:enforce_fapi_alg_policy])
         )
@@ -221,8 +306,11 @@ defmodule AttestoClient.IDToken do
     end
   end
 
-  defp check_issuer(%{"iss" => iss}, issuer) when is_binary(iss) do
-    if iss == issuer, do: :ok, else: {:error, :invalid_issuer}
+  # OIDC Core §3.1.3.7 item 2: `iss` MUST exactly match the issuer identifier.
+  # `accepted_issuers` is that one value unless the caller opted into
+  # `:issuer_aliases`.
+  defp check_issuer(%{"iss" => iss}, accepted_issuers) when is_binary(iss) do
+    if iss in accepted_issuers, do: :ok, else: {:error, :invalid_issuer}
   end
 
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
@@ -286,21 +374,28 @@ defmodule AttestoClient.IDToken do
 
   defp check_nonce(_claims, _expected), do: {:error, :nonce_mismatch}
 
-  defp check_max_age(claims, opts, now) do
+  defp tolerance(opts, key, default, error) do
+    case ClaimValidation.tolerance(opts, key, default) do
+      {:ok, seconds} -> {:ok, seconds}
+      :error -> {:error, error}
+    end
+  end
+
+  defp check_max_age(claims, opts, now, skew) do
     case Keyword.get(opts, :max_age) do
       nil ->
-        check_optional_auth_time(claims, now)
+        check_unbounded_auth_time(claims, Keyword.get(opts, :require_auth_time, false), now, skew)
 
       max_age when is_integer(max_age) and max_age >= 0 ->
-        check_auth_age(claims, max_age, now)
+        check_auth_age(claims, max_age, now, skew)
 
       _other ->
         {:error, :invalid_max_age}
     end
   end
 
-  defp check_auth_age(claims, max_age, now) do
-    case fetch_auth_time(claims, now) do
+  defp check_auth_age(claims, max_age, now, skew) do
+    case fetch_auth_time(claims, now, skew) do
       {:ok, auth_time} ->
         if auth_time + max_age >= now, do: :ok, else: {:error, :max_age_exceeded}
 
@@ -309,24 +404,37 @@ defmodule AttestoClient.IDToken do
     end
   end
 
-  defp check_optional_auth_time(%{"auth_time" => _auth_time} = claims, now) do
-    case fetch_auth_time(claims, now) do
+  # Without `:max_age` there is no age to enforce. `require_auth_time: true`
+  # still demands the claim (OIDC Core §3.1.3.7 item 13); otherwise a present
+  # `auth_time` only has to be well-formed.
+  defp check_unbounded_auth_time(claims, true, now, skew) do
+    with {:ok, _auth_time} <- fetch_auth_time(claims, now, skew), do: :ok
+  end
+
+  defp check_unbounded_auth_time(claims, false, now, skew),
+    do: check_optional_auth_time(claims, now, skew)
+
+  defp check_unbounded_auth_time(_claims, _invalid, _now, _skew),
+    do: {:error, :invalid_require_auth_time}
+
+  defp check_optional_auth_time(%{"auth_time" => _auth_time} = claims, now, skew) do
+    case fetch_auth_time(claims, now, skew) do
       {:ok, _auth_time} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp check_optional_auth_time(_claims, _now), do: :ok
+  defp check_optional_auth_time(_claims, _now, _skew), do: :ok
 
-  defp fetch_auth_time(%{"auth_time" => auth_time}, now)
+  defp fetch_auth_time(%{"auth_time" => auth_time}, now, skew)
        when is_integer(auth_time) and auth_time >= 0 do
-    if auth_time <= now + @clock_skew_seconds,
+    if auth_time <= now + skew,
       do: {:ok, auth_time},
       else: {:error, :invalid_auth_time}
   end
 
-  defp fetch_auth_time(%{"auth_time" => _bad}, _now), do: {:error, :invalid_auth_time}
-  defp fetch_auth_time(_claims, _now), do: {:error, :auth_time_required}
+  defp fetch_auth_time(%{"auth_time" => _bad}, _now, _skew), do: {:error, :invalid_auth_time}
+  defp fetch_auth_time(_claims, _now, _skew), do: {:error, :auth_time_required}
 
   defp check_detached_hash(claims, header, verified_jwk, claim_name, opt_key, opts) do
     case Keyword.get(opts, opt_key) do

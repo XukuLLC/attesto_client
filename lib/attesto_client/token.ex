@@ -17,11 +17,11 @@ defmodule AttestoClient.Token do
   alias AttestoClient.AuthorizationProfile
   alias AttestoClient.HTTPPolicy
   alias AttestoClient.IDToken
+  alias AttestoClient.Issuer
   alias AttestoClient.OAuthHTTP
   alias AttestoClient.RefreshCoordinator
   alias AttestoClient.RefreshResult
   alias AttestoClient.TokenSet
-  alias AttestoClient.Verifier
 
   @pre_authorized_code_grant_type "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
@@ -85,6 +85,15 @@ defmodule AttestoClient.Token do
   `{:private_key_jwt, jwk, assertion_opts}` for an explicitly registered
   assertion algorithm, key id, audience, lifetime, time, or JWT id.
 
+  `:issuer` is the issuer identifier, or `{AttestoClient.Issuer, name}` to
+  take the identifier and the ID Token verification keys from a running cache.
+
+  `:issuer_aliases`, `:clock_skew_seconds`, `:expiry_leeway_seconds`,
+  `:max_token_age_seconds`, and `:require_auth_time` apply
+  to an ID Token returned with the refresh, as in
+  `AttestoClient.IDToken.verify/2`. A token set does not retain the aliases
+  given to `AttestoClient.AuthorizationCode.start/2`, so pass them again here.
+
   A prior DPoP token set requires `:dpop` signing material before any network
   request. Persisted `tokens.dpop_jkt` must match that key; a missing or changed
   key is rejected locally. A requested or prior DPoP token cannot accept a
@@ -107,7 +116,8 @@ defmodule AttestoClient.Token do
           {:ok, RefreshResult.t()} | {:error, term()}
   def refresh(coordinator, key, %TokenSet{refresh_token: refresh_token} = tokens, opts)
       when is_binary(refresh_token) and refresh_token != "" and is_list(opts) do
-    with {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
+    with {:ok, opts} <- Issuer.expand_option(opts),
+         {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          {:ok, _endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
@@ -165,7 +175,7 @@ defmodule AttestoClient.Token do
        ) do
     with {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
-         {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
+         {:ok, jwks} <- Issuer.resolve_jwks(opts, issuer),
          {:ok, response} <-
            OAuthHTTP.post_form(
              endpoint,
@@ -174,7 +184,7 @@ defmodule AttestoClient.Token do
            ),
          {:ok, tokens} <- TokenSet.from_response(response, refresh_token, old_scope),
          {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
-         {:ok, claims} <- verify_refresh_id_token(tokens, Keyword.put(opts, :jwks, jwks)) do
+         {:ok, claims} <- verify_refresh_id_token(tokens, put_resolved_jwks(opts, jwks)) do
       tokens =
         tokens
         |> Map.merge(profile)
@@ -286,7 +296,12 @@ defmodule AttestoClient.Token do
          {:ok, id_token_alg} <- id_token_alg(opts) do
       verify_opts =
         [
-          issuer: issuer,
+          issuer: Issuer.option(opts, issuer),
+          issuer_aliases: Keyword.get(opts, :issuer_aliases),
+          clock_skew_seconds: Keyword.get(opts, :clock_skew_seconds),
+          expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
+          max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
+          require_auth_time: Keyword.get(opts, :require_auth_time),
           client_id: client_id,
           subject: Keyword.get(opts, :subject),
           metadata: Keyword.get(opts, :metadata),
@@ -300,6 +315,15 @@ defmodule AttestoClient.Token do
 
       IDToken.verify(id_token, verify_opts)
     end
+  end
+
+  # The keys resolved before the request verify the returned ID Token. With an
+  # issuer cache they are left to the cache, so an unknown `kid` can refresh
+  # them; a caller-supplied `:jwks` is already in `opts`.
+  defp put_resolved_jwks(opts, jwks) do
+    if Keyword.has_key?(opts, :issuer_cache) and not Keyword.has_key?(opts, :jwks),
+      do: opts,
+      else: Keyword.put(opts, :jwks, jwks)
   end
 
   defp id_token_alg(opts) do

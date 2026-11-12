@@ -7,8 +7,17 @@ defmodule AttestoClient.Deadline do
     caller = self()
     ref = make_ref()
 
+    # The operation runs in its own process so it can be killed at the
+    # deadline. `$callers` and `$ancestors` name the caller the way `Task` does,
+    # so ownership that follows them (`Req.Test` stubs, Ecto sandbox
+    # allowances, Mox) reaches work done inside the deadline.
+    callers = [caller | Process.get(:"$callers", [])]
+    ancestors = [caller | Process.get(:"$ancestors", [])]
+
     {pid, monitor} =
       spawn_monitor(fn ->
+        Process.put(:"$callers", callers)
+        Process.put(:"$ancestors", ancestors)
         worker = self()
 
         watcher =

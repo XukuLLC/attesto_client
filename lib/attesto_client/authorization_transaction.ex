@@ -17,8 +17,15 @@ defmodule AttestoClient.AuthorizationTransaction do
   Authentication bindings retain public key identity or a secret digest rather
   than private keys or attestation JWTs.
 
+  `:expires_at` is the transaction's deadline as Unix milliseconds.
+  `AttestoClient.AuthorizationCode.callback/3` refuses a transaction past it,
+  whichever way the transaction was kept.
+
   A transaction contains protocol secrets, especially the PKCE verifier and
-  browser binding. Never send it to the browser or log it.
+  browser binding. Never log it, and never send it to the browser in a form
+  the browser can read. An application that keeps the transaction itself
+  (`AttestoClient.AuthorizationCode.start/2` with `:return`) must encrypt it
+  before it leaves the server; signing alone exposes the verifier.
   """
 
   @enforce_keys [
@@ -40,7 +47,9 @@ defmodule AttestoClient.AuthorizationTransaction do
                 require_response_issuer: false,
                 profile: :generic,
                 client_auth_binding: nil,
-                resources: []
+                resources: [],
+                issuer_aliases: [],
+                expires_at: nil
               ]
 
   @type t :: %__MODULE__{
@@ -59,6 +68,8 @@ defmodule AttestoClient.AuthorizationTransaction do
           require_response_issuer: boolean(),
           profile: :generic | :haip | :fapi,
           client_auth_binding: map() | nil,
-          resources: [String.t()]
+          resources: [String.t()],
+          issuer_aliases: [String.t()],
+          expires_at: integer() | nil
         }
 end

@@ -267,6 +267,80 @@ defmodule AttestoClient.AuthorizationCodeTest do
              )
   end
 
+  test "issuer aliases given at start widen only the ID Token iss check" do
+    alias_iss = "op.example.com"
+
+    plug_for = fn nonce ->
+      fn conn ->
+        case conn.request_path do
+          "/token" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              JSON.encode!(%{
+                "access_token" => "access-1",
+                "token_type" => "Bearer",
+                "id_token" => id_token(nonce, "access-1", %{"iss" => alias_iss})
+              })
+            )
+
+          "/jwks" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, JSON.encode!(public_jwks()))
+        end
+      end
+    end
+
+    nonce = fn started ->
+      started.url
+      |> URI.parse()
+      |> Map.fetch!(:query)
+      |> URI.decode_query()
+      |> Map.fetch!("nonce")
+    end
+
+    store = start_supervised!(ETS)
+
+    # Without the opt-in, an ID Token whose iss is the alias is refused.
+    assert {:ok, strict} = start_flow(store)
+
+    assert {:error, :invalid_issuer} =
+             callback(
+               {ETS, store},
+               %{"state" => strict.state, "code" => "code-1", "iss" => @issuer},
+               req_options: [plug: plug_for.(nonce.(strict))],
+               timeout: 30_000
+             )
+
+    assert {:error, :invalid_issuer_aliases} = start_flow(store, issuer_aliases: "op.example.com")
+
+    # With it, the alias is accepted in the ID Token.
+    assert {:ok, started} = start_flow(store, issuer_aliases: [alias_iss])
+
+    assert {:ok, result} =
+             callback(
+               {ETS, store},
+               %{"state" => started.state, "code" => "code-1", "iss" => @issuer},
+               req_options: [plug: plug_for.(nonce.(started))],
+               timeout: 30_000
+             )
+
+    assert result.id_token_claims["iss"] == alias_iss
+
+    # The RFC 9207 authorization-response iss stays pinned to :issuer.
+    assert {:ok, pinned} = start_flow(store, issuer_aliases: [alias_iss])
+
+    assert {:error, _issuer_mismatch} =
+             callback(
+               {ETS, store},
+               %{"state" => pinned.state, "code" => "code-1", "iss" => alias_iss},
+               req_options: [plug: plug_for.(nonce.(pinned))],
+               timeout: 30_000
+             )
+  end
+
   test "sends RFC 8707 resource indicators on the authorization and token requests" do
     store = start_supervised!(ETS)
     resources = ["https://rs.example/mcp", "https://files.example/api?tenant=a"]
@@ -697,5 +771,243 @@ defmodule AttestoClient.AuthorizationCodeTest do
                {ETS, store},
                %{"state" => started.state, "code" => "code"}
              )
+  end
+
+  describe "a transaction kept by the caller (start/2 with :return)" do
+    defp token_plug(nonce, overrides \\ %{}) do
+      parent = self()
+
+      fn conn ->
+        case conn.request_path do
+          "/token" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(parent, {:token_request, URI.decode_query(body)})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              JSON.encode!(%{
+                "access_token" => "access-1",
+                "token_type" => "Bearer",
+                "id_token" => id_token(nonce, "access-1", overrides)
+              })
+            )
+
+          "/jwks" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, JSON.encode!(public_jwks()))
+        end
+      end
+    end
+
+    defp start_returned(opts \\ []) do
+      AuthorizationCode.start(
+        :return,
+        Keyword.merge(
+          [
+            issuer: @issuer,
+            client_id: @client_id,
+            browser_binding: @browser_binding,
+            redirect_uri: @redirect_uri,
+            metadata: metadata()
+          ],
+          opts
+        )
+      )
+    end
+
+    test "start returns the transaction and callback completes from it with no store" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      assert transaction.state == started.state
+      assert is_integer(transaction.expires_at)
+
+      # It survives the serialization a host would seal.
+      transaction = transaction |> :erlang.term_to_binary() |> :erlang.binary_to_term()
+
+      assert {:ok, result} =
+               callback(:return, %{"state" => started.state, "code" => "code-1"},
+                 transaction: transaction,
+                 req_options: [plug: token_plug(transaction.nonce)],
+                 timeout: 30_000
+               )
+
+      assert result.id_token_claims["sub"] == "subject-1"
+      assert_received {:token_request, form}
+      assert form["code"] == "code-1"
+      assert form["code_verifier"] == transaction.code_verifier
+      assert form["redirect_uri"] == @redirect_uri
+    end
+
+    test "a stored start result carries no transaction" do
+      store = start_supervised!(ETS)
+      assert {:ok, started} = start_flow(store)
+      refute Map.has_key?(started, :transaction)
+    end
+
+    test "the same checks apply as on the stored path" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      response = %{"state" => started.state, "code" => "code-1"}
+
+      opts = [
+        transaction: transaction,
+        req_options: [plug: token_plug(transaction.nonce)],
+        timeout: 30_000
+      ]
+
+      assert {:error, {:invalid_state, :not_found}} =
+               callback(:return, %{response | "state" => "another-state"}, opts)
+
+      assert {:error, :browser_binding_mismatch} =
+               callback(:return, response, Keyword.put(opts, :browser_binding, "other-browser"))
+
+      assert {:error, :issuer_mismatch} =
+               callback(:return, Map.put(response, "iss", "https://other.example"), opts)
+
+      wrong_nonce = Keyword.put(opts, :req_options, plug: token_plug("another-nonce"))
+      assert {:error, :nonce_mismatch} = callback(:return, response, wrong_nonce)
+    end
+
+    test "an expired or malformed transaction is refused before the token request" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      response = %{"state" => started.state, "code" => "code-1"}
+      expired = %{transaction | expires_at: System.system_time(:millisecond) - 1}
+
+      assert {:error, {:invalid_state, :expired}} =
+               callback(:return, response, transaction: expired)
+
+      assert {:error, :invalid_transaction} =
+               callback(:return, response, transaction: %{state: started.state})
+
+      assert {:error, :invalid_transaction} =
+               callback(:return, response, transaction: %{transaction | expires_at: "soon"})
+
+      assert {:error, :missing_transaction} = callback(:return, response)
+      refute_received {:token_request, _form}
+    end
+
+    test "a returned transaction is not single use; the host owns that" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      response = %{"state" => started.state, "code" => "code-1"}
+
+      opts = [
+        transaction: transaction,
+        req_options: [plug: token_plug(transaction.nonce)],
+        timeout: 30_000
+      ]
+
+      assert {:ok, _first} = callback(:return, response, opts)
+      assert {:ok, _second} = callback(:return, response, opts)
+    end
+
+    test "transaction: takes precedence over a store and leaves it untouched" do
+      store = start_supervised!(ETS)
+      assert {:ok, stored} = start_flow(store)
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+
+      assert {:ok, _result} =
+               callback({ETS, store}, %{"state" => started.state, "code" => "code-1"},
+                 transaction: transaction,
+                 req_options: [plug: token_plug(transaction.nonce)],
+                 timeout: 30_000
+               )
+
+      # The stored transaction is still there to be taken.
+      assert {:error, :missing_code} = callback({ETS, store}, %{"state" => stored.state})
+    end
+
+    test "callback forwards :max_token_age_seconds and :require_auth_time to ID Token verification" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      response = %{"state" => started.state, "code" => "code-1"}
+
+      old = [
+        transaction: transaction,
+        req_options: [plug: token_plug(transaction.nonce, %{"iat" => @now - 400})],
+        timeout: 30_000
+      ]
+
+      assert {:ok, _result} = callback(:return, response, old)
+
+      assert {:error, :token_too_old} =
+               callback(:return, response, Keyword.put(old, :max_token_age_seconds, 60))
+
+      assert {:error, :auth_time_required} =
+               callback(:return, response, Keyword.put(old, :require_auth_time, true))
+    end
+  end
+
+  describe "exchange/2" do
+    test "sends the authorization-code token request and returns the token set" do
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:exchange, conn.request_path, URI.decode_query(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          JSON.encode!(%{
+            "access_token" => "access-1",
+            "token_type" => "Bearer",
+            "refresh_token" => "refresh-1"
+          })
+        )
+      end
+
+      {:ok, verifier} = {:ok, PKCE.code_verifier()}
+
+      assert {:ok, %AttestoClient.TokenSet{access_token: "access-1", refresh_token: "refresh-1"}} =
+               AuthorizationCode.exchange("code-1",
+                 token_endpoint: "#{@issuer}/token",
+                 issuer: @issuer,
+                 client_id: @client_id,
+                 redirect_uri: @redirect_uri,
+                 code_verifier: verifier,
+                 resource: "https://rs.example/api",
+                 req_options: [plug: plug],
+                 timeout: 30_000
+               )
+
+      assert_received {:exchange, "/token", form}
+
+      assert form == %{
+               "grant_type" => "authorization_code",
+               "code" => "code-1",
+               "redirect_uri" => @redirect_uri,
+               "code_verifier" => verifier,
+               "client_id" => @client_id,
+               "resource" => "https://rs.example/api"
+             }
+    end
+
+    test "validates its inputs before any request" do
+      base = [
+        token_endpoint: "#{@issuer}/token",
+        issuer: @issuer,
+        client_id: @client_id,
+        redirect_uri: @redirect_uri,
+        code_verifier: PKCE.code_verifier(),
+        req_options: [plug: fn _conn -> flunk("no request expected") end]
+      ]
+
+      assert {:error, :missing_code} = AuthorizationCode.exchange("", base)
+      assert {:error, :invalid_options} = AuthorizationCode.exchange("code-1", %{})
+
+      for {key, error} <- [
+            token_endpoint: :missing_token_endpoint,
+            issuer: :missing_issuer,
+            client_id: :missing_client_id,
+            redirect_uri: :missing_redirect_uri,
+            code_verifier: :missing_code_verifier
+          ] do
+        assert {:error, ^error} = AuthorizationCode.exchange("code-1", Keyword.delete(base, key))
+      end
+
+      assert {:error, :invalid_resource} =
+               AuthorizationCode.exchange("code-1", Keyword.put(base, :resource, "not a uri"))
+    end
   end
 end

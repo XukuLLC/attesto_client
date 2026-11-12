@@ -4,6 +4,110 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `AttestoClient.Issuer`, a supervised cache of one issuer's discovery
+  metadata and JWKS. Until now only `AttestoClient.ResourceServer` cached
+  them, so `AttestoClient.IDToken.verify/2` fetched the discovery document
+  and the key set on every call that was not handed a `:jwks`. The cache has
+  the fresh and stale intervals, the retry cooldown, and the single
+  coordinated refresh on an unknown `kid` (RFC 7517 key rotation) that
+  `ResourceServer` already had. `issuer/1`, `metadata/1`, `keys/1`, `warm/1`,
+  `ready?/1`, and `refresh/1` read and drive it.
+- `issuer: {AttestoClient.Issuer, name}` on `AttestoClient.IDToken.verify/2`,
+  `AttestoClient.AuthorizationCode.start/2` and `callback/3`, and
+  `AttestoClient.Token.refresh/4`. The issuer identifier compared with the ID
+  Token's `iss` and the RFC 9207 response `iss` is the one the cache was
+  started with. `start/2` takes the discovery metadata from the cache;
+  `callback/3` and `refresh/4` take the ID Token's keys from it, and a
+  caller-supplied `:jwks` still takes precedence. `callback/3` returns
+  `{:error, :issuer_mismatch}` for a cache whose issuer is not the
+  transaction's. A cache that is not running returns
+  `{:error, {:jwks_refresh_failed, :server_not_running}}`. A plain issuer
+  string behaves as before.
+
+- `AttestoClient.IDToken.verify/2` accepts `:max_token_age_seconds`, which
+  rejects an ID Token whose `iat` is older than that many seconds plus
+  `:clock_skew_seconds` with `{:error, :token_too_old}` (OIDC Core §3.1.3.7
+  item 10). It is the option `AttestoClient.ResourceServer` already takes, and
+  both now run the same rule. A value that is not a non-negative integer is
+  `{:error, :invalid_max_token_age_seconds}`.
+- `AttestoClient.IDToken.verify/2` accepts `require_auth_time: true`, which
+  requires the `auth_time` claim even when no `:max_age` is given (§3.1.3.7
+  item 13) and returns `{:error, :auth_time_required}` without it.
+  `AttestoClient.AuthorizationCode.callback/3` and
+  `AttestoClient.Token.refresh/4` accept both options and apply them to the
+  ID Token they verify.
+- `AttestoClient.AuthorizationCode.start/2` accepts `:return` in place of a
+  store. Nothing is stored; the result carries the transaction under
+  `:transaction` for the application to keep, and `callback/3` takes it back
+  as `transaction:`. The response's `state` must equal the transaction's, and
+  every other callback check runs as it does for a stored transaction. The
+  application then owns two things a store provided. It must encrypt the
+  transaction before it leaves the server, because it holds the PKCE
+  verifier. It must also make the transaction single use, because
+  `callback/3` accepts a returned transaction again until it expires.
+- `AttestoClient.AuthorizationTransaction` has an `:expires_at` field, the
+  transaction's deadline in Unix milliseconds. `callback/3` refuses a
+  transaction past it with `{:error, {:invalid_state, :expired}}`, whether it
+  came from a store or from the caller. A transaction stored by an earlier
+  version has no deadline of its own and relies on its store's lifetime, as
+  before.
+- `AttestoClient.AuthorizationCode.exchange/2` performs the authorization-code
+  token request on its own (RFC 6749 §4.1.3, RFC 7636 §4.5): code,
+  `redirect_uri`, `code_verifier`, client authentication, and DPoP when a key
+  is given. It returns the validated token response as an
+  `AttestoClient.TokenSet`. It is the request `callback/3` makes, for an
+  application that ran the authorization request itself; such an application
+  still has to check `state` and verify a returned ID Token.
+
+### Fixed
+
+- Work run under the package's request deadline now carries `$callers` and
+  `$ancestors` leading back to the calling process, as `Task` does. The work
+  runs in a separate process so it can be stopped at the deadline, and until
+  now that process named no caller. `Req.Test` stubs, Ecto sandbox allowances
+  and other ownership that follows `$callers` did not reach token, PAR,
+  discovery or JWKS requests made through it.
+
+### Changed
+
+- `AttestoClient.ResourceServer` is built on `AttestoClient.Issuer`, so there
+  is one cache and one refresh logic. Its options, defaults, results, and
+  error values are unchanged. The process it starts is an
+  `AttestoClient.Issuer` process: its name can be passed as
+  `issuer: {AttestoClient.Issuer, name}` to verify ID Tokens from the same
+  issuer against the same keys. A `ResourceServer` process started by an
+  earlier version does not survive a hot code upgrade to this one, because
+  its callback module changed; its supervisor restarts it with an empty cache.
+
+- `:issuer_aliases` on `AttestoClient.IDToken.verify/2`,
+  `AttestoClient.AuthorizationCode.start/2`, and `AttestoClient.Token.refresh`:
+  a list of extra exact strings accepted as the ID Token's `iss`. It is an
+  opt-in interop workaround that deviates from OIDC Core §3.1.3.7 item 2,
+  which says the issuer identifier "MUST exactly match" the `iss` claim. Some
+  providers break that rule. Google issues ID Tokens with both
+  `https://accounts.google.com` and `accounts.google.com`, and the second is
+  not a valid issuer identifier because it has no `https` scheme. The list is
+  empty by default, so `iss` is still compared exactly unless a caller opts
+  in. Discovery, the JWKS, and the RFC 9207 authorization-response `iss` check
+  stay pinned to `:issuer`. `start/2` pins the aliases in the transaction; a
+  token set does not retain them, so pass them again to `Token.refresh`.
+- `:expiry_leeway_seconds` on `AttestoClient.IDToken.verify/2`,
+  `AttestoClient.AuthorizationCode.callback/3`, `AttestoClient.Token.refresh`,
+  and `AttestoClient.ResourceServer`: how long past `exp` a token is still
+  accepted (RFC 7519 §4.1.4). An integer from 0 to 300. It defaults to 0, so
+  an expired token is still rejected at `exp` unless a caller sets it.
+- `:clock_skew_seconds` on `AttestoClient.IDToken.verify/2`,
+  `AttestoClient.AuthorizationCode.callback/3`, and
+  `AttestoClient.Token.refresh`: how far in the future an ID Token's `iat`,
+  `nbf`, and `auth_time` may lie. An integer from 0 to 300, default 60, the
+  value that was fixed before. It has the meaning the option of the same name
+  already has on `AttestoClient.ResourceServer`: it bounds future-dated
+  claims and does not extend `exp`.
+
 ## [2.14.0] - 2026-11-09
 
 ### Security

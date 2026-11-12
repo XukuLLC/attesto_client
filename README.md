@@ -94,6 +94,9 @@ the tool for DPoP-binding arbitrary outgoing requests.
   server for a protected resource from its RFC 9728 metadata.
 - `AttestoClient.WWWAuthenticate` — read `WWW-Authenticate` challenges,
   including the RFC 9728 `resource_metadata` pointer.
+- `AttestoClient.Issuer` — a supervised cache of one issuer's discovery
+  metadata and JWKS, refreshed on a schedule and on an unknown `kid`; pass
+  `issuer: {AttestoClient.Issuer, name}` to verify ID Tokens against it.
 - `AttestoClient.ResourceServer` — verify remote-issuer RFC 9068 JWT access
   tokens, coordinate JWKS refresh, and enforce exact OAuth scopes.
 - `AttestoClient.ResourceServer.Plug` — authenticate Bearer, DPoP, and mTLS
@@ -102,7 +105,9 @@ the tool for DPoP-binding arbitrary outgoing requests.
 - `AttestoClient.AuthorizationCode` — OAuth or OIDC Authorization Code flow
   with S256 PKCE, PAR, DPoP, RFC 8707 resource indicators, issuer and
   browser-session binding, and one-time state; OIDC additionally verifies nonce
-  and the ID Token.
+  and the ID Token. `start/2` with `:return` hands the transaction to the
+  application instead of a store, and `exchange/2` is the code-for-token
+  request on its own.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
   single-node transaction store with atomic consumption.
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,

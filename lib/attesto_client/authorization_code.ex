@@ -8,6 +8,11 @@ defmodule AttestoClient.AuthorizationCode do
   exactly once, and verifies the ID Token against the stored issuer, client,
   nonce, configured algorithm, and returned access token.
 
+  `start/2` can also return the transaction for the application to keep, with
+  no store; see "Keeping the transaction yourself" there. `exchange/2` is the
+  token request alone, for an application that ran the authorization request
+  itself.
+
   Transactions are also bound to an opaque application-supplied browser-session
   value, preventing a response initiated in one user agent from being used in
   another. The store protects protocol correlation only. Applications remain
@@ -25,16 +30,22 @@ defmodule AttestoClient.AuthorizationCode do
   alias AttestoClient.AuthorizationTransaction.Store
   alias AttestoClient.HTTPPolicy
   alias AttestoClient.IDToken
+  alias AttestoClient.Issuer
   alias AttestoClient.OpenIDMetadata
   alias AttestoClient.PKCE
   alias AttestoClient.ProtocolParams
   alias AttestoClient.TokenSet
-  alias AttestoClient.Verifier
 
   @default_transaction_ttl_ms 10 * 60 * 1_000
   @max_callback_bytes 1_000_000
 
   @type store :: Store.store()
+
+  @typedoc """
+  Where `start/2` keeps the transaction: a store, or `:return` to hand it back
+  to the caller.
+  """
+  @type transaction_target :: store() | :return
 
   @doc """
   Begin an authorization transaction.
@@ -44,6 +55,10 @@ defmodule AttestoClient.AuthorizationCode do
   application session. The same binding is mandatory at callback. The value is
   protocol correlation only; authorization and session policy remain
   application-owned.
+
+  `:issuer` is the issuer identifier, or `{AttestoClient.Issuer, name}` to
+  take the identifier and the discovery metadata from a running cache. The
+  transaction pins the identifier and the metadata either way.
 
   Discovery is fetched unless `:metadata` is supplied. `:scopes` defaults to
   `["openid"]` and must include `openid`. `:id_token_alg` defaults to `"RS256"`
@@ -60,6 +75,12 @@ defmodule AttestoClient.AuthorizationCode do
   token request; `callback/3` may narrow the token request to a subset. A
   `"resource"` entry in `:authorization_params` is treated the same way;
   supplying both is `{:error, :invalid_authorization_params}`.
+
+  `:issuer_aliases` lists extra exact strings accepted as the ID Token's `iss`
+  for a provider that issues more than one value. It is an opt-in workaround
+  that deviates from OIDC Core §3.1.3.7; see `AttestoClient.IDToken`. The
+  aliases are pinned in the transaction. Discovery and the RFC 9207
+  authorization-response `iss` check stay pinned to `:issuer`.
 
   Use `protocol: :oauth` for a plain OAuth flow, including OID4VCI issuance.
   It does not require the `openid` scope, OIDC metadata, or an ID Token; the
@@ -92,17 +113,44 @@ defmodule AttestoClient.AuthorizationCode do
   signing material. Callback options cannot weaken the selected profile.
   Generic flows preserve existing authentication choices, require `iss` when
   metadata advertises support, and always reject a returned issuer mismatch.
+
+  ## Keeping the transaction yourself
+
+  Pass `:return` in place of a store and nothing is stored: the result carries
+  the `AttestoClient.AuthorizationTransaction` under `:transaction` for the
+  application to keep, and `callback/3` takes it back as `transaction:`. Every
+  callback check runs the same way on it, including its deadline
+  (`:expires_at`).
+
+  Two properties a store provides become the application's job:
+
+    * **Confidentiality.** The transaction holds the PKCE verifier and the
+      browser binding. Encrypt it before it leaves the server, for example in
+      an encrypted cookie; a signed but readable value exposes the verifier.
+    * **Single use.** A store deletes the transaction when it is taken. A
+      returned transaction can be presented to `callback/3` again until it
+      expires unless the application invalidates it, for example by deleting
+      the cookie that holds it when the callback arrives. The authorization
+      server still redeems a code only once.
   """
-  @spec start(store(), keyword()) ::
-          {:ok, %{url: String.t(), state: String.t(), expires_in: pos_integer()}}
+  @spec start(transaction_target(), keyword()) ::
+          {:ok,
+           %{
+             required(:url) => String.t(),
+             required(:state) => String.t(),
+             required(:expires_in) => pos_integer(),
+             optional(:transaction) => AuthorizationTransaction.t()
+           }}
           | {:error, term()}
   def start(store, opts) when is_list(opts) do
     default_ttl_ms = @default_transaction_ttl_ms
 
-    with {:ok, protocol} <- protocol(opts),
+    with {:ok, opts} <- Issuer.expand_option(opts),
+         {:ok, protocol} <- protocol(opts),
          {:ok, profile} <- AuthorizationProfile.select(opts),
          :ok <- profile_par_option(opts, profile != :generic),
          {:ok, issuer} <- required_string(opts, :issuer),
+         {:ok, issuer_aliases} <- IDToken.issuer_aliases(opts),
          {:ok, client_id} <- required_string(opts, :client_id),
          {:ok, client_auth_binding} <- AuthorizationProfile.bind(profile, client_id, issuer, opts),
          {:ok, dpop_jkt} <- dpop_thumbprint(opts),
@@ -139,7 +187,8 @@ defmodule AttestoClient.AuthorizationCode do
                require_response_issuer: profile != :generic,
                profile: profile,
                client_auth_binding: client_auth_binding,
-               resources: resources
+               resources: resources,
+               issuer_aliases: issuer_aliases
              },
              ttl_ms
            ) do
@@ -198,10 +247,29 @@ defmodule AttestoClient.AuthorizationCode do
   indicator is repeated. A value outside that set fails with
   `{:error, :invalid_resource}` after state is consumed.
 
+  `:clock_skew_seconds` and `:expiry_leeway_seconds` set the ID Token's clock
+  tolerances, as in `AttestoClient.IDToken.verify/2`.
+
+  The ID Token's keys are fetched from the transaction's `jwks_uri` on each
+  callback. Pass `issuer: {AttestoClient.Issuer, name}` to use that cache's
+  keys instead. The cache must be the one for the issuer the transaction was
+  started with; any other fails with `{:error, :issuer_mismatch}` after state
+  is consumed and before token exchange.
+
+  `:max_token_age_seconds` and `require_auth_time: true` tighten the ID Token
+  checks, as in `AttestoClient.IDToken.verify/2`.
+
+  `transaction:` supplies a transaction that `start/2` returned (see "Keeping
+  the transaction yourself"). The store argument is then not consulted and may
+  be `:return`. The response's `state` must equal the transaction's, and the
+  transaction must not be past its `:expires_at`; either failure is
+  `{:error, {:invalid_state, reason}}`, as with a store. Nothing here makes
+  the transaction single use.
+
   A timeout leaves the remote outcome unknown and the transaction consumed; do
   not retry an authorization code.
   """
-  @spec callback(store(), map() | String.t(), keyword()) ::
+  @spec callback(transaction_target(), map() | String.t(), keyword()) ::
           {:ok, %{tokens: TokenSet.t(), id_token_claims: map() | nil}} | {:error, term()}
   def callback(store, response, opts \\ [])
 
@@ -212,8 +280,11 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
-    with {:ok, state} <- callback_state(params),
-         {:ok, transaction} <- take_transaction(store, state),
+    with {:ok, opts} <- Issuer.expand_option(opts),
+         {:ok, state} <- callback_state(params),
+         {:ok, transaction} <- take_transaction(store, state, opts),
+         :ok <- check_transaction_deadline(transaction),
+         :ok <- check_issuer_cache(transaction, opts),
          :ok <- check_browser_binding(transaction, opts),
          :ok <-
            AuthorizationProfile.check(
@@ -305,8 +376,9 @@ defmodule AttestoClient.AuthorizationCode do
         )
 
       deadline = System.monotonic_time(:millisecond) + ttl_ms
+      transaction = %{transaction | expires_at: System.system_time(:millisecond) + ttl_ms}
 
-      case Store.put_new(store, state, transaction, ttl_ms) do
+      case put_transaction(store, state, transaction, ttl_ms) do
         :ok -> {:halt, {:ok, state, transaction, deadline}}
         {:error, :already_exists} -> {:cont, {:error, :state_collision}}
         {:error, reason} -> {:halt, {:error, {:transaction_store, reason}}}
@@ -314,57 +386,198 @@ defmodule AttestoClient.AuthorizationCode do
     end)
   end
 
-  defp take_transaction(store, state) do
+  # `:return` keeps nothing: the caller receives the transaction from
+  # `start/2` and hands it back to `callback/3`.
+  defp put_transaction(:return, _state, _transaction, _ttl_ms), do: :ok
+
+  defp put_transaction(store, state, transaction, ttl_ms),
+    do: Store.put_new(store, state, transaction, ttl_ms)
+
+  defp discard_transaction(:return, _state), do: :ok
+  defp discard_transaction(store, state), do: Store.take(store, state)
+
+  # The transaction comes from the store, or from the caller when it kept the
+  # transaction itself. A caller-kept transaction is matched to the response by
+  # its own `state`; every later check is the same for both.
+  defp take_transaction(store, state, opts) do
+    case Keyword.fetch(opts, :transaction) do
+      :error -> take_stored_transaction(store, state)
+      {:ok, transaction} -> match_returned_transaction(transaction, state)
+    end
+  end
+
+  defp take_stored_transaction(:return, _state), do: {:error, :missing_transaction}
+
+  defp take_stored_transaction(store, state) do
     case Store.take(store, state) do
       {:ok, %AuthorizationTransaction{} = transaction} -> {:ok, transaction}
       {:error, reason} -> {:error, {:invalid_state, reason}}
     end
   end
 
-  defp exchange_and_verify(transaction, code, dpop_jkt, resources, opts) do
+  defp match_returned_transaction(%AuthorizationTransaction{state: expected} = transaction, state)
+       when is_binary(expected) do
+    if SecureCompare.equal?(expected, state),
+      do: {:ok, transaction},
+      else: {:error, {:invalid_state, :not_found}}
+  end
+
+  defp match_returned_transaction(_transaction, _state), do: {:error, :invalid_transaction}
+
+  # A store enforces the lifetime itself; this is the same deadline carried on
+  # the transaction, so one kept by the caller expires too. A transaction
+  # stored by an earlier version has no deadline of its own.
+  defp check_transaction_deadline(transaction) do
+    case Map.get(transaction, :expires_at) do
+      nil ->
+        :ok
+
+      expires_at when is_integer(expires_at) ->
+        if System.system_time(:millisecond) < expires_at,
+          do: :ok,
+          else: {:error, {:invalid_state, :expired}}
+
+      _invalid ->
+        {:error, :invalid_transaction}
+    end
+  end
+
+  @doc """
+  Exchange an authorization code for tokens (RFC 6749 §4.1.3, RFC 7636 §4.5).
+
+  This is the token request `callback/3` makes, on its own, for an application
+  that ran the authorization request itself and holds the code, the
+  `redirect_uri` it used, and its PKCE verifier. It sends
+  `grant_type=authorization_code` with the code, `redirect_uri`,
+  `code_verifier` and client authentication, and returns the validated token
+  response as an `AttestoClient.TokenSet`.
+
+  Required options:
+
+    * `:token_endpoint` - the authorization server's token endpoint.
+    * `:issuer` - the authorization server's issuer identifier.
+    * `:client_id` - this client.
+    * `:redirect_uri` - the value sent on the authorization request.
+    * `:code_verifier` - the PKCE verifier whose challenge was sent.
+
+  `:client_auth`, `:dpop` (with `:dpop_nonce`, `:alg`, `:kid`, `:now`),
+  `:attestation_challenge_received`, `:req_options`, `:resolver` and `:timeout`
+  mean what they mean to `callback/3`. With `:dpop` the returned token set is
+  bound to that key's thumbprint. `:resource` adds RFC 8707 resource
+  indicators to the request.
+
+  The caller is responsible for everything `callback/3` does around the
+  request: matching `state`, the RFC 9207 `iss` check, and verifying a returned
+  ID Token with `AttestoClient.IDToken.verify/2` (nonce, `at_hash`, issuer).
+  This function verifies none of those. A code is single use; do not retry
+  after a timeout.
+  """
+  @spec exchange(String.t(), keyword()) :: {:ok, TokenSet.t()} | {:error, term()}
+  def exchange(code, opts) when is_binary(code) and code != "" and is_list(opts) do
+    with {:ok, token_endpoint} <- required_string(opts, :token_endpoint),
+         :ok <- validate_endpoint_query(token_endpoint),
+         {:ok, issuer} <- required_string(opts, :issuer),
+         {:ok, client_id} <- required_string(opts, :client_id),
+         {:ok, redirect_uri} <- required_string(opts, :redirect_uri),
+         {:ok, code_verifier} <- required_string(opts, :code_verifier),
+         {:ok, resources} <- exchange_resources(opts),
+         {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
+         {:ok, _timeout_ms} <- HTTPPolicy.timeout(opts) do
+      request_tokens(
+        %{
+          token_endpoint: token_endpoint,
+          issuer: issuer,
+          client_id: client_id,
+          redirect_uri: redirect_uri,
+          code_verifier: code_verifier
+        },
+        code,
+        dpop_jkt,
+        resources,
+        opts
+      )
+    end
+  end
+
+  def exchange(_code, opts) when is_list(opts), do: {:error, :missing_code}
+  def exchange(_code, _opts), do: {:error, :invalid_options}
+
+  defp exchange_resources(opts) do
+    case Keyword.get(opts, :resource) do
+      nil -> {:ok, []}
+      value -> validate_resources(value)
+    end
+  end
+
+  # The one authorization-code token request, behind both `exchange/2` and
+  # `callback/3`.
+  defp request_tokens(grant, code, dpop_jkt, resources, opts) do
     form =
       %{
         "grant_type" => "authorization_code",
         "code" => code,
-        "redirect_uri" => transaction.redirect_uri,
-        "code_verifier" => transaction.code_verifier
+        "redirect_uri" => grant.redirect_uri,
+        "code_verifier" => grant.code_verifier
       }
       |> Attesto.MapParams.put_optional("resource", if(resources == [], do: nil, else: resources))
 
-    http_opts = http_options(transaction, opts)
+    with {:ok, response} <-
+           AttestoClient.OAuthHTTP.post_form(
+             grant.token_endpoint,
+             form,
+             http_options(grant, opts)
+           ),
+         {:ok, tokens} <- TokenSet.from_response(response, nil) do
+      TokenSet.bind_dpop(tokens, dpop_jkt)
+    end
+  end
+
+  defp exchange_and_verify(transaction, code, dpop_jkt, resources, opts) do
+    grant = %{
+      token_endpoint: transaction.metadata["token_endpoint"],
+      issuer: transaction.issuer,
+      client_id: transaction.client_id,
+      redirect_uri: transaction.redirect_uri,
+      code_verifier: transaction.code_verifier
+    }
 
     with {:ok, jwks} <- verification_keys(transaction, opts),
-         {:ok, response} <-
-           AttestoClient.OAuthHTTP.post_form(
-             transaction.metadata["token_endpoint"],
-             form,
-             http_opts
-           ),
-         {:ok, tokens} <- TokenSet.from_response(response, nil),
-         {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
+         {:ok, tokens} <- request_tokens(grant, code, dpop_jkt, resources, opts),
          {:ok, tokens} <- bind_token_profile(tokens, transaction),
-         {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code) do
+         {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code, opts) do
       {:ok, %{tokens: tokens, id_token_claims: claims}}
     end
   end
 
   defp verification_keys(%AuthorizationTransaction{protocol: :oauth}, _opts), do: {:ok, nil}
 
+  # Resolved before the code is spent, so a JWKS that cannot be obtained fails
+  # the callback while the code is still unused. With an issuer cache this
+  # only confirms the cache holds usable keys; the ID Token is then verified
+  # through the cache, which can refresh on an unknown `kid`.
   defp verification_keys(transaction, opts) do
     verify_opts =
       opts
-      |> Keyword.take([:req_options, :resolver, :max_response_bytes, :timeout])
+      |> Keyword.take([:req_options, :resolver, :max_response_bytes, :timeout, :issuer_cache])
       |> Keyword.put(:metadata, transaction.metadata)
 
-    Verifier.resolve_jwks(verify_opts, transaction.issuer)
+    Issuer.resolve_jwks(verify_opts, transaction.issuer)
   end
 
-  defp protocol_claims(_tokens, %AuthorizationTransaction{protocol: :oauth}, _jwks, _code),
+  # A callback that names an issuer cache must name the cache of the issuer
+  # the transaction was started with; its keys verify the ID Token.
+  defp check_issuer_cache(transaction, opts) do
+    if Keyword.has_key?(opts, :issuer_cache) and Keyword.get(opts, :issuer) != transaction.issuer,
+      do: {:error, :issuer_mismatch},
+      else: :ok
+  end
+
+  defp protocol_claims(_tokens, %AuthorizationTransaction{protocol: :oauth}, _jwks, _code, _opts),
     do: {:ok, nil}
 
-  defp protocol_claims(tokens, transaction, jwks, code) do
+  defp protocol_claims(tokens, transaction, jwks, code, opts) do
     with {:ok, id_token} <- require_id_token(tokens),
-         do: verify_id_token(id_token, tokens, transaction, jwks, code)
+         do: verify_id_token(id_token, tokens, transaction, jwks, code, opts)
   end
 
   defp bind_token_profile(tokens, transaction) do
@@ -404,7 +617,14 @@ defmodule AttestoClient.AuthorizationCode do
              bounded_authorization_url(transaction, params, par?, remaining, opts),
            {:ok, remaining} <- remaining_lifetime(deadline) do
         ttl_ms = if par_lifetime, do: min(remaining, par_lifetime), else: remaining
-        {:ok, %{url: url, state: state, expires_in: div(ttl_ms + 999, 1_000)}}
+
+        {:ok,
+         returned_transaction(
+           %{url: url, state: state, expires_in: div(ttl_ms + 999, 1_000)},
+           store,
+           transaction,
+           ttl_ms
+         )}
       end
 
     case result do
@@ -413,8 +633,17 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
+  # The caller keeps the transaction, so it carries the lifetime `start/2`
+  # reports, including a shorter pushed-request lifetime.
+  defp returned_transaction(started, :return, transaction, ttl_ms) do
+    expires_at = min(transaction.expires_at, System.system_time(:millisecond) + ttl_ms)
+    Map.put(started, :transaction, %{transaction | expires_at: expires_at})
+  end
+
+  defp returned_transaction(started, _store, _transaction, _ttl_ms), do: started
+
   defp discard_start(store, state, deadline, error) do
-    Store.take(store, state)
+    discard_transaction(store, state)
 
     if System.monotonic_time(:millisecond) >= deadline,
       do: {:error, :authorization_transaction_expired},
@@ -512,11 +741,18 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
-  defp verify_id_token(id_token, tokens, transaction, jwks, code) do
+  # The issuer and its aliases come from the transaction, pinned at start; the
+  # clock tolerances are the caller's at callback time. A transaction stored by
+  # an earlier version has no `:issuer_aliases`.
+  defp verify_id_token(id_token, tokens, transaction, jwks, code, opts) do
     verify_opts = [
-      issuer: transaction.issuer,
+      issuer: Issuer.option(opts, transaction.issuer),
+      issuer_aliases: Map.get(transaction, :issuer_aliases, []),
+      clock_skew_seconds: Keyword.get(opts, :clock_skew_seconds),
+      expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
+      max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
+      require_auth_time: Keyword.get(opts, :require_auth_time, false),
       client_id: transaction.client_id,
-      jwks: jwks,
       nonce: transaction.nonce,
       access_token: tokens.access_token,
       code: code,
@@ -525,6 +761,13 @@ defmodule AttestoClient.AuthorizationCode do
       accepted_algs: [transaction.id_token_alg],
       enforce_fapi_alg_policy: transaction_profile(transaction) == :fapi
     ]
+
+    # With an issuer cache the keys come from it, so an unknown `kid` can
+    # refresh them; otherwise the keys resolved before the exchange are used.
+    verify_opts =
+      if Keyword.has_key?(opts, :issuer_cache),
+        do: verify_opts,
+        else: Keyword.put(verify_opts, :jwks, jwks)
 
     IDToken.verify(id_token, verify_opts)
   end
@@ -756,6 +999,8 @@ defmodule AttestoClient.AuthorizationCode do
   defp missing_error(:client_id), do: :missing_client_id
   defp missing_error(:browser_binding), do: :missing_browser_binding
   defp missing_error(:redirect_uri), do: :missing_redirect_uri
+  defp missing_error(:token_endpoint), do: :missing_token_endpoint
+  defp missing_error(:code_verifier), do: :missing_code_verifier
 
   defp invalid_error(:transaction_ttl_ms), do: :invalid_transaction_ttl_ms
 

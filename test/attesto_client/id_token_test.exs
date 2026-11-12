@@ -365,6 +365,120 @@ defmodule AttestoClient.IDTokenTest do
     end
   end
 
+  describe "verify/2 issuer aliases" do
+    @alias_iss "issuer.example.com"
+
+    test "an alias is accepted as iss only when the caller lists it" do
+      token = sign(base_claims(%{"iss" => @alias_iss}))
+
+      assert {:error, :invalid_issuer} = verify(token)
+      assert {:error, :invalid_issuer} = verify(token, issuer_aliases: [])
+      assert {:error, :invalid_issuer} = verify(token, issuer_aliases: ["other.example.com"])
+      assert {:ok, %{"iss" => @alias_iss}} = verify(token, issuer_aliases: [@alias_iss])
+    end
+
+    test "the configured issuer is still accepted alongside aliases" do
+      assert {:ok, %{"iss" => @issuer}} =
+               verify(sign(base_claims()), issuer_aliases: [@alias_iss])
+    end
+
+    test "aliases match exactly" do
+      token = sign(base_claims(%{"iss" => @alias_iss <> "/"}))
+
+      assert {:error, :invalid_issuer} = verify(token, issuer_aliases: [@alias_iss])
+    end
+
+    test "rejects a malformed alias list" do
+      for bad <- ["issuer.example.com", [""], [:alias], [@alias_iss, 1], %{}] do
+        assert {:error, :invalid_issuer_aliases} =
+                 verify(sign(base_claims()), issuer_aliases: bad)
+      end
+    end
+  end
+
+  describe "verify/2 stricter relying-party checks" do
+    test ":max_token_age_seconds rejects an iat older than the bound plus clock skew" do
+      token = sign(base_claims(%{"iat" => @now - 400}))
+
+      assert {:ok, _claims} = verify(token)
+      # Default skew is 60: 400 <= 340 + 60, 400 > 339 + 60.
+      assert {:ok, _claims} = verify(token, max_token_age_seconds: 340)
+      assert {:error, :token_too_old} = verify(token, max_token_age_seconds: 339)
+      assert {:ok, _claims} = verify(token, max_token_age_seconds: 400, clock_skew_seconds: 0)
+
+      assert {:error, :token_too_old} =
+               verify(token, max_token_age_seconds: 399, clock_skew_seconds: 0)
+
+      for invalid <- [-1, 1.5, "60", :none] do
+        assert {:error, :invalid_max_token_age_seconds} =
+                 verify(token, max_token_age_seconds: invalid)
+      end
+    end
+
+    test "require_auth_time demands auth_time without :max_age" do
+      without = sign(base_claims())
+      with_auth_time = sign(base_claims(%{"auth_time" => @now - 5_000}))
+
+      assert {:ok, _claims} = verify(without)
+      assert {:ok, _claims} = verify(without, require_auth_time: false)
+      assert {:error, :auth_time_required} = verify(without, require_auth_time: true)
+      # No age is enforced without :max_age.
+      assert {:ok, _claims} = verify(with_auth_time, require_auth_time: true)
+
+      assert {:error, :max_age_exceeded} =
+               verify(with_auth_time, require_auth_time: true, max_age: 60)
+
+      malformed = sign(base_claims(%{"auth_time" => "yesterday"}))
+      assert {:error, :invalid_auth_time} = verify(malformed, require_auth_time: true)
+
+      assert {:error, :invalid_require_auth_time} = verify(without, require_auth_time: "yes")
+    end
+  end
+
+  describe "verify/2 clock tolerance" do
+    test "exp has no leeway unless :expiry_leeway_seconds is set" do
+      token = sign(base_claims(%{"exp" => @now - 30}))
+
+      assert {:error, :expired} = verify(token)
+      # :clock_skew_seconds bounds future-dated claims; it does not extend exp.
+      assert {:error, :expired} = verify(token, clock_skew_seconds: 300)
+      assert {:error, :expired} = verify(token, expiry_leeway_seconds: 30)
+      assert {:ok, _claims} = verify(token, expiry_leeway_seconds: 31)
+    end
+
+    test ":clock_skew_seconds bounds iat, nbf, and auth_time in the future" do
+      for claim <- ["iat", "nbf"] do
+        token = sign(base_claims(%{claim => @now + 90}))
+
+        assert {:error, :not_yet_valid} = verify(token)
+        assert {:ok, _claims} = verify(token, clock_skew_seconds: 90)
+        assert {:error, :not_yet_valid} = verify(token, clock_skew_seconds: 89)
+      end
+
+      token = sign(base_claims(%{"auth_time" => @now + 90}))
+      assert {:error, :invalid_auth_time} = verify(token)
+      assert {:ok, _claims} = verify(token, clock_skew_seconds: 90)
+
+      strict = sign(base_claims(%{"iat" => @now + 1}))
+      assert {:ok, _claims} = verify(strict)
+      assert {:error, :not_yet_valid} = verify(strict, clock_skew_seconds: 0)
+    end
+
+    test "each tolerance is an integer from 0 to 300" do
+      token = sign(base_claims())
+
+      for bad <- [-1, 301, 1.5, "60", :none] do
+        assert {:error, :invalid_clock_skew_seconds} = verify(token, clock_skew_seconds: bad)
+
+        assert {:error, :invalid_expiry_leeway_seconds} =
+                 verify(token, expiry_leeway_seconds: bad)
+      end
+
+      assert {:ok, _claims} = verify(token, clock_skew_seconds: 300, expiry_leeway_seconds: 300)
+      assert {:ok, _claims} = verify(token, clock_skew_seconds: nil, expiry_leeway_seconds: nil)
+    end
+  end
+
   describe "verify/2 compact input bounds" do
     test "rejects an oversized protected header before signature verification" do
       protected =

@@ -18,6 +18,26 @@ defmodule AttestoClient.DeadlineTest do
     assert {:messages, []} = Process.info(self(), :messages)
   end
 
+  test "the operation's $callers and $ancestors lead back to the caller" do
+    Process.put(:"$callers", [:outer_caller])
+
+    assert {callers, ancestors} =
+             Deadline.run(fn -> {Process.get(:"$callers"), Process.get(:"$ancestors")} end, 5_000)
+
+    assert callers == [self(), :outer_caller]
+    assert hd(ancestors) == self()
+  end
+
+  test "a Req.Test stub owned by the caller is reachable inside the deadline" do
+    Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, %{"reached" => true}) end)
+
+    assert {:ok, %Req.Response{body: %{"reached" => true}}} =
+             Deadline.run(
+               fn -> Req.get(plug: {Req.Test, __MODULE__}, url: "https://as.example/x") end,
+               5_000
+             )
+  end
+
   test "sanitizes operation failures" do
     # A generous deadline: this asserts the raise is sanitized, not a timing
     # bound, so the worker must never lose the scheduling race under load.

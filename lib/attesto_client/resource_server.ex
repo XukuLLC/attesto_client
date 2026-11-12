@@ -9,6 +9,11 @@ defmodule AttestoClient.ResourceServer do
   in the caller process; the server process only owns cache state and refresh
   coordination.
 
+  The process is an `AttestoClient.Issuer` cache that also carries this
+  module's token policy, so there is one cache and one refresh logic for both.
+  Its name can be given as `issuer: {AttestoClient.Issuer, name}` to verify ID
+  Tokens from the same issuer against the same keys.
+
   ## Security properties
 
     * discovery metadata must report the configured issuer exactly;
@@ -62,21 +67,20 @@ defmodule AttestoClient.ResourceServer do
   same applies before the first successful refresh: verification returns the
   remembered error until the interval ends, while `warm/1` and `refresh/1`
   still fetch.
+
+  `clock_skew_seconds` bounds how far in the future `iat` and `nbf` may lie,
+  and widens `:max_token_age_seconds`; it defaults to `60`.
+  `expiry_leeway_seconds` is how long past `exp` a token is still accepted
+  (RFC 7519 §4.1.4): an integer from `0` to `300`, default `0`, so an expired
+  token is rejected at `exp`. `AttestoClient.IDToken.verify/2` takes the same
+  two options with the same meanings.
   """
 
-  use GenServer
-
   alias Attesto.{NumericDate, SigningAlg}
-  alias AttestoClient.{ClaimValidation, Discovery, Verifier}
+  alias AttestoClient.{ClaimValidation, Discovery, Issuer, Verifier}
 
-  @default_fresh_ttl :timer.minutes(5)
-  @default_stale_ttl :timer.hours(1)
-  @default_unknown_kid_refresh_interval :timer.seconds(30)
-  @default_refresh_retry_interval :timer.seconds(5)
-  @default_refresh_timeout :timer.seconds(15)
+  @label "ResourceServer"
   @default_clock_skew_seconds 60
-  @default_max_jwks_keys 32
-  @default_max_response_bytes 512 * 1024
 
   @type server :: GenServer.server()
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
@@ -96,6 +100,7 @@ defmodule AttestoClient.ResourceServer do
           | {:refresh_retry_interval, non_neg_integer()}
           | {:refresh_timeout, pos_integer()}
           | {:clock_skew_seconds, non_neg_integer()}
+          | {:expiry_leeway_seconds, 0..300}
           | {:max_jwks_keys, pos_integer()}
           | {:max_response_bytes, pos_integer()}
 
@@ -140,12 +145,7 @@ defmodule AttestoClient.ResourceServer do
   @doc "Start a supervised remote-issuer verifier."
   @spec start_link([start_opt()]) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
-    config = config!(opts)
-
-    case Keyword.fetch(opts, :name) do
-      {:ok, name} -> GenServer.start_link(__MODULE__, config, name: name)
-      :error -> GenServer.start_link(__MODULE__, config)
-    end
+    opts |> config!() |> Issuer.start_server(opts)
   end
 
   def child_spec(opts) do
@@ -174,223 +174,47 @@ defmodule AttestoClient.ResourceServer do
   def verify(server, access_token, opts \\ [])
 
   def verify(server, access_token, opts) when is_binary(access_token) and is_list(opts) do
-    with {:ok, snapshot} <- usable_snapshot(server) do
-      result = verify_snapshot(snapshot, access_token, opts)
-      maybe_refresh_unknown_kid(server, snapshot, access_token, opts, result)
-    end
-  catch
-    :exit, reason -> {:error, {:jwks_refresh_failed, call_exit_reason(reason)}}
+    Issuer.verify(server, access_token, &verify_snapshot(&1, access_token, opts))
   end
 
   def verify(_server, _access_token, _opts), do: {:error, :invalid_token}
 
   @doc "Warm the verifier by completing metadata/JWKS retrieval."
   @spec warm(server()) :: :ok | {:error, {:jwks_refresh_failed, term()}}
-  def warm(server), do: refresh(server)
+  defdelegate warm(server), to: Issuer
 
   @doc "Return whether the verifier retains a currently usable key snapshot."
   @spec ready?(server()) :: boolean()
-  def ready?(server) do
-    case GenServer.call(server, :snapshot) do
-      %{stale_until: stale_until} -> monotonic_ms() < stale_until
-      nil -> false
-    end
-  catch
-    :exit, _reason -> false
-  end
+  defdelegate ready?(server), to: Issuer
 
   @doc "Force a metadata/JWKS refresh."
   @spec refresh(server()) :: :ok | {:error, {:jwks_refresh_failed, term()}}
-  def refresh(server) do
-    snapshot = GenServer.call(server, :snapshot)
-    generation = if snapshot, do: snapshot.generation, else: nil
+  defdelegate refresh(server), to: Issuer
 
-    case refresh_snapshot(server, generation, :forced) do
-      {:ok, _snapshot} -> :ok
-      {:error, reason} -> {:error, {:jwks_refresh_failed, reason}}
-    end
-  catch
-    :exit, reason -> {:error, {:jwks_refresh_failed, call_exit_reason(reason)}}
-  end
-
-  @impl true
-  def init(config) do
-    Process.flag(:trap_exit, true)
-
-    {:ok,
-     Map.merge(config, %{
-       snapshot: nil,
-       generation: 0,
-       refresh_task: nil,
-       refresh_timer: nil,
-       refresh_waiters: [],
-       next_unknown_refresh_at: nil,
-       initial_refresh_failure: nil
-     })}
-  end
-
-  @impl true
-  def handle_call(:snapshot, _from, state), do: {:reply, state.snapshot, state}
-  def handle_call(:refresh_timeout, _from, state), do: {:reply, state.refresh_timeout, state}
-
-  def handle_call({:refresh, observed_generation, reason}, from, state) do
-    cond do
-      newer_snapshot?(state, observed_generation) ->
-        {:reply, {:ok, state.snapshot}, state}
-
-      state.refresh_task != nil ->
-        {:noreply, %{state | refresh_waiters: [from | state.refresh_waiters]}}
-
-      refresh_suppressed?(state, reason) ->
-        {:reply, refresh_suppressed_reply(state, reason), state}
-
-      true ->
-        task = Task.async(fn -> fetch_snapshot(state) end)
-        timer = Process.send_after(self(), {:refresh_deadline, task.ref}, state.refresh_timeout)
-
-        next_unknown_refresh_at =
-          if reason == :unknown_kid,
-            do: monotonic_ms() + state.unknown_kid_refresh_interval,
-            else: state.next_unknown_refresh_at
-
-        {:noreply,
-         %{
-           state
-           | refresh_task: task,
-             refresh_timer: timer,
-             refresh_waiters: [from],
-             next_unknown_refresh_at: next_unknown_refresh_at
-         }}
-    end
-  end
-
-  @impl true
-  def handle_info({ref, result}, %{refresh_task: %Task{ref: ref} = task} = state) do
-    Process.demonitor(task.ref, [:flush])
-    cancel_timer(state.refresh_timer)
-    {reply, state} = apply_refresh_result(result, state)
-    Enum.each(state.refresh_waiters, &GenServer.reply(&1, reply))
-    {:noreply, %{state | refresh_task: nil, refresh_timer: nil, refresh_waiters: []}}
-  end
-
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{refresh_task: %Task{ref: ref}} = state) do
-    cancel_timer(state.refresh_timer)
-    reply = {:error, {:refresh_task_exit, reason}}
-    Enum.each(state.refresh_waiters, &GenServer.reply(&1, reply))
-    state = record_refresh_failure(state, elem(reply, 1))
-
-    {:noreply, %{state | refresh_task: nil, refresh_timer: nil, refresh_waiters: []}}
-  end
-
-  def handle_info({:refresh_deadline, ref}, %{refresh_task: %Task{ref: ref} = task} = state) do
-    _ = Task.shutdown(task, :brutal_kill)
-    reply = {:error, :refresh_timeout}
-    Enum.each(state.refresh_waiters, &GenServer.reply(&1, reply))
-    state = record_refresh_failure(state, :refresh_timeout)
-
-    {:noreply, %{state | refresh_task: nil, refresh_timer: nil, refresh_waiters: []}}
-  end
-
-  def handle_info(_message, state), do: {:noreply, state}
-
-  @impl true
-  def terminate(_reason, %{refresh_task: %Task{} = task}) do
-    Task.shutdown(task, :brutal_kill)
-    :ok
-  end
-
-  def terminate(_reason, _state), do: :ok
-
-  defp usable_snapshot(server) do
-    snapshot = GenServer.call(server, :snapshot)
-    now = monotonic_ms()
-
-    cond do
-      snapshot == nil ->
-        initial_snapshot(server)
-
-      now < snapshot.fresh_until ->
-        {:ok, snapshot}
-
-      refresh_retry_active?(snapshot, now) ->
-        refresh_retry_result(snapshot, now)
-
-      true ->
-        refresh_expired_snapshot(server, snapshot, now)
-    end
-  end
-
-  defp initial_snapshot(server) do
-    case refresh_snapshot(server, nil, :initial) do
-      {:ok, refreshed} -> {:ok, refreshed}
-      {:error, reason} -> {:error, {:jwks_refresh_failed, reason}}
-    end
-  end
-
-  defp refresh_expired_snapshot(server, snapshot, now) do
-    case refresh_snapshot(server, snapshot.generation, :expired) do
-      {:ok, refreshed} -> {:ok, refreshed}
-      {:error, reason} -> stale_or_refresh_error(snapshot, now, reason)
-    end
-  end
-
-  defp stale_or_refresh_error(snapshot, now, reason) do
-    if now < snapshot.stale_until and transient_refresh_error?(reason),
-      do: {:ok, snapshot},
-      else: {:error, {:jwks_refresh_failed, reason}}
-  end
-
-  defp refresh_snapshot(server, generation, reason) do
-    GenServer.call(server, {:refresh, generation, reason}, refresh_call_timeout(server))
-  catch
-    :exit, exit_reason -> {:error, call_exit_reason(exit_reason)}
-  end
-
-  defp refresh_call_timeout(server), do: GenServer.call(server, :refresh_timeout) + 1_000
-
-  defp maybe_refresh_unknown_kid(_server, _snapshot, _token, _opts, {:ok, claims}),
-    do: {:ok, claims}
-
-  defp maybe_refresh_unknown_kid(
-         server,
-         snapshot,
-         token,
-         opts,
-         {:error, :invalid_signature} = error
-       ) do
-    if unknown_kid?(token, snapshot.keys) do
-      case refresh_snapshot(server, snapshot.generation, :unknown_kid) do
-        {:ok, refreshed} -> verify_snapshot(refreshed, token, opts)
-        {:error, _reason} -> error
-      end
-    else
-      error
-    end
-  end
-
-  defp maybe_refresh_unknown_kid(_server, _snapshot, _token, _opts, error), do: error
-
-  defp verify_snapshot(snapshot, access_token, opts) do
+  # The keys come from the snapshot; the token policy is the one this module
+  # validated at start, carried on the snapshot as `private`.
+  defp verify_snapshot(%{private: policy} = snapshot, access_token, opts) do
     now = now(opts)
 
-    with {:ok, algs} <- Verifier.accepted_algs(accepted_algs: snapshot.accepted_algs),
+    with {:ok, algs} <- Verifier.accepted_algs(accepted_algs: policy.accepted_algs),
          {:ok, claims, header, _verified_jwk} <-
            Verifier.verify_signature(access_token, snapshot.keys, algs),
          :ok <- check_typ(header),
          :ok <- check_issuer(claims, snapshot.issuer),
-         :ok <- ClaimValidation.audience(claims, snapshot.audiences, :invalid_audience),
+         :ok <- ClaimValidation.audience(claims, policy.audiences, :invalid_audience),
          :ok <- check_claims(claims),
          :ok <-
            ClaimValidation.expiration(claims, now,
              missing_error: :expired,
              invalid_error: :expired,
-             expired_error: :expired
+             expired_error: :expired,
+             leeway: policy.expiry_leeway_seconds
            ),
          :ok <-
            ClaimValidation.not_before(claims, now,
              invalid_error: :invalid_claims,
              future_error: :not_yet_valid,
-             skew: snapshot.clock_skew_seconds
+             skew: policy.clock_skew_seconds
            ),
          :ok <-
            ClaimValidation.issued_at(claims, now,
@@ -398,9 +222,9 @@ defmodule AttestoClient.ResourceServer do
              invalid_error: :invalid_claims,
              future_error: :not_yet_valid,
              non_negative: false,
-             skew: snapshot.clock_skew_seconds
+             skew: policy.clock_skew_seconds
            ),
-         :ok <- check_token_policy(claims, opts, now, snapshot.clock_skew_seconds),
+         :ok <- check_token_policy(claims, opts, now, policy.clock_skew_seconds),
          {:ok, scopes} <- scopes(claims),
          :ok <- check_required_scopes(scopes, Keyword.get(opts, :required_scopes, [])),
          :ok <- check_confirmation(claims, opts) do
@@ -439,7 +263,15 @@ defmodule AttestoClient.ResourceServer do
              Keyword.get(opts, :allowed_client_ids),
              :client_not_allowed
            ),
-         :ok <- check_max_age(claims["iat"], now, skew, Keyword.get(opts, :max_token_age_seconds)) do
+         :ok <-
+           ClaimValidation.issued_within(
+             claims["iat"],
+             now,
+             Keyword.get(opts, :max_token_age_seconds),
+             skew,
+             too_old_error: :token_too_old,
+             invalid_error: :invalid_policy
+           ) do
       check_max_lifetime(
         claims["iat"],
         claims["exp"],
@@ -459,15 +291,6 @@ defmodule AttestoClient.ResourceServer do
   end
 
   defp check_allowed(_value, _invalid, _error), do: {:error, :invalid_policy}
-
-  defp check_max_age(_iat, _now, _skew, nil), do: :ok
-
-  defp check_max_age(iat, now, skew, max_age)
-       when is_integer(max_age) and max_age >= 0 do
-    if now - iat <= max_age + skew, do: :ok, else: {:error, :token_too_old}
-  end
-
-  defp check_max_age(_iat, _now, _skew, _invalid), do: {:error, :invalid_policy}
 
   defp check_max_lifetime(_iat, _exp, nil), do: :ok
 
@@ -520,165 +343,19 @@ defmodule AttestoClient.ResourceServer do
     end
   end
 
-  defp fetch_snapshot(state) do
-    with {:ok, jwks_uri} <- resolve_jwks_uri(state),
-         {:ok, jwks} <- Discovery.fetch_jwks(jwks_uri, discovery_opts(state)),
-         {:ok, keys} <- Verifier.normalize_jwks(jwks),
-         :ok <- check_key_bound(keys, state.max_jwks_keys),
-         :ok <- Verifier.validate_verification_keys(keys, state.accepted_algs) do
-      now = monotonic_ms()
-
-      {:ok,
-       %{
-         accepted_algs: state.accepted_algs,
-         audiences: state.audiences,
-         clock_skew_seconds: state.clock_skew_seconds,
-         fresh_until: now + state.fresh_ttl,
-         generation: state.generation + 1,
-         issuer: state.issuer,
-         keys: keys,
-         refresh_error: nil,
-         retry_after: nil,
-         stale_until: now + state.fresh_ttl + state.stale_ttl
-       }}
-    end
-  rescue
-    error -> {:error, {:transport, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {:transport, {kind, reason}}}
-  end
-
-  defp resolve_jwks_uri(%{jwks_uri: uri}) when is_binary(uri), do: {:ok, uri}
-
-  defp resolve_jwks_uri(%{metadata: %{} = metadata, issuer: issuer}),
-    do: Discovery.jwks_uri(metadata, issuer)
-
-  defp resolve_jwks_uri(state) do
-    with {:ok, metadata} <- Discovery.fetch(state.issuer, discovery_opts(state)) do
-      Discovery.jwks_uri(metadata, state.issuer)
-    end
-  end
-
-  defp discovery_opts(state) do
-    [
-      well_known: state.well_known,
-      req_options: state.req_options,
-      max_response_bytes: state.max_response_bytes,
-      # The ResourceServer refresh timer owns the whole metadata/JWKS cycle.
-      # Keep Discovery's defensive deadline outside it rather than reusing the
-      # much shorter per-socket phase timeout from req_options.
-      timeout: state.refresh_timeout + 1_000
-    ]
-  end
-
-  defp check_key_bound(keys, max) when keys != [] and length(keys) <= max, do: :ok
-  defp check_key_bound(_keys, _max), do: {:error, :invalid_jwks}
-
-  defp apply_refresh_result({:ok, snapshot}, state) do
-    {{:ok, snapshot}, %{state | snapshot: snapshot, generation: snapshot.generation}}
-  end
-
-  defp apply_refresh_result({:error, reason}, state),
-    do: {{:error, reason}, record_refresh_failure(state, reason)}
-
-  defp apply_refresh_result(other, state), do: {{:error, {:invalid_fetch_result, other}}, state}
-
-  defp newer_snapshot?(%{snapshot: nil}, _observed), do: false
-  defp newer_snapshot?(_state, nil), do: false
-
-  defp newer_snapshot?(state, observed),
-    do: state.snapshot.generation > observed
-
-  defp refresh_suppressed?(state, :expired),
-    do: refresh_retry_active?(state.snapshot, monotonic_ms())
-
-  defp refresh_suppressed?(%{next_unknown_refresh_at: next_refresh}, :unknown_kid)
-       when is_integer(next_refresh),
-       do: monotonic_ms() < next_refresh
-
-  defp refresh_suppressed?(%{snapshot: nil} = state, :initial) do
-    case Map.get(state, :initial_refresh_failure) do
-      {_reason, retry_after} -> monotonic_ms() < retry_after
-      nil -> false
-    end
-  end
-
-  defp refresh_suppressed?(_state, _reason), do: false
-
-  defp refresh_suppressed_reply(state, :expired) do
-    case refresh_retry_result(state.snapshot, monotonic_ms()) do
-      {:error, {:jwks_refresh_failed, reason}} -> {:error, reason}
-      result -> result
-    end
-  end
-
-  defp refresh_suppressed_reply(%{initial_refresh_failure: {reason, _retry_after}}, :initial),
-    do: {:error, reason}
-
-  defp refresh_suppressed_reply(state, _reason), do: {:ok, state.snapshot}
-
-  defp unknown_kid?(token, keys) do
-    case Verifier.peek_header(token) do
-      {:ok, %{"kid" => kid}} when is_binary(kid) and kid != "" ->
-        not Enum.any?(keys, &(Map.get(&1, "kid") == kid))
-
-      _other ->
-        false
-    end
-  end
-
-  defp transient_refresh_error?({:transport, _reason}), do: true
-  defp transient_refresh_error?(:timeout), do: true
-  defp transient_refresh_error?(:refresh_timeout), do: true
-  defp transient_refresh_error?({:refresh_task_exit, _reason}), do: true
-  defp transient_refresh_error?({:http_status, 429}), do: true
-  defp transient_refresh_error?({:http_status, status}) when status in 500..599, do: true
-  defp transient_refresh_error?(_reason), do: false
-
+  # The cache options are validated by `AttestoClient.Issuer`; the token policy
+  # is validated here and travels with the cache as its `private` term.
   defp config!(opts) do
-    issuer = required_https_issuer!(Keyword.get(opts, :issuer))
-    audiences = audiences!(Keyword.get(opts, :audience))
-    accepted_algs = accepted_algs!(Keyword.get(opts, :accepted_algs))
-    refresh_timeout = positive_integer!(opts, :refresh_timeout, @default_refresh_timeout)
+    config = Issuer.config!(opts, @label)
 
-    max_response_bytes =
-      positive_integer!(opts, :max_response_bytes, @default_max_response_bytes)
-
-    %{
-      accepted_algs: accepted_algs,
-      audiences: audiences,
-      clock_skew_seconds:
-        non_negative_integer!(opts, :clock_skew_seconds, @default_clock_skew_seconds),
-      fresh_ttl: non_negative_integer!(opts, :fresh_ttl, @default_fresh_ttl),
-      issuer: issuer,
-      jwks_uri: optional_string!(opts, :jwks_uri),
-      max_jwks_keys: positive_integer!(opts, :max_jwks_keys, @default_max_jwks_keys),
-      max_response_bytes: max_response_bytes,
-      metadata: optional_map!(opts, :metadata),
-      refresh_retry_interval:
-        non_negative_integer!(
-          opts,
-          :refresh_retry_interval,
-          @default_refresh_retry_interval
-        ),
-      refresh_timeout: refresh_timeout,
-      req_options: req_options!(opts, refresh_timeout),
-      stale_ttl: non_negative_integer!(opts, :stale_ttl, @default_stale_ttl),
-      unknown_kid_refresh_interval:
-        non_negative_integer!(
-          opts,
-          :unknown_kid_refresh_interval,
-          @default_unknown_kid_refresh_interval
-        ),
-      well_known: Keyword.get(opts, :well_known, :openid_configuration)
+    policy = %{
+      audiences: audiences!(Keyword.get(opts, :audience)),
+      accepted_algs: Issuer.accepted_algs!(Keyword.get(opts, :accepted_algs), @label),
+      clock_skew_seconds: clock_skew_seconds!(opts),
+      expiry_leeway_seconds: expiry_leeway_seconds!(opts)
     }
-  end
 
-  defp required_https_issuer!(issuer) do
-    case Discovery.validate_issuer_identifier(issuer) do
-      :ok -> issuer
-      {:error, _reason} -> raise ArgumentError, "ResourceServer requires an HTTPS :issuer"
-    end
+    %{config | private: policy} |> Map.put(:accepted_algs, policy.accepted_algs)
   end
 
   defp audiences!(audience) when is_binary(audience) and audience != "", do: [audience]
@@ -692,130 +369,30 @@ defmodule AttestoClient.ResourceServer do
   defp audiences!(_invalid),
     do: raise(ArgumentError, "ResourceServer requires :audience as a string or non-empty list")
 
-  defp accepted_algs!(algs) when is_list(algs) and algs != [] do
-    if Enum.all?(algs, &(&1 in SigningAlg.allowed())),
-      do: Enum.uniq(algs),
-      else:
-        raise(ArgumentError, "ResourceServer :accepted_algs contains an unsupported algorithm")
-  end
+  defp expiry_leeway_seconds!(opts) do
+    case ClaimValidation.tolerance(opts, :expiry_leeway_seconds, 0) do
+      {:ok, seconds} ->
+        seconds
 
-  defp accepted_algs!(_invalid),
-    do: raise(ArgumentError, "ResourceServer requires :accepted_algs as a non-empty list")
-
-  defp optional_string!(opts, key) do
-    case Keyword.get(opts, key) do
-      nil -> nil
-      value when is_binary(value) and value != "" -> value
-      _invalid -> raise ArgumentError, "ResourceServer #{inspect(key)} must be a non-empty string"
+      :error ->
+        raise ArgumentError,
+              "ResourceServer :expiry_leeway_seconds must be an integer from 0 to " <>
+                "#{ClaimValidation.max_tolerance_seconds()}"
     end
   end
 
-  defp optional_map!(opts, key) do
-    case Keyword.get(opts, key) do
-      nil -> nil
-      %{} = value -> value
-      _invalid -> raise ArgumentError, "ResourceServer #{inspect(key)} must be a map"
-    end
-  end
-
-  defp req_options!(opts, refresh_timeout) do
-    case Keyword.get(opts, :req_options, []) do
-      req_options when is_list(req_options) ->
-        phase_timeout = max(div(max(refresh_timeout - 1_000, 1), 4), 1)
-        connect_options = connect_options!(req_options, phase_timeout)
-
-        req_options
-        |> Keyword.put(:retry, false)
-        |> Keyword.put(:receive_timeout, phase_timeout)
-        |> Keyword.put(:connect_options, connect_options)
-        |> Keyword.put(:compressed, false)
-
-      _invalid ->
-        raise ArgumentError, "ResourceServer :req_options must be a keyword list"
-    end
-  end
-
-  defp connect_options!(req_options, timeout) do
-    case Keyword.get(req_options, :connect_options, []) do
-      connect_options when is_list(connect_options) ->
-        Keyword.put(connect_options, :timeout, timeout)
-
-      _invalid ->
-        raise ArgumentError, "ResourceServer :connect_options must be a keyword list"
-    end
-  end
-
-  defp positive_integer!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> value
-      _invalid -> raise ArgumentError, "ResourceServer #{inspect(key)} must be a positive integer"
-    end
-  end
-
-  defp non_negative_integer!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
+  defp clock_skew_seconds!(opts) do
+    case Keyword.get(opts, :clock_skew_seconds, @default_clock_skew_seconds) do
       value when is_integer(value) and value >= 0 ->
         value
 
       _invalid ->
-        raise ArgumentError, "ResourceServer #{inspect(key)} must be a non-negative integer"
+        raise ArgumentError, "ResourceServer :clock_skew_seconds must be a non-negative integer"
     end
   end
 
   defp now(opts), do: NumericDate.now(opts, default: :system, invalid_override: :fallback)
 
-  # Before the first snapshot there is nothing to annotate, so the failure and
-  # its cooldown are kept on the server state; until it expires, verification
-  # returns the remembered error instead of starting another fetch. An explicit
-  # `refresh/1` or `warm/1` still fetches.
-  defp record_refresh_failure(%{snapshot: nil} = state, reason) do
-    retry_after = monotonic_ms() + state.refresh_retry_interval
-    Map.put(state, :initial_refresh_failure, {reason, retry_after})
-  end
-
-  defp record_refresh_failure(state, reason) do
-    now = monotonic_ms()
-
-    snapshot =
-      state.snapshot
-      |> Map.put(:refresh_error, reason)
-      |> Map.put(:retry_after, now + state.refresh_retry_interval)
-
-    %{state | snapshot: snapshot}
-  end
-
-  defp refresh_retry_active?(%{retry_after: retry_after} = snapshot, now)
-       when is_integer(retry_after) do
-    now < retry_after and
-      (Map.has_key?(snapshot, :refresh_error) or now < snapshot.stale_until)
-  end
-
-  defp refresh_retry_active?(_snapshot, _now), do: false
-
-  defp refresh_retry_result(%{refresh_error: reason} = snapshot, now) do
-    if transient_refresh_error?(reason) and now < snapshot.stale_until,
-      do: {:ok, snapshot},
-      else: {:error, {:jwks_refresh_failed, reason}}
-  end
-
-  # A process retained across a hot upgrade can still hold an older snapshot.
-  # Earlier retry markers were written only for transient failures.
-  defp refresh_retry_result(snapshot, _now), do: {:ok, snapshot}
-
-  defp call_exit_reason({:noproc, _call}), do: :server_not_running
-  defp call_exit_reason({:timeout, _call}), do: :refresh_timeout
-  defp call_exit_reason({:shutdown, _call}), do: :server_stopping
-  defp call_exit_reason({{:shutdown, _reason}, _call}), do: :server_stopping
-  defp call_exit_reason({:killed, _call}), do: :server_stopping
-  defp call_exit_reason(:noproc), do: :server_not_running
-  defp call_exit_reason(:timeout), do: :refresh_timeout
-  defp call_exit_reason(:shutdown), do: :server_stopping
-  defp call_exit_reason(:killed), do: :server_stopping
-  defp call_exit_reason(reason), do: {:server_exit, reason}
-
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
-  defp cancel_timer(nil), do: :ok
-  defp cancel_timer(timer), do: Process.cancel_timer(timer, async: true, info: false)
   defp non_empty_string?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
 end
