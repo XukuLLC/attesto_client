@@ -45,6 +45,16 @@ defmodule AttestoClient.Issuer do
       `:openid_configuration`.
     * `:metadata` - discovery metadata supplied by the caller, used in place
       of a discovery fetch.
+    * `:protocol` - `:oidc` or `:oauth`. When set, every refresh also runs
+      `AttestoClient.Discovery.validate_metadata/3` on the document for that
+      protocol, so one that `AttestoClient.AuthorizationCode.start/2` would
+      refuse is a refresh failure and never becomes a snapshot. Set it on a
+      cache used for sign-in. Unset (the default), the document is checked
+      only for its issuer and `jwks_uri`, which is all access-token
+      verification needs; a resource server's authorization server may
+      publish a document with no authorization endpoint at all. The check
+      does not apply with `:jwks_uri` and no `:metadata`, since the process
+      then holds no document.
     * `:jwks_uri` - fetch only the JWKS from this URI. With `:jwks_uri` and no
       `:metadata` the process holds no discovery metadata, and `metadata/1`
       returns `{:error, :metadata_unavailable}`.
@@ -60,6 +70,17 @@ defmodule AttestoClient.Issuer do
       fetch; default 15 seconds.
     * `:max_jwks_keys` - default 32. `:max_response_bytes` - default 512 KiB.
     * `:req_options` - options for the underlying `Req` request.
+    * `:outbound` - deliberate exceptions to the HTTPS and public-address
+      rules for this cache's metadata and JWKS fetches: an issuer at a private
+      address (`allowed_cidrs`) or a loopback `http` development issuer
+      (`allow_loopback_http`). See `AttestoClient.Outbound`. A call that names
+      this cache with `issuer: {AttestoClient.Issuer, name}` still passes its
+      own `:outbound` for the requests it makes itself, such as the token
+      request.
+    * `:resolver` - a two-argument function used to resolve host names for
+      this cache's metadata and JWKS fetches, as `AttestoClient.Discovery`
+      takes. Every address it returns is screened the same way. Defaults to
+      the system resolver.
 
   ## Cache behavior
 
@@ -84,7 +105,7 @@ defmodule AttestoClient.Issuer do
   use GenServer
 
   alias Attesto.SigningAlg
-  alias AttestoClient.{Discovery, Verifier}
+  alias AttestoClient.{Discovery, Outbound, Verifier}
   alias AttestoClient.Issuer.Cache
 
   @default_fresh_ttl :timer.minutes(5)
@@ -115,6 +136,9 @@ defmodule AttestoClient.Issuer do
           | {:refresh_timeout, pos_integer()}
           | {:max_jwks_keys, pos_integer()}
           | {:max_response_bytes, pos_integer()}
+          | {:outbound, Outbound.t()}
+          | {:resolver,
+             (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
 
   @type refresh_error :: {:jwks_refresh_failed, term()}
 
@@ -306,9 +330,12 @@ defmodule AttestoClient.Issuer do
   @spec config!(keyword(), String.t()) :: map()
   def config!(opts, label) when is_list(opts) and is_binary(label) do
     refresh_timeout = positive_integer!(opts, :refresh_timeout, @default_refresh_timeout, label)
+    outbound = Outbound.validate!(opts, label)
 
     %{
-      issuer: required_https_issuer!(Keyword.get(opts, :issuer), label),
+      issuer: required_https_issuer!(Keyword.get(opts, :issuer), outbound, label),
+      outbound: outbound,
+      resolver: resolver!(opts, label),
       fresh_ttl: non_negative_integer!(opts, :fresh_ttl, @default_fresh_ttl, label),
       jwks_uri: optional_string!(opts, :jwks_uri, label),
       max_jwks_keys: positive_integer!(opts, :max_jwks_keys, @default_max_jwks_keys, label),
@@ -316,6 +343,7 @@ defmodule AttestoClient.Issuer do
         positive_integer!(opts, :max_response_bytes, @default_max_response_bytes, label),
       metadata: optional_map!(opts, :metadata, label),
       private: nil,
+      protocol: protocol!(opts, label),
       refresh_retry_interval:
         non_negative_integer!(
           opts,
@@ -465,6 +493,7 @@ defmodule AttestoClient.Issuer do
   # Runs in the refresh task. The result is the content of the next snapshot.
   defp fetch(config) do
     with {:ok, metadata, jwks_uri} <- resolve_jwks_uri(config),
+         :ok <- validate_metadata(metadata, config),
          {:ok, jwks} <- Discovery.fetch_jwks(jwks_uri, discovery_opts(config)),
          {:ok, keys} <- Verifier.normalize_jwks(jwks),
          :ok <- check_key_bound(keys, config.max_jwks_keys),
@@ -491,10 +520,27 @@ defmodule AttestoClient.Issuer do
     end
   end
 
+  # Only a cache told which protocol its document serves validates it as a
+  # whole; see the `:protocol` option.
+  defp validate_metadata(%{} = metadata, %{protocol: protocol, issuer: issuer} = config)
+       when protocol in [:oidc, :oauth] do
+    with {:ok, _metadata} <-
+           Discovery.validate_metadata(metadata, issuer,
+             protocol: protocol,
+             outbound: config.outbound,
+             resolver: config.resolver
+           ),
+         do: :ok
+  end
+
+  defp validate_metadata(_metadata, _config), do: :ok
+
   defp discovery_opts(config) do
     [
       well_known: config.well_known,
       req_options: config.req_options,
+      outbound: config.outbound,
+      resolver: config.resolver,
       max_response_bytes: config.max_response_bytes,
       # The refresh timer owns the whole metadata/JWKS cycle. Keep Discovery's
       # defensive deadline outside it rather than reusing the much shorter
@@ -506,10 +552,24 @@ defmodule AttestoClient.Issuer do
   defp check_key_bound(keys, max) when keys != [] and length(keys) <= max, do: :ok
   defp check_key_bound(_keys, _max), do: {:error, :invalid_jwks}
 
-  defp required_https_issuer!(issuer, label) do
-    case Discovery.validate_issuer_identifier(issuer) do
-      :ok -> issuer
-      {:error, _reason} -> raise ArgumentError, "#{label} requires an HTTPS :issuer"
+  defp required_https_issuer!(issuer, outbound, label) do
+    case Discovery.validate_issuer_identifier(issuer, outbound: outbound) do
+      :ok ->
+        issuer
+
+      {:error, :invalid_outbound} ->
+        raise ArgumentError,
+              "#{label} :outbound allow_loopback_http requires a loopback :issuer"
+
+      {:error, _reason} ->
+        raise ArgumentError, "#{label} requires an HTTPS :issuer"
+    end
+  end
+
+  defp protocol!(opts, label) do
+    case Keyword.get(opts, :protocol) do
+      protocol when protocol in [nil, :oidc, :oauth] -> protocol
+      _invalid -> raise ArgumentError, "#{label} :protocol must be :oidc or :oauth"
     end
   end
 
@@ -526,6 +586,16 @@ defmodule AttestoClient.Issuer do
       nil -> nil
       %{} = value -> value
       _invalid -> raise ArgumentError, "#{label} #{inspect(key)} must be a map"
+    end
+  end
+
+  # The shape `Attesto.OutboundTarget.screen/2` accepts, checked at start so a
+  # bad value is not a refresh failure later.
+  defp resolver!(opts, label) do
+    case Keyword.get(opts, :resolver) do
+      nil -> nil
+      resolver when is_function(resolver, 2) -> resolver
+      _invalid -> raise ArgumentError, "#{label} :resolver must be a two-argument function"
     end
   end
 

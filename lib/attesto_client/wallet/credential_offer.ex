@@ -92,10 +92,15 @@ defmodule AttestoClient.Wallet.CredentialOffer do
 
   HTTP goes through `AttestoClient.OAuthHTTP.get_json/2`, so it is mockable
   the same way as the rest of this library (`req_options: [plug: ...]`).
+
+  The URI comes from an offer link. `:outbound` is refused with `{:error, :outbound_not_supported}`: the address
+  comes from another party, so it gets no exception to the HTTPS and
+  public-address rules (see `AttestoClient.Outbound`).
   """
   @spec fetch(String.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def fetch(uri, opts \\ []) when is_binary(uri) and is_list(opts) do
-    with {:ok, body} <- OAuthHTTP.get_json(uri, opts) do
+    with :ok <- AttestoClient.Outbound.refuse(opts),
+         {:ok, body} <- OAuthHTTP.get_json(uri, opts) do
       from_map(body)
     end
   end

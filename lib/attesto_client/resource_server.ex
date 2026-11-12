@@ -74,6 +74,12 @@ defmodule AttestoClient.ResourceServer do
   (RFC 7519 §4.1.4): an integer from `0` to `300`, default `0`, so an expired
   token is rejected at `exp`. `AttestoClient.IDToken.verify/2` takes the same
   two options with the same meanings.
+
+  `:outbound` names deliberate exceptions to the HTTPS and public-address
+  rules for the metadata and JWKS fetches: an issuer at a private address, or
+  a loopback `http` issuer in development. See `AttestoClient.Outbound`.
+  `:resolver` is a two-argument function used to resolve host names for those
+  fetches; every address it returns is screened the same way.
   """
 
   alias Attesto.{NumericDate, SigningAlg}
@@ -103,6 +109,9 @@ defmodule AttestoClient.ResourceServer do
           | {:expiry_leeway_seconds, 0..300}
           | {:max_jwks_keys, pos_integer()}
           | {:max_response_bytes, pos_integer()}
+          | {:outbound, AttestoClient.Outbound.t()}
+          | {:resolver,
+             (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
 
   @type verify_opt ::
           {:required_scopes, [String.t()]}

@@ -165,11 +165,18 @@ defmodule AttestoClient.Wallet do
   `:deferred_timeout` (milliseconds, at most one hour) customize these bounds;
   `:deferred_clock` and `:deferred_sleep` provide injectable monotonic clock and
   wait functions. The response encryption key remains private to this flow.
+
+  `:outbound` applies to every request this flow makes (token, nonce,
+  credential, deferred credential and notification endpoints) for a credential
+  issuer at a private address or a loopback `http` issuer in development; see
+  `AttestoClient.Outbound`. A malformed value is `{:error, :invalid_outbound}`
+  before any request is sent.
   """
   @spec request_credential(CredentialOffer.t(), Proof.jwk() | [Proof.jwk()], [opt()]) ::
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
-    with {:ok, opts} <- issuer_options(offer, opts),
+    with :ok <- AttestoClient.Outbound.validate(opts),
+         {:ok, opts} <- issuer_options(offer, opts),
          {:ok, opts} <- issuance_profile(opts),
          :ok <- Deferred.validate_options(opts),
          {:ok, encryption} <- CredentialEncryption.prepare(opts),

@@ -492,6 +492,104 @@ defmodule AttestoClient.DiscoveryTest do
     end
   end
 
+  describe "validate_metadata/3" do
+    @valid_issuer "https://op.example.com"
+
+    defp valid_document(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "issuer" => @valid_issuer,
+          "authorization_endpoint" => "#{@valid_issuer}/authorize",
+          "token_endpoint" => "#{@valid_issuer}/token",
+          "jwks_uri" => "#{@valid_issuer}/jwks",
+          "response_types_supported" => ["code"],
+          "subject_types_supported" => ["public"],
+          "id_token_signing_alg_values_supported" => ["RS256"],
+          "code_challenge_methods_supported" => ["S256"]
+        },
+        overrides
+      )
+    end
+
+    test "returns the document when it is usable for the protocol" do
+      document = valid_document()
+      assert {:ok, ^document} = Discovery.validate_metadata(document, @valid_issuer)
+
+      assert {:ok, ^document} =
+               Discovery.validate_metadata(document, @valid_issuer, protocol: :oidc)
+
+      assert {:ok, ^document} =
+               Discovery.validate_metadata(document, @valid_issuer, protocol: :oauth)
+    end
+
+    test ":oauth does not need the OpenID-only members or a jwks_uri" do
+      document =
+        Map.drop(
+          valid_document(),
+          ~w(jwks_uri subject_types_supported id_token_signing_alg_values_supported)
+        )
+
+      assert {:error, :invalid_metadata} = Discovery.validate_metadata(document, @valid_issuer)
+
+      assert {:ok, ^document} =
+               Discovery.validate_metadata(document, @valid_issuer, protocol: :oauth)
+    end
+
+    test "gives the errors start/2 gives for the same document" do
+      cases = [
+        {valid_document(%{"issuer" => "https://other.example.com"}), :issuer_mismatch},
+        {Map.delete(valid_document(), "token_endpoint"), :invalid_metadata},
+        {valid_document(%{"token_endpoint" => "http://op.example.com/token"}), :invalid_endpoint},
+        {valid_document(%{"response_types_supported" => ["token"]}), :invalid_metadata},
+        {valid_document(%{"code_challenge_methods_supported" => ["plain"]}), :invalid_metadata},
+        {%{}, :invalid_metadata},
+        {"not a map", :invalid_metadata}
+      ]
+
+      for {document, expected} <- cases do
+        assert {:error, ^expected} = Discovery.validate_metadata(document, @valid_issuer)
+
+        if is_map(document) do
+          assert {:error, ^expected} =
+                   AttestoClient.AuthorizationCode.start(:return,
+                     issuer: @valid_issuer,
+                     client_id: "client",
+                     redirect_uri: "https://rp.example.com/callback",
+                     browser_binding: "binding",
+                     metadata: document
+                   )
+        end
+      end
+    end
+
+    test "refuses a request endpoint that carries a protocol parameter, as start/2 does" do
+      document =
+        valid_document(%{"authorization_endpoint" => "#{@valid_issuer}/authorize?client_id=evil"})
+
+      assert {:error, reason} = Discovery.validate_metadata(document, @valid_issuer)
+
+      assert {:error, ^reason} =
+               AttestoClient.AuthorizationCode.start(:return,
+                 issuer: @valid_issuer,
+                 client_id: "client",
+                 redirect_uri: "https://rp.example.com/callback",
+                 browser_binding: "binding",
+                 metadata: document
+               )
+    end
+
+    test "refuses a bad issuer identifier and an unknown protocol" do
+      assert {:error, :invalid_issuer} =
+               Discovery.validate_metadata(valid_document(), "http://op.example.com")
+
+      assert {:error, :invalid_protocol} =
+               Discovery.validate_metadata(valid_document(), @valid_issuer, protocol: :openid)
+
+      assert {:error, :invalid_options} =
+               Discovery.validate_metadata(valid_document(), @valid_issuer, :oidc)
+    end
+  end
+
   describe "fetch_jwks/2" do
     test "returns a keys document" do
       jwks = %{"keys" => [%{"kty" => "EC", "crv" => "P-256", "kid" => "k1"}]}

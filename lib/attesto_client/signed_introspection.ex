@@ -55,6 +55,9 @@ defmodule AttestoClient.SignedIntrospection do
   Required options: `:issuer` and `:audience` (the introspecting client or
   resource server). JWKS may be supplied through `:jwks`, `:metadata`,
   `:jwks_uri`, or fetched through discovery from `:issuer`.
+
+  `:outbound` applies to those fetches; see `AttestoClient.Outbound`. A
+  malformed value is `{:error, :invalid_outbound}`.
   """
   @spec verify(String.t(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(jwt, opts) when is_binary(jwt) and is_list(opts) do
@@ -62,6 +65,8 @@ defmodule AttestoClient.SignedIntrospection do
 
     with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, audience} <- Verifier.require_string(opts, :audience, :missing_audience),
+         :ok <- AttestoClient.Outbound.validate(opts),
+         :ok <- AttestoClient.Outbound.check_issuer(issuer, opts),
          {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
          {:ok, algs} <- Verifier.accepted_algs(opts),
          {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),

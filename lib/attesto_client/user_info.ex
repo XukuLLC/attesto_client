@@ -55,6 +55,10 @@ defmodule AttestoClient.UserInfo do
 
   Required options: `:issuer` and `:client_id`. Pass `:id_token_sub` to bind the
   UserInfo response back to a previously verified ID Token.
+
+  `:outbound` applies to the metadata and JWKS fetches made when no `:jwks` is
+  given; see `AttestoClient.Outbound`. A malformed value is
+  `{:error, :invalid_outbound}`.
   """
   @spec verify(String.t(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(jwt, opts) when is_binary(jwt) and is_list(opts) do
@@ -62,6 +66,8 @@ defmodule AttestoClient.UserInfo do
 
     with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
+         :ok <- AttestoClient.Outbound.validate(opts),
+         :ok <- AttestoClient.Outbound.check_issuer(issuer, opts),
          {:ok, jwks} <- Verifier.resolve_jwks(opts, issuer),
          {:ok, algs} <- Verifier.accepted_algs(opts),
          {:ok, claims, header, _verified_jwk} <- Verifier.verify_signature(jwt, jwks, algs),

@@ -464,6 +464,133 @@ defmodule AttestoClient.IssuerTest do
       assert refreshed.access_token == "access-new"
       assert requests(ctx.state) == ["/.well-known/openid-configuration", "/jwks"]
     end
+
+    test "forwards :trusted_audiences to ID Token verification", ctx do
+      coordinator = start_supervised!(RefreshCoordinator)
+
+      plug = fn conn ->
+        json(conn, 200, %{
+          "access_token" => "access-new",
+          "token_type" => "Bearer",
+          "id_token" =>
+            id_token(ctx.key, %{
+              "at_hash" => hash_claim("access-new"),
+              "aud" => [@client_id, "https://api.example"],
+              "azp" => @client_id
+            })
+        })
+      end
+
+      tokens = %TokenSet{
+        access_token: "access-old",
+        token_type: "Bearer",
+        refresh_token: "refresh-old"
+      }
+
+      opts = [
+        token_endpoint: "#{@issuer}/token",
+        issuer: {Issuer, ctx.issuer},
+        client_id: @client_id,
+        subject: "subject-1",
+        id_token_alg: "RS256",
+        req_options: [plug: plug],
+        timeout: 30_000
+      ]
+
+      assert {:error, :untrusted_audience} = Token.refresh(coordinator, :strict, tokens, opts)
+
+      assert {:ok, %RefreshResult{}} =
+               Token.refresh(
+                 coordinator,
+                 :trusted,
+                 tokens,
+                 Keyword.put(opts, :trusted_audiences, ["https://api.example"])
+               )
+    end
+  end
+
+  describe "process with :protocol" do
+    defp start_validating(document, protocol) do
+      key = JOSE.JWK.generate_key({:rsa, 2048})
+      jwks = %{"keys" => [public_jwk(key, "key-1")]}
+
+      state = start_supervised!({Agent, fn -> %{document: document, requests: []} end})
+
+      plug = fn conn ->
+        current =
+          Agent.get_and_update(state, fn current ->
+            {current, %{current | requests: current.requests ++ [conn.request_path]}}
+          end)
+
+        case conn.request_path do
+          "/jwks" -> json(conn, 200, jwks)
+          _well_known -> json(conn, 200, current.document)
+        end
+      end
+
+      opts =
+        [
+          issuer: @issuer,
+          req_options: [plug: plug],
+          fresh_ttl: 0,
+          stale_ttl: 60_000,
+          refresh_retry_interval: 0
+        ]
+        |> Keyword.merge(if(protocol, do: [protocol: protocol], else: []))
+
+      %{issuer: start_supervised!({Issuer, opts}), state: state}
+    end
+
+    test "a document start/2 would refuse is a refresh failure" do
+      bad = Map.put(metadata(), "authorization_endpoint", "#{@issuer}/authorize?client_id=evil")
+      ctx = start_validating(bad, :oidc)
+
+      assert {:error, {:jwks_refresh_failed, reason}} = Issuer.keys(ctx.issuer)
+      assert {:error, ^reason} = AttestoClient.Discovery.validate_metadata(bad, @issuer)
+      refute Issuer.ready?(ctx.issuer)
+      # The JWKS is not fetched for a document that was refused.
+      assert Agent.get(ctx.state, & &1.requests) == ["/.well-known/openid-configuration"]
+    end
+
+    test "a good document becomes a snapshot, and a later bad one does not replace it" do
+      ctx = start_validating(metadata(), :oidc)
+      assert {:ok, [%{"kid" => "key-1"}]} = Issuer.keys(ctx.issuer)
+
+      Agent.update(
+        ctx.state,
+        &%{&1 | document: Map.delete(metadata(), "subject_types_supported")}
+      )
+
+      assert Issuer.refresh(ctx.issuer) == {:error, {:jwks_refresh_failed, :invalid_metadata}}
+      assert {:ok, %{"subject_types_supported" => ["public"]}} = snapshot_metadata(ctx.issuer)
+    end
+
+    test "without :protocol only the issuer and jwks_uri are checked, as for a resource server" do
+      # An RFC 8414 document from a server with no authorization endpoint.
+      document = %{"issuer" => @issuer, "jwks_uri" => "#{@issuer}/jwks"}
+
+      assert {:ok, [_key]} = Issuer.keys(start_validating(document, nil).issuer)
+    end
+
+    test ":oauth accepts authorization-server metadata that :oidc refuses" do
+      document =
+        Map.drop(metadata(), ["subject_types_supported", "id_token_signing_alg_values_supported"])
+
+      assert {:ok, [_key]} = Issuer.keys(start_validating(document, :oauth).issuer)
+    end
+
+    test "an unknown :protocol is refused at start" do
+      assert_raise ArgumentError, ~r/:protocol must be :oidc or :oauth/, fn ->
+        Issuer.config!([issuer: @issuer, protocol: :saml], "AttestoClient.Issuer")
+      end
+    end
+
+    defp snapshot_metadata(issuer) do
+      case :sys.get_state(issuer) do
+        %{cache: %{snapshot: %{metadata: metadata}}} -> {:ok, metadata}
+        _other -> :error
+      end
+    end
   end
 
   defp start_issuer(_ctx) do

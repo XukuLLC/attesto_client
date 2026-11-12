@@ -44,10 +44,17 @@ defmodule AttestoClient.Wallet.Presentation do
   @doc "Select held credentials satisfying a DCQL query."
   def select(query, held), do: DCQL.select(query, held)
 
-  @doc "Select, build and submit presentations. The host must obtain user consent first."
+  @doc """
+  Select, build and submit presentations. The host must obtain user consent first.
+
+  The response goes to the verifier's `response_uri`. `:outbound` is refused with `{:error, :outbound_not_supported}`: the address
+  comes from another party, so it gets no exception to the HTTPS and
+  public-address rules (see `AttestoClient.Outbound`).
+  """
   def present(%PresentationRequest{} = request, held, opts \\ [])
       when is_list(held) and is_list(opts) do
-    with :ok <- Formats.validate(request.client_metadata),
+    with :ok <- AttestoClient.Outbound.refuse(opts),
+         :ok <- Formats.validate(request.client_metadata),
          {:ok, selection} <- selection(request, held, opts),
          {:ok, vp_token} <- build_vp_token(selection, request, opts) do
       submit(request, vp_token, opts)
@@ -87,10 +94,17 @@ defmodule AttestoClient.Wallet.Presentation do
     end
   end
 
-  @doc "Submit an already-built response. Encrypted mode never sends credentials or state in plaintext."
+  @doc """
+  Submit an already-built response. Encrypted mode never sends credentials or state in plaintext.
+
+  The response goes to the verifier's `response_uri`. `:outbound` is refused with `{:error, :outbound_not_supported}`: the address
+  comes from another party, so it gets no exception to the HTTPS and
+  public-address rules (see `AttestoClient.Outbound`).
+  """
   def submit(%PresentationRequest{} = request, vp_token, opts \\ [])
       when is_map(vp_token) and is_list(opts) do
-    with {:ok, form} <- build_response(request, vp_token, opts) do
+    with :ok <- AttestoClient.Outbound.refuse(opts),
+         {:ok, form} <- build_response(request, vp_token, opts) do
       OAuthHTTP.post_form_open(request.response_uri, form, opts)
     end
   end

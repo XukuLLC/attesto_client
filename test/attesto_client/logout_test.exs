@@ -41,9 +41,54 @@ defmodule AttestoClient.LogoutTest do
     assert params["state"] == "logout-state"
   end
 
-  test "requires a logout hint and a discovered end-session endpoint" do
-    assert {:error, :missing_logout_hint} = Logout.url(issuer: @issuer, metadata: metadata())
+  test "builds the bare end-session URL when no hint is given" do
+    assert {:ok, url} = Logout.url(issuer: @issuer, metadata: metadata())
+    assert url == "#{@issuer}/logout"
 
+    assert {:ok, url} =
+             Logout.url(
+               issuer: @issuer,
+               metadata: metadata(),
+               client_id: "client",
+               post_logout_redirect_uri: "https://rp.example.com/logged-out",
+               state: "logout-state"
+             )
+
+    uri = URI.parse(url)
+    assert uri.path == "/logout"
+
+    assert URI.decode_query(uri.query) == %{
+             "client_id" => "client",
+             "post_logout_redirect_uri" => "https://rp.example.com/logged-out",
+             "state" => "logout-state"
+           }
+  end
+
+  test "a post-logout redirect needs an ID Token hint or a client_id to name the client" do
+    redirect = [post_logout_redirect_uri: "https://rp.example.com/logged-out"]
+    base = [issuer: @issuer, metadata: metadata()]
+
+    assert {:error, :missing_client_id} = Logout.url(base ++ redirect)
+
+    assert {:error, :missing_client_id} =
+             Logout.url(base ++ redirect ++ [logout_hint: "session-1"])
+
+    assert {:ok, _url} = Logout.url(base ++ redirect ++ [client_id: "client"])
+    assert {:ok, _url} = Logout.url(base ++ redirect ++ [id_token_hint: "id-token"])
+  end
+
+  test "still validates the provider document without a hint" do
+    assert {:error, :invalid_endpoint} =
+             Logout.url(
+               issuer: @issuer,
+               metadata: metadata(%{"end_session_endpoint" => "http://op.example.com/logout"})
+             )
+
+    assert {:error, :issuer_mismatch} =
+             Logout.url(issuer: "https://other.example.com", metadata: metadata())
+  end
+
+  test "requires a discovered end-session endpoint" do
     assert {:error, :missing_end_session_endpoint} =
              Logout.url(
                issuer: @issuer,

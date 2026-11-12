@@ -4,6 +4,118 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.0] - 2026-11-12
+
+Requires Attesto `>= 2.14.0 and < 3.0.0`. Attesto 2.14.0 has the CIDR
+allowance in its outbound screen, the loopback-only `http` form of the
+identifier check, and the stricter host rule used below.
+
+### Changed
+
+- An issuer or endpoint URL whose host contains a percent-encoded character
+  (`https://auth.test%20evil/`) or an empty label (`https://auth.test../`) is
+  refused everywhere this package checks one: `:invalid_issuer`,
+  `:invalid_endpoint`, `:invalid_jwks_uri` or `:blocked_host`, by call. No
+  valid issuer metadata contains such a host (RFC 3986 §3.2.2). The rule is
+  Attesto's `Attesto.URI.valid_host?/1`. An upper-case scheme (`HTTPS://`) is
+  still accepted, since schemes are case-insensitive (RFC 3986 §3.1), and one
+  trailing dot (`https://auth.test./`) is still the fully qualified form of
+  the name.
+
+- `AttestoClient.IDToken.verify/2` rejects an ID Token whose `aud` names any
+  audience other than this client, with `{:error, :untrusted_audience}`. OIDC
+  Core §3.1.3.7 item 3 says the ID Token MUST be rejected if it "contains
+  additional audiences not trusted by the Client". Until now an `aud` array was
+  accepted as long as it contained the client and `azp` named it, whatever
+  else it listed. The new `:trusted_audiences` option lists the additional
+  audiences the client trusts and is empty by default.
+  `AttestoClient.AuthorizationCode.callback/3` and
+  `AttestoClient.Token.refresh/4` take the same option and apply it to the ID
+  Token they verify. The `azp` rules are unchanged.
+
+  Behaviour change: a provider that puts another party in the ID Token's `aud`
+  next to the client (an API identifier, for example) now fails sign-in and
+  refresh until that value is listed in `:trusted_audiences`. A malformed
+  option is `{:error, :invalid_trusted_audiences}`.
+- `AttestoClient.Logout.url/1` no longer requires `:id_token_hint` or
+  `:logout_hint`, and no longer returns `{:error, :missing_logout_hint}`.
+  RP-Initiated Logout 1.0 §2 makes every request parameter optional. With no
+  hint the result is the validated `end_session_endpoint` with whatever
+  parameters were given, so a relying party that no longer holds the ID Token
+  gets the checked URL without rebuilding it.
+- `AttestoClient.Logout.url/1` returns `{:error, :missing_client_id}` for a
+  `:post_logout_redirect_uri` sent with neither `:id_token_hint` nor
+  `:client_id`. Without one of them the provider has no client to validate
+  the redirect against (§2, §3). This combination with only `:logout_hint`
+  used to produce a URL.
+- `AttestoClient.Logout.url/1` refuses provider metadata whose authorization,
+  pushed-authorization or token endpoint carries a protocol parameter in its
+  own query, as `AttestoClient.AuthorizationCode.start/2` already did. The two
+  now share one document check.
+
+### Added
+
+- `:outbound` names deliberate exceptions to the rules applied to every
+  address this package connects to. `AttestoClient.AuthorizationCode.start/2`,
+  `callback/3` and `exchange/2`, `AttestoClient.IDToken.verify/2`,
+  `AttestoClient.Token.refresh/4`, `AttestoClient.Logout.url/1`, the
+  `AttestoClient.Discovery` functions, `AttestoClient.Issuer` and
+  `AttestoClient.ResourceServer` take it; `AttestoClient.Outbound` documents
+  it. A malformed value is `{:error, :invalid_outbound}` (an `ArgumentError`
+  when starting a cache).
+  - `outbound: [allowed_cidrs: ["10.20.0.0/16"]]` lets the issuer's hosts
+    resolve into the listed non-public networks, for an identity provider
+    reachable only at a private address. Until now such an issuer failed with
+    `:blocked_host`. Every resolved address must be public or inside a listed
+    block, `https` is still required, and there is no host-name form. The rule
+    is `Attesto.OutboundTarget`'s. This is an SSRF exception the operator
+    takes on deliberately: the issuer's metadata can then direct this
+    package's requests, including the token request, at any host in those
+    networks.
+  - `outbound: [allow_loopback_http: true]` accepts `http` for an issuer, and
+    for the endpoints in its metadata, whose host is `localhost` or a literal
+    loopback address, for development against a local identity provider. Every
+    other host still needs `https`. The option is refused when the issuer is
+    not a loopback host.
+
+  The option is not stored in an authorization transaction or a token set.
+  `callback/3` and `refresh/4` apply only what they are passed, so nothing a
+  transaction carries can widen what a later call connects to.
+
+  The other calls that connect to an issuer, or to an endpoint the caller
+  chose from its metadata, take it too and check it before connecting:
+  `AttestoClient.UserInfo.verify/2`,
+  `AttestoClient.SignedIntrospection.verify/2`,
+  `AttestoClient.Token.exchange_pre_authorized_code/2` and `revoke/2`,
+  `AttestoClient.WalletAttestation.fetch_challenge/2` and
+  `AttestoClient.Wallet.request_credential/3`.
+
+  Calls whose address is written by another party refuse it with
+  `{:error, :outbound_not_supported}`:
+  `AttestoClient.Wallet.CredentialOffer.fetch/2`,
+  `AttestoClient.Wallet.PresentationRequest.fetch/3` and `from_uri/3`, and
+  `AttestoClient.Wallet.Presentation.submit/3` and `present/3`. A credential
+  offer link or a verifier's request names those addresses, so an allowance
+  there would let whoever wrote the link direct a request into the listed
+  networks.
+- `AttestoClient.Issuer` and `AttestoClient.ResourceServer` take `:resolver`,
+  the two-argument host resolver `AttestoClient.Discovery` already takes. It
+  is used for every metadata and JWKS fetch the cache makes, including a
+  refresh on an unknown `kid`. Until now a cache always used the system
+  resolver. A value that is not a two-argument function raises
+  `ArgumentError` at start.
+- `AttestoClient.Discovery.validate_metadata/3` checks an authorization-server
+  metadata document for an issuer and returns `{:ok, document}` or the error
+  `AttestoClient.AuthorizationCode.start/2` would give for its content.
+  `protocol: :oidc` (the default) validates OpenID Provider metadata;
+  `protocol: :oauth` validates RFC 8414 metadata. It is the function `start/2`
+  calls, so a document accepted here is not refused there for its content.
+- `AttestoClient.Issuer` takes `:protocol` (`:oidc` or `:oauth`). With it,
+  every refresh runs that check, and a document `start/2` would refuse is a
+  refresh failure that never becomes a snapshot; a previously cached document
+  stays in place. Without it the cache checks only the issuer and `jwks_uri`,
+  as before, which is what a resource server's cache needs.
+
 ## [2.15.0] - 2026-11-11
 
 ### Added

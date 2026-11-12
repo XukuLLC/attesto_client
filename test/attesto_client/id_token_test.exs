@@ -149,10 +149,48 @@ defmodule AttestoClient.IDTokenTest do
       assert claims["sub"] == @subject
     end
 
-    test "accepts multiple audiences only when azp names this client" do
+    test "accepts an additional audience only when it is trusted and azp names this client" do
       jwt = sign(base_claims(%{"aud" => ["other", @client_id], "azp" => @client_id}))
 
-      assert {:ok, _claims} = verify(jwt)
+      # OIDC Core §3.1.3.7 item 3: strict by default.
+      assert {:error, :untrusted_audience} = verify(jwt)
+      assert {:error, :untrusted_audience} = verify(jwt, trusted_audiences: [])
+      assert {:error, :untrusted_audience} = verify(jwt, trusted_audiences: ["someone-else"])
+      assert {:ok, _claims} = verify(jwt, trusted_audiences: ["other"])
+
+      # Every additional audience must be trusted, not just one of them.
+      three = sign(base_claims(%{"aud" => ["other", @client_id, "third"], "azp" => @client_id}))
+      assert {:error, :untrusted_audience} = verify(three, trusted_audiences: ["other"])
+      assert {:ok, _claims} = verify(three, trusted_audiences: ["third", "other"])
+
+      # A single-element array naming only this client has no additional audience.
+      assert {:ok, _claims} = verify(sign(base_claims(%{"aud" => [@client_id]})))
+    end
+
+    test "trusting an audience does not relax the azp rules or stand in for this client" do
+      trusted = [trusted_audiences: ["other"]]
+
+      assert {:error, :missing_azp} =
+               verify(sign(base_claims(%{"aud" => ["other", @client_id]})), trusted)
+
+      assert {:error, :invalid_azp} =
+               verify(
+                 sign(base_claims(%{"aud" => ["other", @client_id], "azp" => "other"})),
+                 trusted
+               )
+
+      assert {:error, :invalid_audience} =
+               verify(sign(base_claims(%{"aud" => ["other"]})), trusted)
+
+      assert {:error, :invalid_audience} = verify(sign(base_claims(%{"aud" => "other"})), trusted)
+    end
+
+    test "rejects a malformed :trusted_audiences" do
+      jwt = sign(base_claims())
+
+      for invalid <- ["other", [:other], [""], %{}, :any] do
+        assert {:error, :invalid_trusted_audiences} = verify(jwt, trusted_audiences: invalid)
+      end
     end
 
     test "ignores unrelated malformed JWKS keys after kid filtering" do
@@ -213,11 +251,18 @@ defmodule AttestoClient.IDTokenTest do
       assert {:error, :invalid_audience} =
                verify(sign(base_claims(%{"aud" => "someone-else"})))
 
-      assert {:error, :missing_azp} =
+      assert {:error, :untrusted_audience} =
                verify(sign(base_claims(%{"aud" => ["other", @client_id]})))
 
+      assert {:error, :missing_azp} =
+               verify(sign(base_claims(%{"aud" => ["other", @client_id]})),
+                 trusted_audiences: ["other"]
+               )
+
       assert {:error, :invalid_azp} =
-               verify(sign(base_claims(%{"aud" => ["other", @client_id], "azp" => "other"})))
+               verify(sign(base_claims(%{"aud" => ["other", @client_id], "azp" => "other"})),
+                 trusted_audiences: ["other"]
+               )
     end
 
     test "nonce and max_age failures" do

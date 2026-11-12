@@ -32,6 +32,7 @@ defmodule AttestoClient.AuthorizationCode do
   alias AttestoClient.IDToken
   alias AttestoClient.Issuer
   alias AttestoClient.OpenIDMetadata
+  alias AttestoClient.Outbound
   alias AttestoClient.PKCE
   alias AttestoClient.ProtocolParams
   alias AttestoClient.TokenSet
@@ -81,6 +82,14 @@ defmodule AttestoClient.AuthorizationCode do
   that deviates from OIDC Core §3.1.3.7; see `AttestoClient.IDToken`. The
   aliases are pinned in the transaction. Discovery and the RFC 9207
   authorization-response `iss` check stay pinned to `:issuer`.
+
+  `:outbound` names deliberate exceptions to the HTTPS and public-address
+  rules for the issuer and the endpoints in its metadata: an issuer at a
+  private address (`allowed_cidrs`), or a loopback `http` identity provider
+  in development (`allow_loopback_http`). See `AttestoClient.Outbound`. It is
+  not stored in the transaction, so pass the same value to `callback/3`; a
+  callback that does not pass it applies the default rules to the endpoints
+  the transaction recorded.
 
   Use `protocol: :oauth` for a plain OAuth flow, including OID4VCI issuance.
   It does not require the `openid` scope, OIDC metadata, or an ID Token; the
@@ -165,7 +174,6 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, ttl_ms} <- positive_integer(opts, :transaction_ttl_ms, default_ttl_ms),
          {:ok, requested_id_token_alg} <- protocol_id_token_alg(opts, protocol, profile),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
-         :ok <- validate_endpoint_queries(metadata),
          :ok <- AuthorizationProfile.metadata(client_auth_binding, metadata),
          {:ok, id_token_alg} <- resolved_id_token_alg(metadata, requested_id_token_alg),
          :ok <- protocol_supports_alg(metadata, id_token_alg, protocol),
@@ -259,6 +267,17 @@ defmodule AttestoClient.AuthorizationCode do
   `:max_token_age_seconds` and `require_auth_time: true` tighten the ID Token
   checks, as in `AttestoClient.IDToken.verify/2`.
 
+  `:trusted_audiences` lists the audiences, other than this client, that the
+  ID Token's `aud` may name, as in `AttestoClient.IDToken.verify/2`. It is
+  empty by default, so an ID Token with any additional audience is rejected.
+
+  `:outbound` is the exception `start/2` was given, passed again
+  (`AttestoClient.Outbound`). The transaction does not carry it: without it
+  the token request and key fetch are held to the default HTTPS and
+  public-address rules, and with `allow_loopback_http: true` the transaction's
+  issuer must be a loopback host or the result is `{:error, :invalid_outbound}`.
+  A malformed value is refused before the transaction is taken.
+
   `transaction:` supplies a transaction that `start/2` returned (see "Keeping
   the transaction yourself"). The store argument is then not consulted and may
   be `:return`. The response's `state` must equal the transaction's, and the
@@ -281,9 +300,13 @@ defmodule AttestoClient.AuthorizationCode do
 
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
     with {:ok, opts} <- Issuer.expand_option(opts),
+         # Checked before the transaction is taken, so a malformed option does
+         # not spend it.
+         :ok <- Outbound.validate(opts),
          {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state, opts),
          :ok <- check_transaction_deadline(transaction),
+         :ok <- Outbound.check_issuer(transaction.issuer, opts),
          :ok <- check_issuer_cache(transaction, opts),
          :ok <- check_browser_binding(transaction, opts),
          :ok <-
@@ -461,8 +484,8 @@ defmodule AttestoClient.AuthorizationCode do
     * `:code_verifier` - the PKCE verifier whose challenge was sent.
 
   `:client_auth`, `:dpop` (with `:dpop_nonce`, `:alg`, `:kid`, `:now`),
-  `:attestation_challenge_received`, `:req_options`, `:resolver` and `:timeout`
-  mean what they mean to `callback/3`. With `:dpop` the returned token set is
+  `:attestation_challenge_received`, `:req_options`, `:resolver`, `:outbound`
+  and `:timeout` mean what they mean to `callback/3`. With `:dpop` the returned token set is
   bound to that key's thumbprint. `:resource` adds RFC 8707 resource
   indicators to the request.
 
@@ -477,6 +500,8 @@ defmodule AttestoClient.AuthorizationCode do
     with {:ok, token_endpoint} <- required_string(opts, :token_endpoint),
          :ok <- validate_endpoint_query(token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
+         :ok <- Outbound.validate(opts),
+         :ok <- Outbound.check_issuer(issuer, opts),
          {:ok, client_id} <- required_string(opts, :client_id),
          {:ok, redirect_uri} <- required_string(opts, :redirect_uri),
          {:ok, code_verifier} <- required_string(opts, :code_verifier),
@@ -558,7 +583,14 @@ defmodule AttestoClient.AuthorizationCode do
   defp verification_keys(transaction, opts) do
     verify_opts =
       opts
-      |> Keyword.take([:req_options, :resolver, :max_response_bytes, :timeout, :issuer_cache])
+      |> Keyword.take([
+        :req_options,
+        :resolver,
+        :outbound,
+        :max_response_bytes,
+        :timeout,
+        :issuer_cache
+      ])
       |> Keyword.put(:metadata, transaction.metadata)
 
     Issuer.resolve_jwks(verify_opts, transaction.issuer)
@@ -599,6 +631,7 @@ defmodule AttestoClient.AuthorizationCode do
       :req_options,
       :timeout,
       :resolver,
+      :outbound,
       :dpop,
       :dpop_nonce,
       :alg,
@@ -752,6 +785,7 @@ defmodule AttestoClient.AuthorizationCode do
       expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
       max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
       require_auth_time: Keyword.get(opts, :require_auth_time, false),
+      trusted_audiences: Keyword.get(opts, :trusted_audiences),
       client_id: transaction.client_id,
       nonce: transaction.nonce,
       access_token: tokens.access_token,
@@ -1050,21 +1084,6 @@ defmodule AttestoClient.AuthorizationCode do
       {key, value} -> [{key, value}]
     end)
   end
-
-  defp validate_endpoint_queries(metadata) do
-    Enum.reduce_while(
-      ~w(authorization_endpoint pushed_authorization_request_endpoint token_endpoint),
-      :ok,
-      fn name, :ok ->
-        case validate_endpoint_query(metadata[name]) do
-          :ok -> {:cont, :ok}
-          error -> {:halt, error}
-        end
-      end
-    )
-  end
-
-  defp validate_endpoint_query(nil), do: :ok
 
   defp validate_endpoint_query(endpoint),
     do: AttestoClient.OAuthHTTP.validate_endpoint_query(endpoint, ProtocolParams.protected())

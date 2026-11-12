@@ -80,9 +80,16 @@ defmodule AttestoClient.Wallet.PresentationRequest do
     end
   end
 
-  @doc "Fetch and verify a request URI; :request_uri_method may be get or post."
+  @doc """
+  Fetch and verify a request URI; :request_uri_method may be get or post.
+
+  `:outbound` is refused with `{:error, :outbound_not_supported}`: the address
+  comes from another party, so it gets no exception to the HTTPS and
+  public-address rules (see `AttestoClient.Outbound`).
+  """
   def fetch(uri, trusted, opts \\ []) when is_binary(uri) and is_list(opts) do
-    with :ok <- algorithm_policy(opts),
+    with :ok <- AttestoClient.Outbound.refuse(opts),
+         :ok <- algorithm_policy(opts),
          {:ok, jwt, verify_opts} <- fetch_jwt(uri, opts),
          do: verify(jwt, trusted, verify_opts)
   end
@@ -94,9 +101,15 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   equal the deep link's `client_id`; a different outer value returns
   `{:error, :invalid_client_id}` before any request URI is fetched. Without a
   caller `:client_id`, the outer value is bound to the signed request.
+
+  A by-reference request is fetched from the link's `request_uri`.
+  `:outbound` is refused with `{:error, :outbound_not_supported}`: the address
+  comes from another party, so it gets no exception to the HTTPS and
+  public-address rules (see `AttestoClient.Outbound`).
   """
   def from_uri(uri, trusted, opts \\ []) when is_binary(uri) and is_list(opts) do
-    with true <- byte_size(uri) <= 65_536,
+    with :ok <- AttestoClient.Outbound.refuse(opts),
+         true <- byte_size(uri) <= 65_536,
          {:ok, params} <- outer_params(uri),
          {:ok, client_id} <- required_string(params, "client_id", :invalid_client_id),
          :ok <- expected_outer_client_id(client_id, opts) do

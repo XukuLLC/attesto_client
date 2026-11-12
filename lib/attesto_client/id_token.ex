@@ -15,7 +15,9 @@ defmodule AttestoClient.IDToken do
       `"at+jwt"` is rejected.
     * `iss` equals `:issuer`, or one of `:issuer_aliases` when the caller
       opted into that deviation (see "Issuer aliases").
-    * `aud` equals, or is an all-string array containing, `:client_id`.
+    * `aud` equals, or is an all-string array containing, `:client_id`. Any
+      other entry must be listed in `:trusted_audiences` (see "Additional
+      audiences").
     * `azp` equals `:client_id` whenever present, and is required when `aud`
       contains multiple audiences.
     * `sub`, `exp`, and `iat` are present and well-typed; `exp` must be in the
@@ -54,6 +56,24 @@ defmodule AttestoClient.IDToken do
   §3.1.3.7 and is empty by default. Discovery, the JWKS, and the RFC 9207
   authorization-response `iss` check all stay pinned to `:issuer`; an alias
   only widens the comparison against the ID Token's `iss` claim.
+
+  ## Additional audiences
+
+  OIDC Core §3.1.3.7 item 3 says the ID Token MUST be rejected if it "contains
+  additional audiences not trusted by the Client". `:trusted_audiences` is the
+  list of audiences this client trusts besides itself; it is empty by
+  default, so an `aud` array naming anything but `:client_id` fails with
+  `{:error, :untrusted_audience}`. List an audience here only when the
+  provider is known to issue ID Tokens for that party together with this
+  client. The `azp` rules are unchanged: with more than one audience `azp` is
+  required, and it must equal `:client_id` whenever present.
+
+  ## Fetching keys
+
+  Without `:jwks` (or an issuer cache) the issuer's metadata and JWKS are
+  fetched over HTTPS from public addresses only. `:outbound` names a
+  deliberate exception for an issuer at a private address or a loopback
+  `http` development issuer; see `AttestoClient.Outbound`.
 
   ## Clock tolerance
 
@@ -97,6 +117,8 @@ defmodule AttestoClient.IDToken do
           | {:require_auth_time, boolean()}
           | {:max_token_age_seconds, non_neg_integer()}
           | {:issuer_aliases, [String.t()]}
+          | {:trusted_audiences, [String.t()]}
+          | {:outbound, AttestoClient.Outbound.t()}
           | {:clock_skew_seconds, 0..300}
           | {:expiry_leeway_seconds, 0..300}
           | {:access_token, String.t()}
@@ -132,6 +154,8 @@ defmodule AttestoClient.IDToken do
           | :invalid_require_auth_time
           | :token_too_old
           | :invalid_audience
+          | :invalid_trusted_audiences
+          | :untrusted_audience
           | :missing_azp
           | :invalid_azp
           | :invalid_claims
@@ -185,7 +209,10 @@ defmodule AttestoClient.IDToken do
     with {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
+         :ok <- AttestoClient.Outbound.validate(opts),
+         :ok <- AttestoClient.Outbound.check_issuer(issuer, opts),
          {:ok, aliases} <- issuer_aliases(opts),
+         {:ok, trusted_audiences} <- trusted_audiences(opts),
          {:ok, skew} <-
            tolerance(opts, :clock_skew_seconds, @clock_skew_seconds, :invalid_clock_skew_seconds),
          {:ok, leeway} <-
@@ -194,7 +221,7 @@ defmodule AttestoClient.IDToken do
          :ok <- check_header_typ(header),
          :ok <- check_token_purpose(claims),
          :ok <- check_issuer(claims, [issuer | aliases]),
-         :ok <- check_audience_and_azp(claims, client_id),
+         :ok <- check_audience_and_azp(claims, client_id, trusted_audiences),
          :ok <- check_required_claims(claims),
          :ok <- check_subject(claims, Keyword.get(opts, :subject)),
          :ok <-
@@ -315,21 +342,42 @@ defmodule AttestoClient.IDToken do
 
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  defp check_audience_and_azp(claims, client_id) do
-    with {:ok, audience_count} <- check_audience(claims, client_id) do
+  # The `:trusted_audiences` option, validated: a list of non-empty strings,
+  # `[]` when absent.
+  defp trusted_audiences(opts) do
+    case Keyword.get(opts, :trusted_audiences) do
+      nil ->
+        {:ok, []}
+
+      audiences when is_list(audiences) ->
+        if Enum.all?(audiences, &(is_binary(&1) and &1 != "")),
+          do: {:ok, audiences},
+          else: {:error, :invalid_trusted_audiences}
+
+      _invalid ->
+        {:error, :invalid_trusted_audiences}
+    end
+  end
+
+  defp check_audience_and_azp(claims, client_id, trusted_audiences) do
+    with {:ok, audience_count} <- check_audience(claims, client_id, trusted_audiences) do
       check_azp(claims, client_id, audience_count)
     end
   end
 
-  defp check_audience(%{"aud" => aud}, client_id) when aud == client_id, do: {:ok, 1}
+  defp check_audience(%{"aud" => aud}, client_id, _trusted) when aud == client_id, do: {:ok, 1}
 
-  defp check_audience(%{"aud" => auds}, client_id) when is_list(auds) do
-    if Enum.all?(auds, &is_binary/1) and client_id in auds,
-      do: {:ok, length(auds)},
-      else: {:error, :invalid_audience}
+  # OIDC Core §3.1.3.7 item 3: the client must be an audience, and every other
+  # audience must be one the client trusts.
+  defp check_audience(%{"aud" => auds}, client_id, trusted) when is_list(auds) do
+    cond do
+      not (Enum.all?(auds, &is_binary/1) and client_id in auds) -> {:error, :invalid_audience}
+      Enum.all?(auds, &(&1 == client_id or &1 in trusted)) -> {:ok, length(auds)}
+      true -> {:error, :untrusted_audience}
+    end
   end
 
-  defp check_audience(_claims, _client_id), do: {:error, :invalid_audience}
+  defp check_audience(_claims, _client_id, _trusted), do: {:error, :invalid_audience}
 
   defp check_azp(%{"azp" => azp}, client_id, _audience_count) do
     if azp == client_id, do: :ok, else: {:error, :invalid_azp}

@@ -5,6 +5,7 @@ defmodule AttestoClient.OAuthHTTP do
   alias AttestoClient.DPoP
   alias AttestoClient.HTTPPolicy
   alias AttestoClient.OAuthHTTP.{Challenge, ClientAuth}
+  alias AttestoClient.Outbound
   alias AttestoClient.PinnedRequest
   alias AttestoClient.ProtocolParams
   alias AttestoClient.Wallet.CredentialJSON
@@ -290,7 +291,9 @@ defmodule AttestoClient.OAuthHTTP do
         |> Keyword.put(:connect_options, safe_connect)
 
       {:ok,
-       opts |> Keyword.take([:timeout, :resolver]) |> Keyword.put(:req_options, safe_options)}
+       opts
+       |> Keyword.take([:timeout, :resolver, :outbound])
+       |> Keyword.put(:req_options, safe_options)}
     else
       _unsafe -> {:error, :unsafe_transport_options}
     end
@@ -341,23 +344,28 @@ defmodule AttestoClient.OAuthHTTP do
   # separate because DPoP `htu` and private_key_jwt audiences name the external
   # URI, not the IP used for the socket.
   defp screen_request(endpoint, opts) when is_binary(endpoint) do
-    if Attesto.URI.https_identifier?(endpoint) do
-      with {:ok, request_opts} <- validate_req_options(opts),
-           {:ok, screen_opts} <- screen_options(opts, request_opts),
-           {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
-           {:ok, prepared} <-
-             PinnedRequest.prepare(target, request_opts, @reserved_headers, [:auth]) do
-        {:ok, target, Keyword.put(opts, :req_options, prepared)}
-      end
-    else
-      {:error, :invalid_endpoint}
+    with :ok <- Outbound.validate(opts),
+         :ok <- request_endpoint(endpoint, opts),
+         {:ok, request_opts} <- validate_req_options(opts),
+         {:ok, screen_opts} <- screen_options(opts, request_opts),
+         {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
+         {:ok, prepared} <-
+           PinnedRequest.prepare(target, request_opts, @reserved_headers, [:auth]) do
+      {:ok, target, Keyword.put(opts, :req_options, prepared)}
     end
   end
 
   defp screen_request(_endpoint, _opts), do: {:error, :invalid_endpoint}
 
+  defp request_endpoint(endpoint, opts) do
+    if Outbound.https_identifier?(endpoint, opts), do: :ok, else: {:error, :invalid_endpoint}
+  end
+
   defp screen_options(opts, request_opts) do
-    screen_opts = [req_options: request_opts]
+    # `:outbound` travels with the resolver to the one screening call, so the
+    # token, PAR and every other endpoint request is checked under the same
+    # exceptions as discovery.
+    screen_opts = [req_options: request_opts, outbound: Keyword.get(opts, :outbound)]
 
     case Keyword.fetch(opts, :resolver) do
       :error ->

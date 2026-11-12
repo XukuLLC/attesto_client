@@ -64,6 +64,7 @@ defmodule AttestoClient.Discovery do
   alias Attesto.OutboundTarget
   alias AttestoClient.Deadline
   alias AttestoClient.HTTPPolicy
+  alias AttestoClient.Outbound
   alias AttestoClient.PinnedRequest
   alias AttestoClient.WWWAuthenticate
 
@@ -78,6 +79,7 @@ defmodule AttestoClient.Discovery do
           | {:metadata_url, String.t()}
           | {:www_authenticate, String.t() | [String.t()]}
           | {:issuer, String.t()}
+          | {:outbound, Outbound.t()}
 
   @typedoc "A protected resource's metadata, the issuer selected from it, and that issuer's metadata."
   @type resolution :: %{resource: map(), issuer: String.t(), authorization_server: map()}
@@ -99,6 +101,7 @@ defmodule AttestoClient.Discovery do
           | :unsafe_transport_options
           | :invalid_timeout
           | :invalid_resolver
+          | :invalid_outbound
           | :timeout
           | {:http_status, pos_integer()}
           | {:transport, term()}
@@ -112,11 +115,14 @@ defmodule AttestoClient.Discovery do
   `:oauth_authorization_server`) and `:req_options` (safely merged into the Req
   transport configuration as described above). `:timeout` is the overall
   discovery deadline in milliseconds, including DNS resolution and request
-  preparation (default: 10 seconds).
+  preparation (default: 10 seconds). `:outbound` names deliberate exceptions
+  to the HTTPS and public-address rules (`AttestoClient.Outbound`); every
+  function in this module that takes options takes it.
   """
   @spec fetch(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch(issuer, opts \\ []) when is_list(opts) do
-    with {:ok, uri, canonical} <- validate_issuer(issuer),
+    with :ok <- validate_issuer_identifier(issuer, opts),
+         {:ok, uri, canonical} <- validate_issuer(issuer, opts),
          {:ok, well_known} <- well_known(opts),
          {:ok, body} <- get_json(metadata_url(uri, well_known), opts) do
       check_issuer(body, canonical)
@@ -208,7 +214,8 @@ defmodule AttestoClient.Discovery do
   """
   @spec fetch_jwks(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch_jwks(jwks_uri, opts \\ []) when is_list(opts) do
-    with {:ok, url} <- validate_https(jwks_uri, :invalid_jwks_uri),
+    with :ok <- Outbound.validate(opts),
+         {:ok, url} <- validate_https(jwks_uri, :invalid_jwks_uri, opts),
          {:ok, body} <- get_json(url, opts) do
       validate_jwks(body)
     end
@@ -227,7 +234,8 @@ defmodule AttestoClient.Discovery do
   @doc """
   Preflight an authorization-server endpoint against the URL and address
   policy. The endpoint must use HTTPS, must not contain userinfo or a fragment,
-  and must not resolve to a private, loopback, or link-local address.
+  and must not resolve to a private, loopback, or link-local address, except
+  as an `:outbound` option allows (`AttestoClient.Outbound`).
 
   This check does not bind a later, separate socket connection to the address
   it inspected, so it is not by itself a complete SSRF defense. Prefer this
@@ -240,39 +248,106 @@ defmodule AttestoClient.Discovery do
   @spec validate_endpoint(term(), keyword()) ::
           :ok
           | {:error,
-             :invalid_endpoint | :blocked_host | :invalid_resolver | :unsafe_transport_options}
+             :invalid_endpoint
+             | :blocked_host
+             | :invalid_resolver
+             | :invalid_outbound
+             | :unsafe_transport_options}
   def validate_endpoint(endpoint, opts \\ [])
 
   def validate_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
-    if Attesto.URI.https_identifier?(endpoint),
-      do: guard_host(endpoint, opts),
-      else: {:error, :invalid_endpoint}
+    with :ok <- Outbound.validate(opts) do
+      if Outbound.https_identifier?(endpoint, opts),
+        do: guard_host(endpoint, opts),
+        else: {:error, :invalid_endpoint}
+    end
   end
 
   def validate_endpoint(_endpoint, _opts), do: {:error, :invalid_endpoint}
 
   @doc false
-  @spec validate_browser_endpoint(term()) :: :ok | {:error, :invalid_endpoint}
-  def validate_browser_endpoint(endpoint) when is_binary(endpoint) do
-    if Attesto.URI.https_identifier?(endpoint), do: :ok, else: {:error, :invalid_endpoint}
+  # `opts` must already have passed `AttestoClient.Outbound.validate/1`.
+  @spec validate_browser_endpoint(term(), keyword()) :: :ok | {:error, :invalid_endpoint}
+  def validate_browser_endpoint(endpoint, opts \\ [])
+
+  def validate_browser_endpoint(endpoint, opts) when is_binary(endpoint) and is_list(opts) do
+    if Outbound.https_identifier?(endpoint, opts), do: :ok, else: {:error, :invalid_endpoint}
   end
 
-  def validate_browser_endpoint(_endpoint), do: {:error, :invalid_endpoint}
+  def validate_browser_endpoint(_endpoint, _opts), do: {:error, :invalid_endpoint}
+
+  @doc """
+  Validate an authorization-server metadata `document` for `issuer`, as
+  `AttestoClient.AuthorizationCode.start/2` does before it uses one.
+
+  `fetch/2` checks that a document was retrieved safely and names the expected
+  issuer. This checks that it describes a server this library can run an
+  authorization-code flow against: the required endpoints are present and
+  HTTPS, the advertised lists are well-formed and include `code` and (when
+  listed) `S256`, and no request endpoint carries a protocol parameter in its
+  own query. It is the same function `start/2` calls, so a document accepted
+  here is not refused there for its content. `start/2` can still refuse it for
+  a reason that depends on the client's options, such as an ID Token signing
+  algorithm the document does not list.
+
+  Options:
+
+    * `:protocol` - `:oidc` (the default) for OpenID Provider metadata
+      (OpenID Connect Discovery §3, §4.3), or `:oauth` for RFC 8414
+      authorization-server metadata, which need not carry `jwks_uri` or the
+      OpenID-only members. The values are the ones `start/2` takes.
+    * `:outbound` - the exceptions `start/2` will be given
+      (`AttestoClient.Outbound`); with `allow_loopback_http: true` a loopback
+      issuer and its loopback `http` endpoints are accepted.
+
+  Returns `{:ok, document}`, or `{:error, reason}` with the reason `start/2`
+  would give: `:invalid_issuer`, `:issuer_mismatch`, `:invalid_metadata`,
+  `:invalid_endpoint`, or an endpoint-query error. An unknown `:protocol` is
+  `{:error, :invalid_protocol}`, and a malformed `:outbound` is
+  `{:error, :invalid_outbound}`.
+  """
+  @spec validate_metadata(term(), term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def validate_metadata(document, issuer, opts \\ [])
+
+  def validate_metadata(document, issuer, opts) when is_list(opts) do
+    with {:ok, protocol} <- metadata_protocol(opts),
+         :ok <- validate_issuer_identifier(issuer, opts),
+         :ok <-
+           AttestoClient.OpenIDMetadata.validate_document(document, issuer, protocol, opts) do
+      {:ok, document}
+    end
+  end
+
+  def validate_metadata(_document, _issuer, _opts), do: {:error, :invalid_options}
+
+  defp metadata_protocol(opts) do
+    case Keyword.get(opts, :protocol, :oidc) do
+      protocol when protocol in [:oidc, :oauth] -> {:ok, protocol}
+      _other -> {:error, :invalid_protocol}
+    end
+  end
 
   @doc false
-  @spec validate_issuer_identifier(term()) :: :ok | {:error, :invalid_issuer}
-  def validate_issuer_identifier(issuer) do
-    case validate_issuer(issuer) do
-      {:ok, _uri, _canonical} -> :ok
-      {:error, :invalid_issuer} = error -> error
+  # The issuer check every entry point runs first. It also settles the
+  # `:outbound` option for the call: a malformed value, or
+  # `allow_loopback_http` with an issuer that is not a loopback host, is
+  # `:invalid_outbound`.
+  @spec validate_issuer_identifier(term(), keyword()) ::
+          :ok | {:error, :invalid_issuer | :invalid_outbound}
+  def validate_issuer_identifier(issuer, opts \\ []) when is_list(opts) do
+    with :ok <- Outbound.validate(opts),
+         {:ok, _uri, _canonical} <- validate_issuer(issuer, opts) do
+      Outbound.check_issuer(issuer, opts)
     end
   end
 
   # RFC 8414 §2: the issuer is an https URL with no query or fragment. Returns
   # the parsed URI and the issuer exactly as supplied, which is what the §3.3
   # document match compares against.
-  defp validate_issuer(issuer) when is_binary(issuer) do
-    with true <- Attesto.URI.https_identifier?(issuer),
+  defp validate_issuer(issuer, opts \\ [])
+
+  defp validate_issuer(issuer, opts) when is_binary(issuer) do
+    with true <- Outbound.https_identifier?(issuer, opts),
          %URI{query: nil} = uri <- URI.parse(issuer) do
       {:ok, uri, issuer}
     else
@@ -280,7 +355,7 @@ defmodule AttestoClient.Discovery do
     end
   end
 
-  defp validate_issuer(_other), do: {:error, :invalid_issuer}
+  defp validate_issuer(_other, _opts), do: {:error, :invalid_issuer}
 
   # RFC 9728 §1.2: an https URL with no fragment. A query component is allowed
   # (the RFC advises against one) and travels into the derived well-known URL.
@@ -300,7 +375,7 @@ defmodule AttestoClient.Discovery do
         {:ok, URI.to_string(%{uri | path: @protected_resource_segment <> issuer_path(uri)})}
 
       {:ok, url} ->
-        validate_https(url, :invalid_metadata_url)
+        validate_https(url, :invalid_metadata_url, [])
     end
   end
 
@@ -394,11 +469,11 @@ defmodule AttestoClient.Discovery do
     end
   end
 
-  defp validate_https(url, error) when is_binary(url) do
-    if Attesto.URI.https_identifier?(url), do: {:ok, url}, else: {:error, error}
+  defp validate_https(url, error, opts) when is_binary(url) do
+    if Outbound.https_identifier?(url, opts), do: {:ok, url}, else: {:error, error}
   end
 
-  defp validate_https(_url, error), do: {:error, error}
+  defp validate_https(_url, error, _opts), do: {:error, error}
 
   # Fail fast on an unknown :well_known rather than silently fetching the wrong
   # document (a typo would otherwise return {:ok, _} for the wrong metadata).
@@ -538,13 +613,20 @@ defmodule AttestoClient.Discovery do
   @doc false
   @spec screen_endpoint(String.t(), keyword()) ::
           {:ok, %{url: String.t(), host: String.t(), authority: String.t()}}
-          | {:error, :blocked_host | :invalid_resolver | :unsafe_transport_options}
+          | {:error,
+             :blocked_host | :invalid_resolver | :invalid_outbound | :unsafe_transport_options}
   def screen_endpoint(url, opts \\ [])
 
+  # The one place this package screens an address. Every request it sends
+  # (metadata, JWKS, token, PAR, revocation, UserInfo and the rest) goes
+  # through here with the caller's `:resolver` and `:outbound`, and none of
+  # them follows a redirect, so there is no later hop to screen.
   def screen_endpoint(url, opts) when is_binary(url) and is_list(opts) do
-    if Attesto.URI.https_identifier?(url),
-      do: screen_uri(url, URI.parse(url), opts),
-      else: {:error, :blocked_host}
+    with :ok <- Outbound.validate(opts) do
+      if Outbound.https_identifier?(url, opts),
+        do: screen_uri(url, URI.parse(url), opts),
+        else: {:error, :blocked_host}
+    end
   end
 
   def screen_endpoint(_url, _opts), do: {:error, :blocked_host}
@@ -559,7 +641,9 @@ defmodule AttestoClient.Discovery do
   end
 
   defp screen_resolved(url, opts) do
-    case OutboundTarget.screen(url, Keyword.take(opts, [:resolver])) do
+    screen_opts = Keyword.take(opts, [:resolver]) ++ Outbound.screen_options(url, opts)
+
+    case OutboundTarget.screen(url, screen_opts) do
       {:ok, target} -> {:ok, target}
       {:error, :invalid_resolver} = error -> error
       {:error, _reason} -> {:error, :blocked_host}

@@ -41,6 +41,9 @@ defmodule AttestoClient.Token do
   `:tx_code` when the offer's grant carried a `tx_code` object, i.e. the end
   user must key in the transaction code the issuer displayed out of band.
 
+  `:outbound` applies to the token request; see `AttestoClient.Outbound`. A
+  malformed value is `{:error, :invalid_outbound}`.
+
   Returns `{:ok, token_set}`; the ID Token, if any, is returned unverified
   since OID4VCI defines no binding claims for it here.
   """
@@ -48,7 +51,8 @@ defmodule AttestoClient.Token do
           {:ok, TokenSet.t()} | {:error, term()}
   def exchange_pre_authorized_code(pre_authorized_code, opts)
       when is_binary(pre_authorized_code) and pre_authorized_code != "" and is_list(opts) do
-    with {:ok, endpoint} <- required_string(opts, :token_endpoint),
+    with :ok <- AttestoClient.Outbound.validate(opts),
+         {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, profile} <- new_profile(opts),
          {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
          :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
@@ -89,10 +93,14 @@ defmodule AttestoClient.Token do
   take the identifier and the ID Token verification keys from a running cache.
 
   `:issuer_aliases`, `:clock_skew_seconds`, `:expiry_leeway_seconds`,
-  `:max_token_age_seconds`, and `:require_auth_time` apply
+  `:max_token_age_seconds`, `:require_auth_time`, and `:trusted_audiences` apply
   to an ID Token returned with the refresh, as in
   `AttestoClient.IDToken.verify/2`. A token set does not retain the aliases
   given to `AttestoClient.AuthorizationCode.start/2`, so pass them again here.
+
+  `:outbound` names deliberate exceptions to the HTTPS and public-address
+  rules for the issuer, its key fetch and the token request
+  (`AttestoClient.Outbound`). A token set does not retain it either.
 
   A prior DPoP token set requires `:dpop` signing material before any network
   request. Persisted `tokens.dpop_jkt` must match that key; a missing or changed
@@ -120,7 +128,7 @@ defmodule AttestoClient.Token do
          {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          {:ok, _endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
-         :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
+         :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer, opts),
          {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, _subject} <- required_string(opts, :subject),
          {:ok, profile} <- refresh_profile(tokens, opts),
@@ -150,14 +158,16 @@ defmodule AttestoClient.Token do
 
   A successful 2xx response is `:ok`, including when the server did not know
   the token. Required options: `:revocation_endpoint`, `:client_id`; optional
-  `:token_type_hint`, `:client_auth`, `:req_options`, and `:timeout`.
+  `:token_type_hint`, `:client_auth`, `:req_options`, `:timeout`, and
+  `:outbound` (see `AttestoClient.Outbound`).
   With `private_key_jwt`, pass `:issuer` from trusted discovery, or an explicit
   registered audience in the assertion options for a legacy server. Omitting
   both retains the deprecated endpoint-audience fallback in 2.x.
   """
   @spec revoke(String.t(), keyword()) :: :ok | {:error, term()}
   def revoke(token, opts) when is_binary(token) and token != "" and is_list(opts) do
-    with {:ok, endpoint} <- required_string(opts, :revocation_endpoint),
+    with :ok <- AttestoClient.Outbound.validate(opts),
+         {:ok, endpoint} <- required_string(opts, :revocation_endpoint),
          {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, hint} <- token_type_hint(opts) do
       form = %{"token" => token} |> maybe_put("token_type_hint", hint)
@@ -213,7 +223,7 @@ defmodule AttestoClient.Token do
   defp profile_binding(profile, opts) do
     with {:ok, client_id} <- required_string(opts, :client_id),
          {:ok, issuer} <- required_string(opts, :issuer),
-         :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer),
+         :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer, opts),
          {:ok, binding} <- AuthorizationProfile.bind(profile, client_id, issuer, opts) do
       {:ok,
        %{profile: profile, client_auth_binding: binding, client_id: client_id, issuer: issuer}}
@@ -302,6 +312,7 @@ defmodule AttestoClient.Token do
           expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
           max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
           require_auth_time: Keyword.get(opts, :require_auth_time),
+          trusted_audiences: Keyword.get(opts, :trusted_audiences),
           client_id: client_id,
           subject: Keyword.get(opts, :subject),
           metadata: Keyword.get(opts, :metadata),

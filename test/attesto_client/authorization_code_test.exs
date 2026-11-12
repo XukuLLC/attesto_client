@@ -937,6 +937,33 @@ defmodule AttestoClient.AuthorizationCodeTest do
     end
   end
 
+  describe "callback/3 additional audiences" do
+    test "an ID Token with an additional audience is refused unless :trusted_audiences lists it" do
+      assert {:ok, %{transaction: transaction} = started} = start_returned()
+      response = %{"state" => started.state, "code" => "code-1"}
+
+      extra = %{
+        "aud" => [transaction.client_id, "https://api.example"],
+        "azp" => transaction.client_id
+      }
+
+      opts = [
+        transaction: transaction,
+        req_options: [plug: token_plug(transaction.nonce, extra)],
+        timeout: 30_000
+      ]
+
+      assert {:error, :untrusted_audience} = callback(:return, response, opts)
+
+      assert {:ok, _result} =
+               callback(
+                 :return,
+                 response,
+                 Keyword.put(opts, :trusted_audiences, ["https://api.example"])
+               )
+    end
+  end
+
   describe "exchange/2" do
     test "sends the authorization-code token request and returns the token set" do
       parent = self()

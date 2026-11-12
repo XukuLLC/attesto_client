@@ -101,7 +101,9 @@ defmodule AttestoClient.WalletAttestation do
   challenge and DPoP nonce supersede older values. `expires_in` is an optional
   positive-integer extension, not a field required by the attestation draft.
 
-  Options include `:timeout` (milliseconds), `:resolver`, and `:req_options`.
+  Options include `:timeout` (milliseconds), `:resolver`, `:req_options`, and
+  `:outbound` (see `AttestoClient.Outbound`; a malformed value is
+  `{:error, :invalid_outbound}`).
   Select the endpoint from trusted server metadata; this call performs no
   issuer discovery and stores no challenge globally.
   """
@@ -110,7 +112,8 @@ defmodule AttestoClient.WalletAttestation do
            %{challenge: String.t(), dpop_nonce: String.t() | nil, expires_in: pos_integer() | nil}}
           | {:error, term()}
   def fetch_challenge(endpoint, opts \\ []) when is_list(opts) do
-    with {:ok, response} <- OAuthHTTP.post_challenge(endpoint, opts),
+    with :ok <- AttestoClient.Outbound.validate(opts),
+         {:ok, response} <- OAuthHTTP.post_challenge(endpoint, opts),
          :ok <- challenge_response(response),
          {:ok, body} <- challenge_json(response.body),
          {:ok, challenge} <- fetched_challenge(body),
