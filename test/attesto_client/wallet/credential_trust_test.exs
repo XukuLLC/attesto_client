@@ -361,6 +361,38 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     end
   end
 
+  test "credential endpoint refuses repeated mdoc envelope and certificate header keys",
+       context do
+    credential = issue("mso_mdoc", context, [context.leaf])
+    raw = Base.url_decode64!(credential, padding: false)
+    {:ok, envelope} = Attesto.StrictCBOR.decode(raw)
+    [protected, unprotected, payload, signature] = envelope["issuerAuth"]
+
+    <<5::3, count::5, entries::binary>> = raw
+
+    repeated_envelope =
+      <<5::3, count + 1::5>> <>
+        entries <>
+        CBOR.encode("issuerAuth") <> CBOR.encode(envelope["issuerAuth"])
+
+    header_entry = CBOR.encode(33) <> CBOR.encode(unprotected[33])
+    repeated_header = <<0xA2>> <> header_entry <> header_entry
+
+    repeated_auth =
+      <<0x84>> <>
+        CBOR.encode(protected) <>
+        repeated_header <>
+        CBOR.encode(payload) <> CBOR.encode(signature)
+
+    repeated_certificate =
+      :binary.replace(raw, CBOR.encode(envelope["issuerAuth"]), repeated_auth)
+
+    for input <- [repeated_envelope, repeated_certificate] do
+      assert {:error, :invalid_certificate} =
+               request("mso_mdoc", Base.url_encode64(input, padding: false), context)
+    end
+  end
+
   defp issue("dc+sd-jwt", context, chain) do
     pem = context.key |> JOSE.JWK.to_pem() |> elem(1)
 

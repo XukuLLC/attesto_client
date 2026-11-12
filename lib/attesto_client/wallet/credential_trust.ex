@@ -1,7 +1,7 @@
 defmodule AttestoClient.Wallet.CredentialTrust do
   @moduledoc false
 
-  alias Attesto.JWS
+  alias Attesto.{JWS, StrictCBOR}
   alias AttestoClient.Wallet.Presentation.CertificateTrust
 
   @formats ~w(dc+sd-jwt vc+sd-jwt mso_mdoc)
@@ -102,8 +102,8 @@ defmodule AttestoClient.Wallet.CredentialTrust do
 
     defp mdoc_chain(credential) do
       with {:ok, bytes} <- mdoc_bytes(credential),
-           {:ok, %{"issuerAuth" => [_protected, unprotected, _payload, _signature]}, ""} <-
-             CBOR.decode(bytes),
+           {:ok, %{"issuerAuth" => [_protected, unprotected, _payload, _signature]}} <-
+             StrictCBOR.decode(bytes, max_bytes: @max_cbor_bytes),
            true <- is_map(unprotected),
            {:ok, chain} <- der_chain(unprotected[33]) do
         {:ok, chain}

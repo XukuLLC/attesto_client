@@ -17,7 +17,7 @@ if Code.ensure_loaded?(CBOR) do
     Unencrypted responses use a null thumbprint.
     """
 
-    alias Attesto.{Cose, JWS}
+    alias Attesto.{Cose, JWS, StrictCBOR}
 
     @doc_status 0
     @version "1.0"
@@ -42,6 +42,10 @@ if Code.ensure_loaded?(CBOR) do
     ES256/P-256 only, per `Attesto.Cose`. `request` supplies `:client_id`,
     `:nonce`, and `:response_uri` for the `OpenID4VPHandover` (a
     `AttestoClient.Wallet.PresentationRequest` struct or an equivalent map).
+
+    Repeated map keys in the credential envelope or embedded issuer-signed
+    items return `:invalid_credential`, including items outside `:claim_paths`
+    (RFC 8949 §5.6). CBOR decoding uses `Attesto.StrictCBOR` and its nesting bound.
     """
     @spec build_device_response(map(), map(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
             {:ok, String.t()} | {:error, error()}
@@ -75,8 +79,8 @@ if Code.ensure_loaded?(CBOR) do
             device_namespaces_tagged
           )
 
-        {:ok, device_auth_cose, ""} =
-          pem |> Cose.sign1_detached(device_authentication_bytes, []) |> CBOR.decode()
+        {:ok, device_auth_cose} =
+          pem |> Cose.sign1_detached(device_authentication_bytes, []) |> StrictCBOR.decode()
 
         document = %{
           "docType" => doc_type,
@@ -100,9 +104,8 @@ if Code.ensure_loaded?(CBOR) do
          when is_binary(credential) and
                 byte_size(credential) <= @max_encoded_issuer_signed_bytes do
       with {:ok, bytes} <- JWS.decode64(credential),
-           {:ok, %{"issuerAuth" => _issuer_auth, "nameSpaces" => _name_spaces} = issuer_signed,
-            ""} <-
-             CBOR.decode(bytes) do
+           {:ok, %{"issuerAuth" => _issuer_auth, "nameSpaces" => _name_spaces} = issuer_signed} <-
+             StrictCBOR.decode(bytes, max_bytes: @max_issuer_signed_bytes) do
         {:ok, issuer_signed}
       else
         _other -> {:error, :invalid_credential}
@@ -154,39 +157,59 @@ if Code.ensure_loaded?(CBOR) do
 
     defp session_transcript(_request, _opts), do: {:error, :invalid_credential}
 
-    defp filter_namespaces(issuer_signed, :all), do: {:ok, issuer_signed}
-
     defp filter_namespaces(%{"nameSpaces" => namespaces} = issuer_signed, paths)
-         when is_list(paths) do
-      kept =
-        Enum.reduce(namespaces, %{}, fn {namespace, items}, acc ->
-          selected = Enum.filter(items, &requested_item?(&1, namespace, paths))
-          if selected == [], do: acc, else: Map.put(acc, namespace, selected)
-        end)
-
-      {:ok, Map.put(issuer_signed, "nameSpaces", kept)}
+         when is_map(namespaces) and (is_list(paths) or paths == :all) do
+      Enum.reduce_while(namespaces, {:ok, %{}}, fn {namespace, items}, {:ok, acc} ->
+        case select_items(items, namespace, paths) do
+          {:ok, []} when paths != :all -> {:cont, {:ok, acc}}
+          {:ok, selected} -> {:cont, {:ok, Map.put(acc, namespace, selected)}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, kept} -> {:ok, Map.put(issuer_signed, "nameSpaces", kept)}
+        error -> error
+      end
     end
 
     defp filter_namespaces(_issuer_signed, _paths), do: {:error, :invalid_credential}
+
+    defp select_items(items, namespace, paths) when is_list(items) do
+      Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+        case requested_item?(item, namespace, paths) do
+          {:ok, true} -> {:cont, {:ok, [item | acc]}}
+          {:ok, false} -> {:cont, {:ok, acc}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, selected} -> {:ok, Enum.reverse(selected)}
+        error -> error
+      end
+    end
+
+    defp select_items(_items, _namespace, _paths), do: {:error, :invalid_credential}
 
     defp requested_item?(
            %CBOR.Tag{tag: 24, value: %CBOR.Tag{tag: :bytes, value: encoded}},
            namespace,
            paths
          ) do
-      case CBOR.decode(encoded) do
-        {:ok, %{"elementIdentifier" => element}, ""} ->
-          Enum.any?(paths, fn
-            [^namespace, ^element | _rest] -> true
-            _ -> false
-          end)
+      case StrictCBOR.decode(encoded, max_bytes: @max_issuer_signed_bytes) do
+        {:ok, %{"elementIdentifier" => element}} ->
+          {:ok,
+           paths == :all or
+             Enum.any?(paths, fn
+               [^namespace, ^element | _rest] -> true
+               _ -> false
+             end)}
 
         _ ->
-          false
+          {:error, :invalid_credential}
       end
     end
 
-    defp requested_item?(_item, _namespace, _paths), do: false
+    defp requested_item?(_item, _namespace, _paths), do: {:error, :invalid_credential}
 
     defp embedded_cbor(value), do: %CBOR.Tag{tag: 24, value: bytes(CBOR.encode(value))}
     defp bytes(value) when is_binary(value), do: %CBOR.Tag{tag: :bytes, value: value}

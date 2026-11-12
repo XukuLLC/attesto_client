@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0] - 2026-11-12
+
+### Changed
+
+- Require Attesto `>= 2.15.0 and < 3.0.0` and update the published dependency
+  and CI core reference to 2.15.0.
+- Delegate X.509 certificate path validation to `Attesto.X509`, retaining
+  `AttestoClient.Wallet.Presentation.CertificateTrust.verify/2` and
+  `decode_x5c/1` as documented compatibility functions. Validation behavior
+  and the existing contract tests are unchanged (RFC 5280 §6).
+- Decode wallet CBOR through `Attesto.StrictCBOR`. Repeated map keys are
+  refused in credential envelopes, COSE headers, presentation responses,
+  and embedded issuer-signed items, including nested maps (RFC 9052 §3;
+  RFC 8949 §5.6). Existing byte limits and error atoms are retained; core's
+  default nesting limit of 32 also applies. Invalid embedded items return
+  `:invalid_credential` even when claim selection would omit them.
+
 ## [2.16.0] - 2026-11-12
 
 Requires Attesto `>= 2.14.0 and < 3.0.0`. Attesto 2.14.0 has the CIDR

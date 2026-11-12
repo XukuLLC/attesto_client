@@ -202,21 +202,25 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.16`.
+a new major version. Pin to `~> 2.17`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto 2.14.0 or later within the
-Attesto 2.x line, and JOSE 1.11.13 or later within the JOSE 1.x line.
+AttestoClient requires Elixir 1.18 or later, Attesto `>= 2.15.0 and < 3.0.0`,
+and JOSE 1.11.13 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later
 compatible releases. Both this package and `attesto` use Elixir's built-in
 `JSON` module, so lowering only this package's declared floor would not create a
 working older-Elixir installation.
 
-Deploy AttestoClient 2.11.0 with Attesto 2.6.0 or later in the 2.x line. The core
-floor supplies the shared strict JWS verifier, DPoP proof builder, URI policy,
-and outbound-address policy used by this release.
+The Attesto floor supplies the shared JWS verifier, DPoP proof builder, URI
+and outbound-address policies, X.509 path validator, and strict CBOR decoder.
+`AttestoClient.Wallet.Presentation.CertificateTrust` retains its public
+functions as delegates to `Attesto.X509`. Wallet CBOR decoding refuses repeated
+map keys, including nested maps, COSE protected headers, and embedded mdoc
+items (RFC 9052 §3; RFC 8949 §5.6), with the existing byte limits and core's
+default nesting limit of 32.
 
 Ed448 verification and OIDC hash claims additionally require JOSE to have a
 working Curve448 and SHAKE256 backend. That may come from supported native OTP

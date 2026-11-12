@@ -1,6 +1,6 @@
 defmodule AttestoClient.Wallet.Presentation.Formats do
   @moduledoc false
-  alias Attesto.JWS
+  alias Attesto.{JWS, StrictCBOR}
   alias AttestoClient.Builder
 
   @sd_formats ~w(dc+sd-jwt vc+sd-jwt)
@@ -237,7 +237,7 @@ defmodule AttestoClient.Wallet.Presentation.Formats do
 
     defp decode_cbor(value) when is_binary(value) and byte_size(value) <= 1_048_576 do
       with {:ok, bytes} <- JWS.decode64(value),
-           {:ok, map, ""} when is_map(map) <- CBOR.decode(bytes),
+           {:ok, map} when is_map(map) <- StrictCBOR.decode(bytes, max_bytes: 1_048_576),
            do: {:ok, map},
            else: (_ -> {:error, :invalid_credential})
     rescue
@@ -254,8 +254,8 @@ defmodule AttestoClient.Wallet.Presentation.Formats do
            _payload,
            _signature
          ]) do
-      case CBOR.decode(protected) do
-        {:ok, %{1 => algorithm}, ""} when is_integer(algorithm) -> {:ok, algorithm}
+      case StrictCBOR.decode(protected, max_bytes: 1_048_576) do
+        {:ok, %{1 => algorithm}} when is_integer(algorithm) -> {:ok, algorithm}
         _ -> {:error, :invalid_credential}
       end
     rescue
