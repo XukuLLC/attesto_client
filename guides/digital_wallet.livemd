@@ -2,8 +2,8 @@
 
 ```elixir
 Mix.install([
-  {:attesto, ">= 2.15.0 and < 3.0.0"},
-  {:attesto_client, "~> 2.10"},
+  {:attesto, ">= 2.19.0 and < 3.0.0"},
+  {:attesto_client, "~> 2.19"},
   {:kino, "~> 0.14"},
   {:eqrcode, "~> 0.2"}
 ])
@@ -31,7 +31,7 @@ leaves the device. That's **selective disclosure**.
 Everything below runs locally on [`attesto`](https://hex.pm/packages/attesto)
 (issuer/verifier core) and [`attesto_client`](https://hex.pm/packages/attesto_client)
 (the wallet) — no HTTP servers or mock transports. The encrypted example
-requires Attesto `>= 2.15.0 and < 3.0.0` and AttestoClient 2.10 or later. See the
+requires Attesto `>= 2.19.0 and < 3.0.0` and AttestoClient 2.19 or later. See the
 [Credential wallet guide](credential-wallet.md) to connect this local exercise
 to real issuance, authorization, trust and consent flows.
 

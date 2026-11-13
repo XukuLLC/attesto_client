@@ -1,6 +1,5 @@
 defmodule AttestoClient.Wallet.PresentationEncryptedTest do
   use ExUnit.Case, async: true
-  @moduletag :requires_core_jwe
   alias Attesto.{JWE, Mdoc, SdJwt, SdJwtVc, VpToken}
   alias AttestoClient.Wallet.{Presentation, PresentationRequest}
 

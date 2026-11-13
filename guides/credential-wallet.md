@@ -10,8 +10,8 @@ that assurance comes from your wallet provider and key-attestation issuer.
 For the encrypted examples, use these dependencies:
 
 ```elixir
-{:attesto, ">= 2.15.0 and < 3.0.0"},
-{:attesto_client, "~> 2.10"}
+{:attesto, ">= 2.19.0 and < 3.0.0"},
+{:attesto_client, "~> 2.19"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
@@ -327,7 +327,7 @@ credentials include the verified `issuer_certificate_chain` and
 `authority_key_identifiers`; failed signature or holder-binding checks never
 produce a held credential. Add `certificate_trust:` for further issuer policy.
 Certificate-identified SD-JWT credentials may omit `iss`. This package
-requires Attesto `>= 2.15.0 and < 3.0.0`. A present issuer must equal the offer's
+requires Attesto `>= 2.19.0 and < 3.0.0`. A present issuer must equal the offer's
 Credential Issuer Identifier. Use `certificate_trust:` to bind certificate
 subjects to the issuer identities allowed by your ecosystem policy.
 
@@ -393,7 +393,7 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 
 When developing both libraries in sibling source checkouts, use
 `ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient
-requires Attesto `>= 2.15.0 and < 3.0.0`, including for unencrypted wallet
+requires Attesto `>= 2.19.0 and < 3.0.0`, including for unencrypted wallet
 operations, so installations use the shared JWS, DPoP, URI, outbound-address,
 X.509, and strict CBOR implementations.
 

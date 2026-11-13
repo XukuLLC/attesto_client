@@ -1,6 +1,5 @@
 defmodule AttestoClient.Wallet.CredentialEncryptionTest do
   use ExUnit.Case, async: true
-  @moduletag :requires_core_jwe
 
   alias AttestoClient.Wallet
   alias AttestoClient.Wallet.CredentialEncryption

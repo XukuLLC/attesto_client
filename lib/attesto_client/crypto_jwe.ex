@@ -1,8 +1,6 @@
 defmodule AttestoClient.CryptoJWE do
   @moduledoc false
 
-  # The dependency floor supplies the bounded JWE implementation in Attesto 2.5.
-  # Retain a controlled diagnostic for manually assembled runtimes that omit it.
   @deprecated "Use Attesto.JWE.encrypt/4"
   @spec encrypt(term(), binary(), map(), keyword()) :: {:ok, binary()} | {:error, atom()}
   def encrypt(key, plaintext, header, opts \\ []) do
@@ -16,10 +14,7 @@ defmodule AttestoClient.CryptoJWE do
   end
 
   defp invoke(operation, arguments) do
-    if Code.ensure_loaded?(Attesto.JWE) and
-         function_exported?(Attesto.JWE, operation, length(arguments)),
-       do: apply(Attesto.JWE, operation, arguments),
-       else: {:error, :unsupported_core_version}
+    apply(Attesto.JWE, operation, arguments)
   rescue
     _error -> {:error, :invalid_jwe}
   catch

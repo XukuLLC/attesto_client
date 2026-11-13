@@ -153,17 +153,15 @@ defmodule AttestoClient.Wallet.PresentationTest do
         expected = hash_alg |> :crypto.hash(sd_input) |> Attesto.JWS.encode64()
         assert sd_hash == expected
 
-        if System.get_env("ATTESTO_PATH") in ~w(1 true) do
-          assert {:ok, %{"identity" => [result]}} =
-                   VpToken.verify(%{"identity" => [presentation]},
-                     nonce: req.nonce,
-                     audience: req.client_id,
-                     issuer_jwks: issuer_jwks_for(issuer_pem),
-                     now: @now
-                   )
+        assert {:ok, %{"identity" => [result]}} =
+                 VpToken.verify(%{"identity" => [presentation]},
+                   nonce: req.nonce,
+                   audience: req.client_id,
+                   issuer_jwks: issuer_jwks_for(issuer_pem),
+                   now: @now
+                 )
 
-          assert result.claims["given_name"] == "Alice"
-        end
+        assert result.claims["given_name"] == "Alice"
       end
     end
 

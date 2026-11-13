@@ -289,7 +289,6 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     end
   end
 
-  @tag :requires_core_jwe
   test "HAIP certificate identity permits omitted issuer while malformed issuer still fails",
        context do
     issued = issue("dc+sd-jwt", context, [context.leaf])
