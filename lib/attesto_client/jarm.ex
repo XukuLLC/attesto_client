@@ -78,8 +78,6 @@ defmodule AttestoClient.JARM do
   """
   @spec verify(String.t(), jwks(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(response_jwt, jwks, opts) when is_binary(response_jwt) and is_list(opts) do
-    now = Verifier.now(opts)
-
     with {:ok, keys} <- Verifier.normalize_jwks(jwks),
          {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
@@ -91,6 +89,7 @@ defmodule AttestoClient.JARM do
            ),
          :ok <- check_issuer(claims, issuer),
          :ok <- ClaimValidation.audience(claims, client_id, :invalid_audience),
+         now = Verifier.now(opts),
          :ok <-
            ClaimValidation.issued_at(claims, now,
              invalid_error: :invalid_iat,

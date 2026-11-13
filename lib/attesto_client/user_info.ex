@@ -62,8 +62,6 @@ defmodule AttestoClient.UserInfo do
   """
   @spec verify(String.t(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(jwt, opts) when is_binary(jwt) and is_list(opts) do
-    now = Verifier.now(opts)
-
     with {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
          :ok <- AttestoClient.Outbound.validate(opts),
@@ -75,6 +73,7 @@ defmodule AttestoClient.UserInfo do
          :ok <- check_issuer(claims, issuer),
          :ok <- ClaimValidation.audience(claims, client_id, :invalid_audience),
          :ok <- check_subject(claims, Keyword.get(opts, :id_token_sub)),
+         now = Verifier.now(opts),
          :ok <-
            ClaimValidation.expiration(claims, now,
              invalid_error: :expired,

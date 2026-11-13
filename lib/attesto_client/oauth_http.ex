@@ -642,9 +642,23 @@ defmodule AttestoClient.OAuthHTTP do
       |> Keyword.put(:nonce, nonce)
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
-    case DPoP.proof(ctx.key, ctx.method, ctx.url, proof_opts) do
+    result =
+      with {:ok, proof_opts} <- proof_clock(proof_opts) do
+        DPoP.proof(ctx.key, ctx.method, ctx.url, proof_opts)
+      end
+
+    case result do
       {:ok, proof} -> {:ok, proof}
       {:error, reason} -> {:error, {:dpop, reason}}
+    end
+  end
+
+  defp proof_clock(opts) do
+    if is_function(Keyword.get(opts, :now), 0) do
+      with {:ok, now} <- AttestoClient.Verifier.read_now(opts),
+           do: {:ok, Keyword.put(opts, :now, now)}
+    else
+      {:ok, opts}
     end
   end
 

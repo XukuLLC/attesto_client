@@ -83,6 +83,15 @@ clients.
 
 ## Plain OAuth, PAR and DPoP
 
+Set `require_response_issuer: true` on `start/2` when every issuer must advertise
+RFC 9207 support. Metadata must contain
+`authorization_response_iss_parameter_supported: true`; otherwise start returns
+`{:error, :response_issuer_not_supported}` before storing state or sending a PAR
+request. The existing transaction field retains the requirement for callback,
+where an absent `iss` is `:missing_response_issuer`. A callback cannot disable
+it. Even with the default `false`, metadata advertising support already requires
+`iss` (RFC 9207 §2.4, §3). Both OAuth and OIDC flows support this option.
+
 Use `protocol: :oauth` for an authorization server that does not provide an
 OIDC login, including OID4VCI issuance. Discovery uses RFC 8414 metadata;
 `openid`, a nonce and an ID Token are not required. The callback returns
@@ -134,6 +143,27 @@ authorization server still verifies attester signatures, certificate trust and
 attestation validity; local consistency checks do not authenticate the provider.
 Generic OAuth and OIDC transactions retain their existing authentication
 choices.
+
+`callback/3` and `Token.refresh/4` accept `require_typ: true` to require an ID
+Token JOSE `typ` of `JWT` or `application/jwt`, ignoring case. Missing or other
+types return `:unexpected_typ`. The default is `false`: `typ` is optional under
+RFC 7519 §5.1. This check alone cannot distinguish all JWT purposes (RFC 8725
+§3.11). `require_auth_time: true` requires a positive integer authentication
+time; zero and negative integers return `:auth_time_required`, including with
+`:max_age`. This tightens that option only, beyond OIDC Core §2's time encoding.
+
+For deterministic time checks, pass `now: unix_seconds` or
+`now: fn -> unix_seconds end` to callback or refresh. The same clock controls
+ID Token expiry, issuance time, not-before, token age, and authentication time.
+The verifier reads a function after key resolution and signature verification,
+so slow key retrieval cannot leave those checks using an earlier clock reading.
+Callback also uses it for the transaction's Unix-millisecond deadline, reading
+it after the initial key lookup and before spending the code. DPoP proofs read
+it when they are created. Store TTLs, cache lifetimes, and HTTP/coordinator
+timeouts continue to use elapsed time; an override cannot restore expired state
+already removed by a store. A malformed clock is `:invalid_time`; a malformed
+`require_typ` is `:invalid_require_typ`. Both are checked before callback takes
+state or refresh starts. A function must return integer seconds each time.
 
 HAIP authorization requests require a nonempty credential-type scope. The
 application must choose a scope mapped by the issuer to the requested

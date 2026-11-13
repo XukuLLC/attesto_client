@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.0] - 2026-11-12
+
+### Changed
+
+- **Breaking:** ID Token, signed UserInfo, and signed introspection verification
+  read the clock after key retrieval and signature verification. Tokens that
+  expire during a slow key fetch are now refused, including an ID Token that
+  triggers an issuer-cache refresh (RFC 7519 §4.1.4). JARM and resource-server
+  verification also read the clock immediately before their time checks.
+- **Breaking for `require_auth_time: true` only:** zero or negative integer
+  `auth_time` returns `:auth_time_required`, including when `:max_age` is set.
+  Other invalid values and future times remain refused. This is a local
+  requirement for the option, not a restriction imposed by OIDC Core §2.
+- ID Token `typ` accepts `application/jwt` as well as `JWT`, case-insensitively,
+  using Attesto's media-type comparison (RFC 7515 §4.1.9). Other JWT types
+  remain refused.
+- **Breaking:** a malformed explicit `:now` on ID Token verification returns
+  `:invalid_time` instead of silently using the system clock. Its existing
+  `DateTime` form remains supported. A non-boolean `:require_auth_time` is also
+  refused when `:max_age` is supplied, as it already was without `:max_age`.
+- Resolve the development dependency lock to published Attesto 2.17.0.
+- **Breaking:** concurrent refresh callers with different ID Token verification
+  options re-verify the shared token under their own options instead of
+  inheriting the first caller's checks. The refresh request still runs once
+  (OIDC Core §3.1.3.7; RFC 7519 §4.1.4).
+
+### Added
+
+- `AuthorizationCode.callback/3` and `Token.refresh/4` accept `:now` as integer
+  Unix seconds or a zero-arity function returning them. ID Token verification
+  accepts the function too and reads it after signature verification. Callback
+  transaction deadlines and DPoP proof times use the supplied clock; store TTLs
+  and network deadlines still measure elapsed time. Invalid options and clock
+  results are refused. These are clock-injection APIs, not new protocol rules.
+- `AuthorizationCode.start/2` accepts `require_response_issuer: true`. It
+  requires metadata to advertise `authorization_response_iss_parameter_supported:
+  true` before storing a transaction or sending authorization, otherwise
+  returning `:response_issuer_not_supported`. The retained requirement refuses
+  callbacks without `iss` as `:missing_response_issuer` (RFC 9207 §2.4, §3).
+  The default is `false`; advertised support already requires `iss` without
+  this option. A malformed option is `:invalid_require_response_issuer`.
+- `IDToken.verify/2`, `AuthorizationCode.callback/3`, and `Token.refresh/4`
+  accept `require_typ: true` to refuse an absent JOSE `typ` as `:unexpected_typ`.
+  The option defaults to `false`; a malformed value is `:invalid_require_typ`.
+  RFC 7519 §5.1 makes `typ` optional. Requiring generic JWT typing does not
+  distinguish every JWT purpose (RFC 8725 §3.11).
+
 ## [2.17.0] - 2026-11-12
 
 ### Changed

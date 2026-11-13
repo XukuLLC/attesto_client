@@ -1,6 +1,11 @@
 defmodule AttestoClient.InputValidation do
   @moduledoc false
 
+  @spec boolean_option(keyword(), atom(), term()) :: :ok | {:error, term()}
+  def boolean_option(opts, key, error) do
+    if is_boolean(Keyword.get(opts, key, false)), do: :ok, else: {:error, error}
+  end
+
   @spec required_string(keyword() | map(), atom() | String.t(), term(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def required_string(container, key, error, opts \\ []) do

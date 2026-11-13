@@ -17,6 +17,42 @@ defmodule AttestoClient.Verifier do
   @spec now(keyword()) :: non_neg_integer()
   def now(opts), do: NumericDate.now(opts, default: :system, invalid_override: :fallback)
 
+  # Validate without reading a caller's clock: key resolution may block.
+  @spec validate_now_option(keyword(), keyword()) :: :ok | {:error, :invalid_time}
+  def validate_now_option(opts, policy \\ []) do
+    case Keyword.fetch(opts, :now) do
+      :error ->
+        :ok
+
+      {:ok, value} when is_integer(value) or is_function(value, 0) ->
+        :ok
+
+      {:ok, %DateTime{}} ->
+        if Keyword.get(policy, :allow_datetime, false), do: :ok, else: {:error, :invalid_time}
+
+      _invalid ->
+        {:error, :invalid_time}
+    end
+  end
+
+  @spec read_now(keyword()) :: {:ok, integer()} | {:error, :invalid_time}
+  def read_now(opts) do
+    case Keyword.get(opts, :now) do
+      clock when is_function(clock, 0) ->
+        case clock.() do
+          value when is_integer(value) -> {:ok, value}
+          _invalid -> {:error, :invalid_time}
+        end
+
+      _value ->
+        {:ok, NumericDate.now(opts, default: :system)}
+    end
+  rescue
+    _error -> {:error, :invalid_time}
+  catch
+    _kind, _reason -> {:error, :invalid_time}
+  end
+
   @spec accepted_algs(keyword(), [SigningAlg.alg()]) ::
           {:ok, [SigningAlg.alg()]} | {:error, :unsupported_alg}
   def accepted_algs(opts, default \\ SigningAlg.allowed()) do

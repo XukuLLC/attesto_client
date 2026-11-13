@@ -36,6 +36,7 @@ defmodule AttestoClient.AuthorizationCode do
   alias AttestoClient.PKCE
   alias AttestoClient.ProtocolParams
   alias AttestoClient.TokenSet
+  alias AttestoClient.Verifier
 
   @default_transaction_ttl_ms 10 * 60 * 1_000
   @max_callback_bytes 1_000_000
@@ -123,6 +124,14 @@ defmodule AttestoClient.AuthorizationCode do
   Generic flows preserve existing authentication choices, require `iss` when
   metadata advertises support, and always reject a returned issuer mismatch.
 
+  `require_response_issuer: true` additionally requires metadata to advertise
+  `authorization_response_iss_parameter_supported: true` before any transaction
+  is stored or authorization request is sent (RFC 9207 §2.4, §3). Otherwise
+  `start/2` returns `{:error, :response_issuer_not_supported}`. This boolean
+  defaults to `false`; an invalid value is `:invalid_require_response_issuer`.
+  The requirement is retained in the transaction: a callback without `iss`
+  returns `:missing_response_issuer`, and callback options cannot disable it.
+
   ## Keeping the transaction yourself
 
   Pass `:return` in place of a store and nothing is stored: the result carries
@@ -155,6 +164,12 @@ defmodule AttestoClient.AuthorizationCode do
     default_ttl_ms = @default_transaction_ttl_ms
 
     with {:ok, opts} <- Issuer.expand_option(opts),
+         :ok <-
+           AttestoClient.InputValidation.boolean_option(
+             opts,
+             :require_response_issuer,
+             :invalid_require_response_issuer
+           ),
          {:ok, protocol} <- protocol(opts),
          {:ok, profile} <- AuthorizationProfile.select(opts),
          :ok <- profile_par_option(opts, profile != :generic),
@@ -174,6 +189,7 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, ttl_ms} <- positive_integer(opts, :transaction_ttl_ms, default_ttl_ms),
          {:ok, requested_id_token_alg} <- protocol_id_token_alg(opts, protocol, profile),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
+         :ok <- require_response_issuer_support(metadata, opts),
          :ok <- AuthorizationProfile.metadata(client_auth_binding, metadata),
          {:ok, id_token_alg} <- resolved_id_token_alg(metadata, requested_id_token_alg),
          :ok <- protocol_supports_alg(metadata, id_token_alg, protocol),
@@ -192,7 +208,8 @@ defmodule AttestoClient.AuthorizationCode do
                max_age: max_age,
                protocol: protocol,
                dpop_jkt: dpop_jkt,
-               require_response_issuer: profile != :generic,
+               require_response_issuer:
+                 profile != :generic or Keyword.get(opts, :require_response_issuer, false),
                profile: profile,
                client_auth_binding: client_auth_binding,
                resources: resources,
@@ -265,7 +282,18 @@ defmodule AttestoClient.AuthorizationCode do
   is consumed and before token exchange.
 
   `:max_token_age_seconds` and `require_auth_time: true` tighten the ID Token
-  checks, as in `AttestoClient.IDToken.verify/2`.
+  checks, as in `AttestoClient.IDToken.verify/2`. The latter treats non-positive
+  integer `auth_time` as missing. `require_typ: true` requires a JOSE `typ` of
+  `JWT` or `application/jwt`, case-insensitively; it defaults to `false`.
+
+  `:now` accepts integer Unix seconds or a zero-arity function returning them.
+  It applies to the transaction deadline, DPoP proofs, and all ID Token time
+  checks. ID Token verification reads the function after signature verification,
+  including any key refresh. A function is also read after the initial key
+  lookup to check the transaction deadline before spending the code. Store TTLs
+  and network timeouts still use elapsed time. Invalid `:now` or `:require_typ`
+  options fail before taking state, with `:invalid_time` or
+  `:invalid_require_typ`; a non-integer function result is `:invalid_time`.
 
   `:trusted_audiences` lists the audiences, other than this client, that the
   ID Token's `aud` may name, as in `AttestoClient.IDToken.verify/2`. It is
@@ -299,13 +327,15 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
-    with {:ok, opts} <- Issuer.expand_option(opts),
+    with :ok <- Verifier.validate_now_option(opts),
+         :ok <- IDToken.validate_require_typ(opts),
+         {:ok, opts} <- Issuer.expand_option(opts),
          # Checked before the transaction is taken, so a malformed option does
          # not spend it.
          :ok <- Outbound.validate(opts),
          {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state, opts),
-         :ok <- check_transaction_deadline(transaction),
+         :ok <- check_initial_transaction_deadline(transaction, opts),
          :ok <- Outbound.check_issuer(transaction.issuer, opts),
          :ok <- check_issuer_cache(transaction, opts),
          :ok <- check_browser_binding(transaction, opts),
@@ -450,18 +480,35 @@ defmodule AttestoClient.AuthorizationCode do
   # A store enforces the lifetime itself; this is the same deadline carried on
   # the transaction, so one kept by the caller expires too. A transaction
   # stored by an earlier version has no deadline of its own.
-  defp check_transaction_deadline(transaction) do
+  defp check_initial_transaction_deadline(transaction, opts) do
+    if is_function(Keyword.get(opts, :now), 0),
+      do: :ok,
+      else: check_transaction_deadline(transaction, opts)
+  end
+
+  defp check_transaction_deadline(transaction, opts) do
     case Map.get(transaction, :expires_at) do
       nil ->
         :ok
 
       expires_at when is_integer(expires_at) ->
-        if System.system_time(:millisecond) < expires_at,
-          do: :ok,
-          else: {:error, {:invalid_state, :expired}}
+        with {:ok, now} <- transaction_now(opts) do
+          transaction_not_expired(now, expires_at)
+        end
 
       _invalid ->
         {:error, :invalid_transaction}
+    end
+  end
+
+  defp transaction_not_expired(now, expires_at) when now < expires_at, do: :ok
+  defp transaction_not_expired(_now, _expires_at), do: {:error, {:invalid_state, :expired}}
+
+  defp transaction_now(opts) do
+    if Keyword.has_key?(opts, :now) do
+      with {:ok, now} <- Verifier.read_now(opts), do: {:ok, now * 1_000}
+    else
+      {:ok, System.system_time(:millisecond)}
     end
   end
 
@@ -567,6 +614,7 @@ defmodule AttestoClient.AuthorizationCode do
     }
 
     with {:ok, jwks} <- verification_keys(transaction, opts),
+         :ok <- check_transaction_deadline(transaction, opts),
          {:ok, tokens} <- request_tokens(grant, code, dpop_jkt, resources, opts),
          {:ok, tokens} <- bind_token_profile(tokens, transaction),
          {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code, opts) do
@@ -755,6 +803,13 @@ defmodule AttestoClient.AuthorizationCode do
 
   defp dpop_thumbprint(opts), do: TokenSet.dpop_thumbprint(opts)
 
+  defp require_response_issuer_support(metadata, opts) do
+    if Keyword.get(opts, :require_response_issuer, false) and
+         metadata["authorization_response_iss_parameter_supported"] != true,
+       do: {:error, :response_issuer_not_supported},
+       else: :ok
+  end
+
   defp check_dpop_binding(%AuthorizationTransaction{dpop_jkt: nil}, _presented), do: :ok
 
   defp check_dpop_binding(transaction, presented) when is_binary(presented) do
@@ -778,23 +833,25 @@ defmodule AttestoClient.AuthorizationCode do
   # clock tolerances are the caller's at callback time. A transaction stored by
   # an earlier version has no `:issuer_aliases`.
   defp verify_id_token(id_token, tokens, transaction, jwks, code, opts) do
-    verify_opts = [
-      issuer: Issuer.option(opts, transaction.issuer),
-      issuer_aliases: Map.get(transaction, :issuer_aliases, []),
-      clock_skew_seconds: Keyword.get(opts, :clock_skew_seconds),
-      expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
-      max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
-      require_auth_time: Keyword.get(opts, :require_auth_time, false),
-      trusted_audiences: Keyword.get(opts, :trusted_audiences),
-      client_id: transaction.client_id,
-      nonce: transaction.nonce,
-      access_token: tokens.access_token,
-      code: code,
-      require_c_hash: false,
-      max_age: transaction.max_age,
-      accepted_algs: [transaction.id_token_alg],
-      enforce_fapi_alg_policy: transaction_profile(transaction) == :fapi
-    ]
+    verify_opts =
+      [
+        issuer: Issuer.option(opts, transaction.issuer),
+        issuer_aliases: Map.get(transaction, :issuer_aliases, []),
+        clock_skew_seconds: Keyword.get(opts, :clock_skew_seconds),
+        expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
+        max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
+        require_auth_time: Keyword.get(opts, :require_auth_time, false),
+        require_typ: Keyword.get(opts, :require_typ, false),
+        trusted_audiences: Keyword.get(opts, :trusted_audiences),
+        client_id: transaction.client_id,
+        nonce: transaction.nonce,
+        access_token: tokens.access_token,
+        code: code,
+        require_c_hash: false,
+        max_age: transaction.max_age,
+        accepted_algs: [transaction.id_token_alg],
+        enforce_fapi_alg_policy: transaction_profile(transaction) == :fapi
+      ] ++ Keyword.take(opts, [:now])
 
     # With an issuer cache the keys come from it, so an unknown `kid` can
     # refresh them; otherwise the keys resolved before the exchange are used.

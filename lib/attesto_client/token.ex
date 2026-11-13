@@ -22,8 +22,20 @@ defmodule AttestoClient.Token do
   alias AttestoClient.RefreshCoordinator
   alias AttestoClient.RefreshResult
   alias AttestoClient.TokenSet
+  alias AttestoClient.Verifier
 
   @pre_authorized_code_grant_type "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+  @verification_options [
+    :now,
+    :require_typ,
+    :require_auth_time,
+    :issuer_aliases,
+    :trusted_audiences,
+    :subject,
+    :clock_skew_seconds,
+    :expiry_leeway_seconds,
+    :max_token_age_seconds
+  ]
 
   @doc """
   Exchange an OID4VCI pre-authorized code for an access token
@@ -93,10 +105,22 @@ defmodule AttestoClient.Token do
   take the identifier and the ID Token verification keys from a running cache.
 
   `:issuer_aliases`, `:clock_skew_seconds`, `:expiry_leeway_seconds`,
-  `:max_token_age_seconds`, `:require_auth_time`, and `:trusted_audiences` apply
+  `:max_token_age_seconds`, `:require_auth_time`, `:require_typ`, and `:trusted_audiences` apply
   to an ID Token returned with the refresh, as in
   `AttestoClient.IDToken.verify/2`. A token set does not retain the aliases
   given to `AttestoClient.AuthorizationCode.start/2`, so pass them again here.
+
+  `require_auth_time: true` treats non-positive integer `auth_time` as missing.
+  `require_typ: true` requires `JWT` or `application/jwt`, case-insensitively,
+  and defaults to `false`. `:now` accepts integer Unix seconds or a zero-arity
+  function returning them. It supplies every ID Token time check, read after
+  key resolution and signature verification, and each DPoP proof. Invalid
+  options fail before refresh with `:invalid_time` or `:invalid_require_typ`;
+  an invalid clock result returns `:invalid_time`. Network timeouts and
+  coordinator deadlines still use elapsed time.
+  Concurrent callers sharing a refresh result must still meet their own
+  verification options; a caller with different options re-verifies the ID
+  Token without repeating the refresh request.
 
   `:outbound` names deliberate exceptions to the HTTPS and public-address
   rules for the issuer, its key fetch and the token request
@@ -124,7 +148,9 @@ defmodule AttestoClient.Token do
           {:ok, RefreshResult.t()} | {:error, term()}
   def refresh(coordinator, key, %TokenSet{refresh_token: refresh_token} = tokens, opts)
       when is_binary(refresh_token) and refresh_token != "" and is_list(opts) do
-    with {:ok, opts} <- Issuer.expand_option(opts),
+    with :ok <- Verifier.validate_now_option(opts),
+         :ok <- IDToken.validate_require_typ(opts),
+         {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          {:ok, _endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
@@ -141,17 +167,41 @@ defmodule AttestoClient.Token do
       RefreshCoordinator.run(
         coordinator,
         key,
-        fn -> do_refresh(tokens, dpop_jkt, profile, opts) end,
+        fn ->
+          {:verified_refresh, do_refresh(tokens, dpop_jkt, profile, opts),
+           verification_options(opts)}
+        end,
         timeout_ms
       )
-      |> check_refresh_result_binding(dpop_jkt)
-      |> check_refresh_profile(profile)
-      |> check_refresh_id_token_alg(id_token_alg)
+      |> adopt_refresh(dpop_jkt, profile, id_token_alg, opts)
     end
   end
 
   def refresh(_coordinator, _key, %TokenSet{}, _opts), do: {:error, :missing_refresh_token}
   def refresh(_coordinator, _key, _tokens, _opts), do: {:error, :invalid_token_set}
+
+  defp adopt_refresh({:verified_refresh, result, verified_opts}, dpop_jkt, profile, alg, opts) do
+    with {:ok, result} <-
+           result
+           |> check_refresh_result_binding(dpop_jkt)
+           |> check_refresh_profile(profile)
+           |> check_refresh_id_token_alg(alg) do
+      reverify_shared(result, verified_opts, opts)
+    end
+  end
+
+  defp adopt_refresh(error, _dpop_jkt, _profile, _alg, _opts), do: error
+
+  defp reverify_shared(result, verified_opts, opts) do
+    if verified_opts == verification_options(opts) do
+      {:ok, result}
+    else
+      with {:ok, claims} <- verify_refresh_id_token(result.tokens, opts),
+           do: {:ok, %{result | id_token_claims: claims}}
+    end
+  end
+
+  defp verification_options(opts), do: opts |> Keyword.take(@verification_options) |> Enum.sort()
 
   @doc """
   Revoke a token according to RFC 7009.
@@ -312,6 +362,7 @@ defmodule AttestoClient.Token do
           expiry_leeway_seconds: Keyword.get(opts, :expiry_leeway_seconds),
           max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
           require_auth_time: Keyword.get(opts, :require_auth_time),
+          require_typ: Keyword.get(opts, :require_typ, false),
           trusted_audiences: Keyword.get(opts, :trusted_audiences),
           client_id: client_id,
           subject: Keyword.get(opts, :subject),
@@ -323,6 +374,17 @@ defmodule AttestoClient.Token do
           req_options: Keyword.get(opts, :req_options, [])
         ]
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+        |> Keyword.merge(
+          Keyword.take(opts, [
+            :now,
+            :jwks_uri,
+            :well_known,
+            :resolver,
+            :outbound,
+            :timeout,
+            :max_response_bytes
+          ])
+        )
 
       IDToken.verify(id_token, verify_opts)
     end

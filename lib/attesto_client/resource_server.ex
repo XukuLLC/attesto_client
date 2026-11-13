@@ -203,8 +203,6 @@ defmodule AttestoClient.ResourceServer do
   # The keys come from the snapshot; the token policy is the one this module
   # validated at start, carried on the snapshot as `private`.
   defp verify_snapshot(%{private: policy} = snapshot, access_token, opts) do
-    now = now(opts)
-
     with {:ok, algs} <- Verifier.accepted_algs(accepted_algs: policy.accepted_algs),
          {:ok, claims, header, _verified_jwk} <-
            Verifier.verify_signature(access_token, snapshot.keys, algs),
@@ -212,6 +210,7 @@ defmodule AttestoClient.ResourceServer do
          :ok <- check_issuer(claims, snapshot.issuer),
          :ok <- ClaimValidation.audience(claims, policy.audiences, :invalid_audience),
          :ok <- check_claims(claims),
+         now = now(opts),
          :ok <-
            ClaimValidation.expiration(claims, now,
              missing_error: :expired,

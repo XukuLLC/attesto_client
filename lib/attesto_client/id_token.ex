@@ -11,8 +11,9 @@ defmodule AttestoClient.IDToken do
 
     * signature verifies against the issuer JWKS, selected by `kid`, with
       Attesto's supported asymmetric algorithms.
-    * JOSE `typ`, when present, must be `"JWT"`; an access-token type such as
-      `"at+jwt"` is rejected.
+    * JOSE `typ`, when present, must be `"JWT"` or `"application/jwt"`,
+      case-insensitively; an access-token type such as `"at+jwt"` is rejected.
+      `require_typ: true` also rejects an absent `typ` with `:unexpected_typ`.
     * `iss` equals `:issuer`, or one of `:issuer_aliases` when the caller
       opted into that deviation (see "Issuer aliases").
     * `aud` equals, or is an all-string array containing, `:client_id`. Any
@@ -27,7 +28,9 @@ defmodule AttestoClient.IDToken do
       supplied `:max_age` requires `auth_time` and enforces the age.
       `require_auth_time: true` requires the claim even without `:max_age`
       (OIDC Core §3.1.3.7 item 13), for a client that registered
-      `require_auth_time` or otherwise depends on the claim.
+      `require_auth_time` or otherwise depends on the claim. Under this option,
+      a non-positive integer counts as missing (`:auth_time_required`), even
+      with `:max_age`. This is a local policy, not an OIDC NumericDate rule.
     * a supplied `:max_token_age_seconds` rejects a token whose `iat` is
       older than that many seconds, plus `:clock_skew_seconds`
       (§3.1.3.7 item 10), with `{:error, :token_too_old}`. It is the option
@@ -84,6 +87,15 @@ defmodule AttestoClient.IDToken do
   to `300`. `AttestoClient.ResourceServer` takes the same two options with the
   same meanings.
 
+  `:now` accepts Unix seconds, a zero-arity function returning integer Unix
+  seconds, or a `DateTime` (retained for compatibility). The live clock or
+  function is read after key resolution and signature verification, immediately
+  before the time checks. Invalid options or function results return
+  `{:error, :invalid_time}`. `:require_typ` must be a boolean; other values
+  return `{:error, :invalid_require_typ}`. It defaults to `false` because OIDC
+  does not require `typ` (RFC 7519 §5.1). Requiring generic JWT typing does not
+  distinguish all JWT purposes (RFC 8725 §3.11).
+
   ## Unsigned ID Tokens (`alg: "none"`)
 
   By default an unsigned ID Token is rejected. OIDC Core §3.1.3.7 permits a
@@ -115,6 +127,7 @@ defmodule AttestoClient.IDToken do
           | {:subject, String.t()}
           | {:max_age, non_neg_integer()}
           | {:require_auth_time, boolean()}
+          | {:require_typ, boolean()}
           | {:max_token_age_seconds, non_neg_integer()}
           | {:issuer_aliases, [String.t()]}
           | {:trusted_audiences, [String.t()]}
@@ -129,7 +142,7 @@ defmodule AttestoClient.IDToken do
           | {:accepted_algs, [SigningAlg.alg()]}
           | {:enforce_fapi_alg_policy, boolean()}
           | {:allow_unsigned, boolean()}
-          | {:now, integer() | DateTime.t()}
+          | {:now, integer() | DateTime.t() | (-> integer())}
           | {:req_options, keyword()}
           | {:well_known, AttestoClient.Discovery.well_known()}
 
@@ -152,6 +165,8 @@ defmodule AttestoClient.IDToken do
           | :invalid_expiry_leeway_seconds
           | :invalid_max_token_age_seconds
           | :invalid_require_auth_time
+          | :invalid_require_typ
+          | :invalid_time
           | :token_too_old
           | :invalid_audience
           | :invalid_trusted_audiences
@@ -204,9 +219,9 @@ defmodule AttestoClient.IDToken do
   """
   @spec verify(String.t(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(id_token, opts) when is_binary(id_token) and is_list(opts) do
-    now = Verifier.now(opts)
-
-    with {:ok, opts} <- Issuer.expand_option(opts),
+    with :ok <- Verifier.validate_now_option(opts, allow_datetime: true),
+         :ok <- validate_require_typ(opts),
+         {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
          :ok <- AttestoClient.Outbound.validate(opts),
@@ -218,12 +233,13 @@ defmodule AttestoClient.IDToken do
          {:ok, leeway} <-
            tolerance(opts, :expiry_leeway_seconds, 0, :invalid_expiry_leeway_seconds),
          {:ok, claims, header, verified_jwk} <- verify_or_decode(id_token, opts, issuer),
-         :ok <- check_header_typ(header),
+         :ok <- check_header_typ(header, Keyword.get(opts, :require_typ, false)),
          :ok <- check_token_purpose(claims),
          :ok <- check_issuer(claims, [issuer | aliases]),
          :ok <- check_audience_and_azp(claims, client_id, trusted_audiences),
          :ok <- check_required_claims(claims),
          :ok <- check_subject(claims, Keyword.get(opts, :subject)),
+         {:ok, now} <- Verifier.read_now(opts),
          :ok <-
            ClaimValidation.expiration(claims, now,
              missing_error: :missing_exp,
@@ -316,14 +332,19 @@ defmodule AttestoClient.IDToken do
     end
   end
 
-  defp check_header_typ(%{"typ" => typ}) when is_binary(typ) do
-    if String.downcase(typ) == String.downcase(@id_token_typ),
+  @doc false
+  @spec validate_require_typ(keyword()) :: :ok | {:error, :invalid_require_typ}
+  def validate_require_typ(opts),
+    do: AttestoClient.InputValidation.boolean_option(opts, :require_typ, :invalid_require_typ)
+
+  defp check_header_typ(%{"typ" => typ}, _required) do
+    if Attesto.Claims.typ_matches?(typ, [@id_token_typ], normalization: :application_subtype),
       do: :ok,
       else: {:error, :unexpected_typ}
   end
 
-  defp check_header_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
-  defp check_header_typ(_header), do: :ok
+  defp check_header_typ(_header, true), do: {:error, :unexpected_typ}
+  defp check_header_typ(_header, false), do: :ok
 
   defp check_token_purpose(claims) do
     cond do
@@ -430,6 +451,24 @@ defmodule AttestoClient.IDToken do
   end
 
   defp check_max_age(claims, opts, now, skew) do
+    with :ok <-
+           AttestoClient.InputValidation.boolean_option(
+             opts,
+             :require_auth_time,
+             :invalid_require_auth_time
+           ),
+         :ok <- require_positive_auth_time(claims, Keyword.get(opts, :require_auth_time, false)) do
+      check_auth_time(claims, opts, now, skew)
+    end
+  end
+
+  defp require_positive_auth_time(%{"auth_time" => value}, true)
+       when is_integer(value) and value <= 0,
+       do: {:error, :auth_time_required}
+
+  defp require_positive_auth_time(_claims, _required), do: :ok
+
+  defp check_auth_time(claims, opts, now, skew) do
     case Keyword.get(opts, :max_age) do
       nil ->
         check_unbounded_auth_time(claims, Keyword.get(opts, :require_auth_time, false), now, skew)
@@ -461,9 +500,6 @@ defmodule AttestoClient.IDToken do
 
   defp check_unbounded_auth_time(claims, false, now, skew),
     do: check_optional_auth_time(claims, now, skew)
-
-  defp check_unbounded_auth_time(_claims, _invalid, _now, _skew),
-    do: {:error, :invalid_require_auth_time}
 
   defp check_optional_auth_time(%{"auth_time" => _auth_time} = claims, now, skew) do
     case fetch_auth_time(claims, now, skew) do
