@@ -1004,35 +1004,9 @@ defmodule AttestoClient.AuthorizationCode do
 
   defp redirect_uri(opts) do
     with {:ok, value} <- required_string(opts, :redirect_uri) do
-      cond do
-        Attesto.URI.https_identifier?(value) ->
-          {:ok, value}
-
-        Attesto.URI.https_identifier?(value, allow_http: true) ->
-          validate_http_redirect(value, URI.parse(value).host)
-
-        true ->
-          {:error, :invalid_redirect_uri}
-      end
-    end
-  end
-
-  defp validate_http_redirect(value, host) do
-    if loopback_host?(host), do: {:ok, value}, else: {:error, :invalid_redirect_uri}
-  end
-
-  defp loopback_host?(host) do
-    case String.downcase(host) do
-      "localhost" -> true
-      "::1" -> true
-      host -> ipv4_loopback?(host)
-    end
-  end
-
-  defp ipv4_loopback?(host) do
-    case :inet.parse_ipv4_address(String.to_charlist(host)) do
-      {:ok, {127, _, _, _}} -> true
-      _other -> false
+      if Attesto.URI.https_identifier?(value, allow_loopback_http: true),
+        do: {:ok, value},
+        else: {:error, :invalid_redirect_uri}
     end
   end
 
@@ -1123,14 +1097,7 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   defp put_query(endpoint, params) do
-    uri = URI.parse(endpoint)
-    existing = if uri.query, do: URI.decode_query(uri.query), else: %{}
-
-    pairs =
-      (Map.to_list(Map.drop(existing, Map.keys(params))) ++ query_pairs(params))
-      |> Enum.sort_by(&elem(&1, 0))
-
-    %{uri | query: URI.encode_query(pairs)} |> URI.to_string()
+    Attesto.URI.put_query_params(endpoint, params |> query_pairs() |> Enum.sort_by(&elem(&1, 0)))
   end
 
   # A multi-valued parameter (RFC 8707 `resource`) is repeated once per value;

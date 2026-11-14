@@ -10,8 +10,8 @@ that assurance comes from your wallet provider and key-attestation issuer.
 For the encrypted examples, use these dependencies:
 
 ```elixir
-{:attesto, ">= 2.19.0 and < 3.0.0"},
-{:attesto_client, "~> 2.19"}
+{:attesto, ">= 2.20.0 and < 3.0.0"},
+{:attesto_client, "~> 2.20"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
@@ -327,7 +327,7 @@ credentials include the verified `issuer_certificate_chain` and
 `authority_key_identifiers`; failed signature or holder-binding checks never
 produce a held credential. Add `certificate_trust:` for further issuer policy.
 Certificate-identified SD-JWT credentials may omit `iss`. This package
-requires Attesto `>= 2.19.0 and < 3.0.0`. A present issuer must equal the offer's
+requires Attesto `>= 2.20.0 and < 3.0.0`. A present issuer must equal the offer's
 Credential Issuer Identifier. Use `certificate_trust:` to bind certificate
 subjects to the issuer identities allowed by your ecosystem policy.
 
@@ -383,9 +383,11 @@ them; use newly received values on later requests. It does not discover the
 endpoint or establish trust in an authorization server.
 
 Wallet certification covers a versioned, runnable implementation in the
-selected OID4VCI/HAIP or OID4VP/HAIP profiles. The existing Attesto issuer and
-verifier certifications and AttestoClient's OIDC RP certification do not
-certify this wallet role. See the OpenID Foundation's
+selected OID4VCI/HAIP or OID4VP/HAIP profiles. AttestoClient is certified in
+both wallet roles, OpenID4VCI 1.0 + HAIP 1.0 Wallet and OpenID4VP 1.0 + HAIP
+1.0 Wallet (`Attesto Client 2.7.0` / `Attesto 2.3.1`, certified `2026-10-08`).
+Those are separate from the Attesto issuer and verifier certifications and
+from AttestoClient's OIDC RP certification. See the OpenID Foundation's
 [VCI testing instructions](https://openid.net/certification/conformance-testing-for-openid-for-verifiable-credential-issuance/)
 and [VP testing instructions](https://openid.net/certification/conformance-testing-for-openid-for-verifiable-presentations/).
 
@@ -393,7 +395,7 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 
 When developing both libraries in sibling source checkouts, use
 `ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient
-requires Attesto `>= 2.19.0 and < 3.0.0`, including for unencrypted wallet
+requires Attesto `>= 2.20.0 and < 3.0.0`, including for unencrypted wallet
 operations, so installations use the shared JWS, DPoP, URI, outbound-address,
 X.509, and strict CBOR implementations.
 

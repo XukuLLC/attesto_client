@@ -8,10 +8,10 @@ defmodule AttestoClient.SignedIntrospection do
   module verifies the authorization server signature and registered claims.
   """
 
-  alias Attesto.SigningAlg
+  alias Attesto.{Claims, NumericDate, SigningAlg}
   alias AttestoClient.{ClaimValidation, Verifier}
 
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @typ "token-introspection+jwt"
 
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
@@ -97,8 +97,10 @@ defmodule AttestoClient.SignedIntrospection do
 
   def verify(_jwt, _opts), do: {:error, :invalid_token}
 
-  defp check_typ(%{"typ" => typ}) when is_binary(typ) do
-    if String.downcase(typ) == @typ, do: :ok, else: {:error, :invalid_typ}
+  defp check_typ(%{"typ" => typ}) do
+    if Claims.typ_matches?(typ, [@typ], normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :invalid_typ}
   end
 
   defp check_typ(_header), do: {:error, :invalid_typ}

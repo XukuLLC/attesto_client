@@ -3,8 +3,6 @@ defmodule AttestoClient.OAuthHTTP.ClientAuth do
 
   alias AttestoClient.{ClientAssertion, ClientAuthOptions, WalletAttestation}
 
-  require Logger
-
   @spec authenticate(map(), String.t(), keyword()) ::
           {:ok, map(), keyword()} | {:error, term()}
   def authenticate(form, endpoint, opts) do
@@ -52,9 +50,9 @@ defmodule AttestoClient.OAuthHTTP.ClientAuth do
     authenticate_as({:private_key_jwt, jwk, []}, client_id, form, endpoint, opts)
   end
 
-  defp authenticate_as({:private_key_jwt, jwk, assertion_opts}, client_id, form, endpoint, opts)
+  defp authenticate_as({:private_key_jwt, jwk, assertion_opts}, client_id, form, _endpoint, opts)
        when is_binary(client_id) and client_id != "" and is_list(assertion_opts) do
-    with {:ok, build_opts} <- client_assertion_options(assertion_opts, client_id, opts, endpoint),
+    with {:ok, build_opts} <- client_assertion_options(assertion_opts, client_id, opts),
          {:ok, assertion} <- ClientAssertion.build(jwk, build_opts) do
       {:ok,
        Map.merge(form, %{
@@ -95,53 +93,20 @@ defmodule AttestoClient.OAuthHTTP.ClientAuth do
   defp authenticate_as(_invalid, _client_id, _form, _endpoint, _opts),
     do: {:error, :invalid_client_auth}
 
-  defp client_assertion_options(opts, client_id, request_opts, endpoint) do
+  # RFC 10070 §4: the assertion's sole audience is the authorization server's
+  # issuer identifier, and the token endpoint URL MUST NOT be used as one. The
+  # audience therefore comes from the caller's trusted `:issuer` (or
+  # an explicit assertion `:audience`), never from the endpoint URL. With
+  # neither, no audience is set and `ClientAssertion.build/2` answers
+  # `:invalid_audience`, so nothing is sent.
+  defp client_assertion_options(opts, client_id, request_opts) do
     if ClientAuthOptions.valid?(opts, :assertion) do
       {:ok,
        opts
-       |> Keyword.put_new_lazy(:audience, fn ->
-         client_assertion_audience(request_opts, endpoint)
-       end)
+       |> Keyword.put_new_lazy(:audience, fn -> Keyword.get(request_opts, :issuer) end)
        |> Keyword.put(:client_id, client_id)}
     else
       {:error, :invalid_client_assertion_options}
-    end
-  end
-
-  defp client_assertion_audience(request_opts, endpoint) do
-    case Keyword.fetch(request_opts, :issuer) do
-      {:ok, issuer} ->
-        issuer
-
-      :error ->
-        :telemetry.execute(
-          [:attesto_client, :client_assertion, :legacy_endpoint_audience],
-          %{count: 1},
-          %{}
-        )
-
-        warn_legacy_assertion_audience()
-        endpoint
-    end
-  end
-
-  defp warn_legacy_assertion_audience do
-    key = {__MODULE__, :legacy_assertion_audience_warning}
-
-    unless :persistent_term.get(key, false) do
-      :global.trans({key, self()}, fn -> emit_legacy_assertion_audience_warning(key) end, [node()])
-    end
-  end
-
-  defp emit_legacy_assertion_audience_warning(key) do
-    unless :persistent_term.get(key, false) do
-      :persistent_term.put(key, true)
-
-      Logger.warning(
-        "private_key_jwt without :issuer uses the deprecated endpoint audience; " <>
-          "pass the trusted :issuer or an explicit assertion :audience. " <>
-          "The fallback will be removed in the next major release."
-      )
     end
   end
 

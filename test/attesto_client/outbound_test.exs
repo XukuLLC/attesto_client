@@ -231,16 +231,15 @@ defmodule AttestoClient.OutboundTest do
     end
 
     test "a name that only resolves to loopback is not a loopback host" do
-      # The exception is passed to the screen only for an http loopback URL, so
-      # an https name answering 127.0.0.1 is refused as it always was.
+      # A domain name answering 127.0.0.1 is refused, while a literal loopback
+      # host is allowed over both https and http under :allow_loopback_http.
       assert {:error, :blocked_host} =
                Discovery.validate_endpoint(
                  "https://idp.example/token",
                  [resolver: resolver([{127, 0, 0, 1}])] ++ @loopback
                )
 
-      assert {:error, :blocked_host} =
-               Discovery.validate_endpoint("https://127.0.0.1/token", @loopback)
+      assert :ok = Discovery.validate_endpoint("https://127.0.0.1/token", @loopback)
     end
 
     test "the option is refused with an issuer that is not a loopback host" do

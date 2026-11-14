@@ -32,6 +32,7 @@ defmodule AttestoClient.TokenSet do
   alias AttestoClient.DPoP
 
   @enforce_keys [:access_token, :token_type]
+  @derive {Inspect, only: [:token_type, :expires_in, :scope, :client_id, :issuer, :profile]}
   defstruct [
     :access_token,
     :token_type,

@@ -145,6 +145,7 @@ defmodule AttestoClient.Issuer.Cache do
   @spec transient?(term()) :: boolean()
   def transient?({:transport, _reason}), do: true
   def transient?(:timeout), do: true
+  def transient?(:unresolvable), do: true
   def transient?(:refresh_timeout), do: true
   def transient?({:refresh_task_exit, _reason}), do: true
   def transient?({:http_status, 429}), do: true

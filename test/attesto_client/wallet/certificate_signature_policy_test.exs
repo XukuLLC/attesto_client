@@ -21,7 +21,9 @@ defmodule AttestoClient.Wallet.CertificateSignaturePolicyTest do
   @pss_oid {1, 2, 840, 113_549, 1, 1, 10}
 
   setup_all do
-    root = :public_key.pkix_test_root_cert(~c"synthetic-signature-root", key: @curve)
+    root =
+      :public_key.pkix_test_root_cert(~c"synthetic-signature-root", key: @curve, digest: :sha256)
+
     %{root: root}
   end
 
@@ -136,7 +138,7 @@ defmodule AttestoClient.Wallet.CertificateSignaturePolicyTest do
       :public_key.pkix_test_data(%{
         root: root,
         intermediates: [],
-        peer: [key: Keyword.get(overrides, :key, @curve), extensions: extensions]
+        peer: [key: Keyword.get(overrides, :key, @curve), digest: :sha256, extensions: extensions]
       })
 
     leaf = if usage == :absent, do: remove_key_usage(data[:cert], root), else: data[:cert]

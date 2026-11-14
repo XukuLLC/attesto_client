@@ -38,10 +38,16 @@ defmodule AttestoClient.AuthorizationTransaction.Store.ETS do
   @impl true
   def put_new(server, state, %AuthorizationTransaction{} = transaction, ttl_ms) do
     GenServer.call(server, {:put_new, state, transaction, ttl_ms})
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
   end
 
   @impl true
-  def take(server, state), do: GenServer.call(server, {:take, state})
+  def take(server, state) do
+    GenServer.call(server, {:take, state})
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
+  end
 
   @impl true
   def init(opts) do

@@ -113,6 +113,7 @@ defmodule AttestoClient.WalletAttestation do
           | {:error, term()}
   def fetch_challenge(endpoint, opts \\ []) when is_list(opts) do
     with :ok <- AttestoClient.Outbound.validate(opts),
+         :ok <- AttestoClient.Outbound.check_issuer(endpoint, opts),
          {:ok, response} <- OAuthHTTP.post_challenge(endpoint, opts),
          :ok <- challenge_response(response),
          {:ok, body} <- challenge_json(response.body),

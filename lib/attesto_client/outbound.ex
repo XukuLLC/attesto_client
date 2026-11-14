@@ -13,7 +13,8 @@ defmodule AttestoClient.Outbound do
 
   `AttestoClient.AuthorizationCode.start/2`, `callback/3` and `exchange/2`,
   `AttestoClient.IDToken.verify/2`, `AttestoClient.Token.refresh/4`,
-  `AttestoClient.Logout.url/1`, the `AttestoClient.Discovery` functions and
+  `AttestoClient.Logout.url/1`, `AttestoClient.Discovery.fetch/2`,
+  `AttestoClient.Discovery.fetch_jwks/2`, and
   `AttestoClient.Issuer` (and so `AttestoClient.ResourceServer`) take the
   option, and so do the other calls that talk to an issuer or to an endpoint
   the caller chose from its metadata: `AttestoClient.UserInfo.verify/2`,
@@ -22,7 +23,15 @@ defmodule AttestoClient.Outbound do
   `AttestoClient.WalletAttestation.fetch_challenge/2` and
   `AttestoClient.Wallet.request_credential/3`.
 
-  Three calls refuse it with `{:error, :outbound_not_supported}`:
+  `AttestoClient.Discovery.fetch_resource/2` accepts `:outbound` for the
+  resource's own well-known URL, and refuses it with
+  `{:error, :outbound_not_supported}` when `:metadata_url` is supplied;
+  `AttestoClient.Discovery.authorization_server/2` accepts `:outbound` only
+  when no `:metadata_url` (or `WWW-Authenticate` `resource_metadata` URL) is
+  used and `:issuer` is explicitly pinned by the caller.
+
+  Calls that connect to an address written by another party refuse `:outbound`
+  with `{:error, :outbound_not_supported}`:
   `AttestoClient.Wallet.CredentialOffer.fetch/2`,
   `AttestoClient.Wallet.PresentationRequest.fetch/3` and `from_uri/3`, and
   `AttestoClient.Wallet.Presentation.submit/3` and `present/3`. The address each of them
@@ -127,9 +136,10 @@ defmodule AttestoClient.Outbound do
   end
 
   @doc false
-  # The exceptions `Attesto.OutboundTarget.screen/2` is given for `url`. The
-  # loopback exception is passed only for a hop that is itself `http` to a
-  # loopback host, so it cannot open any other request of the same call.
+  # The exceptions `Attesto.OutboundTarget.screen/2` is given for `url`. Both
+  # `http` and `https` to a literal loopback host (`localhost`, `127.0.0.0/8`,
+  # `::1`) receive `:allow_loopback`; a domain name resolving to loopback stays
+  # blocked unless listed in `:allowed_cidrs`.
   @spec screen_options(String.t(), keyword()) :: keyword()
   def screen_options(url, opts) when is_binary(url) and is_list(opts) do
     outbound = Keyword.get(opts, :outbound) || []
@@ -139,7 +149,7 @@ defmodule AttestoClient.Outbound do
   end
 
   defp put_loopback(screen_opts, url, true) do
-    if loopback_http_url?(url),
+    if loopback_url?(url),
       do: Keyword.put(screen_opts, :allow_loopback, true),
       else: screen_opts
   end
@@ -164,13 +174,6 @@ defmodule AttestoClient.Outbound do
   end
 
   defp loopback_url?(_other), do: false
-
-  defp loopback_http_url?(url) do
-    case URI.new(url) do
-      {:ok, %URI{scheme: "http", host: host}} -> Attesto.URI.loopback_host?(host)
-      _other -> false
-    end
-  end
 
   defp valid?(outbound) do
     Keyword.keyword?(outbound) and

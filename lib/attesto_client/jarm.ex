@@ -32,11 +32,11 @@ defmodule AttestoClient.JARM do
   `error_description`/`state` on an error response).
   """
 
-  alias Attesto.SigningAlg
+  alias Attesto.{NumericDate, SigningAlg}
   alias AttestoClient.{ClaimValidation, Verifier}
 
   # Clock-skew tolerance for `iat`, matching attesto's token verification.
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type jwks :: %{optional(String.t()) => term()} | [map()]
 

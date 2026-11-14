@@ -176,6 +176,7 @@ defmodule AttestoClient.Wallet do
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
     with :ok <- AttestoClient.Outbound.validate(opts),
+         :ok <- AttestoClient.Outbound.check_issuer(offer.credential_issuer, opts),
          {:ok, opts} <- issuer_options(offer, opts),
          {:ok, opts} <- issuance_profile(opts),
          :ok <- Deferred.validate_options(opts),

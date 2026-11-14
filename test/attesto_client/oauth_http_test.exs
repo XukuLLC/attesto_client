@@ -88,7 +88,7 @@ defmodule AttestoClient.OAuthHTTPTest do
     JSON.decode!(json)
   end
 
-  test "private_key_jwt prefers the trusted issuer and retains a deprecated endpoint fallback" do
+  test "private_key_jwt uses the trusted issuer as the audience and never the endpoint URL" do
     key = JOSE.JWK.generate_key({:ec, "P-256"})
     owner = self()
 
@@ -108,23 +108,12 @@ defmodule AttestoClient.OAuthHTTPTest do
       req_options: [plug: plug]
     ]
 
-    event = [:attesto_client, :client_assertion, :legacy_endpoint_audience]
-    handler = "assertion-audience-#{System.unique_integer([:positive])}"
+    # RFC 10070 §4: without a trusted issuer there is no valid audience, and
+    # the endpoint URL is not one. Nothing is sent.
+    assert {:error, {:client_assertion, :invalid_audience}} =
+             OAuthHTTP.post_form(@endpoint, %{}, opts)
 
-    :ok =
-      :telemetry.attach(
-        handler,
-        event,
-        &__MODULE__.handle_legacy_audience/4,
-        owner
-      )
-
-    on_exit(fn -> :telemetry.detach(handler) end)
-
-    assert {:ok, %{}} = OAuthHTTP.post_form(@endpoint, %{}, opts)
-    assert_receive {:issuer_assertion, legacy}
-    assert JSON.decode!(JOSE.JWS.peek_payload(legacy))["aud"] == @endpoint
-    assert_receive {:legacy_audience, ^event, %{count: 1}, %{}}
+    refute_received {:issuer_assertion, _}
 
     assert {:ok, %{}} =
              OAuthHTTP.post_form(
@@ -136,7 +125,6 @@ defmodule AttestoClient.OAuthHTTPTest do
     assert_receive {:issuer_assertion, assertion}
     assert JSON.decode!(JOSE.JWS.peek_payload(assertion))["aud"] == "https://op.example.com"
     assert JSON.decode!(JOSE.JWS.peek_protected(assertion))["typ"] == "client-authentication+jwt"
-    refute_received {:legacy_audience, _, _, _}
 
     # An explicitly supplied, unusable issuer must never silently fall back.
     assert {:error, {:client_assertion, :invalid_audience}} =
@@ -152,13 +140,7 @@ defmodule AttestoClient.OAuthHTTPTest do
 
       assert_receive {:issuer_assertion, assertion}
       assert JSON.decode!(JOSE.JWS.peek_protected(assertion))["typ"] == typ
-      refute_received {:legacy_audience, _, _, _}
     end
-  end
-
-  @doc false
-  def handle_legacy_audience(name, measurements, metadata, pid) do
-    send(pid, {:legacy_audience, name, measurements, metadata})
   end
 
   describe "post_json/4" do

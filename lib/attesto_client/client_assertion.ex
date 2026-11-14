@@ -7,9 +7,9 @@ defmodule AttestoClient.ClientAssertion do
   authorization server verifies the assertion at its token / PAR / introspection
   endpoints; the client builds one to authenticate. The assertion is a JWT whose
   `iss` and `sub` are the `client_id` and whose `aud` is the authorization
-  server issuer identifier, as required by `draft-ietf-oauth-rfc7523bis-11`.
-  Assertions carry the `client-authentication+jwt` type header. Endpoint URLs
-  are not valid audiences under the revised profile.
+  server issuer identifier, as required by RFC 10070 §4 (which updates RFC
+  7523). Assertions carry the `client-authentication+jwt` type header. The
+  token endpoint URL is not a valid audience.
 
   ## Claims (RFC 7523 §3)
 

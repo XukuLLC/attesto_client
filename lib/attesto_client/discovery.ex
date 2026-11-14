@@ -161,11 +161,16 @@ defmodule AttestoClient.Discovery do
   """
   @spec fetch_resource(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch_resource(resource, opts \\ []) when is_list(opts) do
-    with {:ok, uri} <- validate_resource(resource),
+    with :ok <- maybe_refuse_outbound_for_metadata_url(opts),
+         {:ok, uri} <- validate_resource(resource),
          {:ok, url} <- resource_metadata_url(uri, opts),
          {:ok, body} <- get_json(url, opts) do
       check_resource(body, resource)
     end
+  end
+
+  defp maybe_refuse_outbound_for_metadata_url(opts) do
+    if Keyword.has_key?(opts, :metadata_url), do: Outbound.refuse(opts), else: :ok
   end
 
   @doc """
@@ -200,10 +205,18 @@ defmodule AttestoClient.Discovery do
   """
   @spec authorization_server(String.t(), [opt()]) :: {:ok, resolution()} | {:error, error()}
   def authorization_server(resource, opts \\ []) when is_list(opts) do
-    with {:ok, metadata} <- fetch_resource(resource, resource_opts(opts)),
+    with :ok <- maybe_refuse_outbound_for_issuer(opts),
+         {:ok, metadata} <- fetch_resource(resource, resource_opts(opts)),
          {:ok, issuer} <- select_issuer(metadata, opts),
          {:ok, issuer_metadata} <- fetch_issuer(issuer, opts) do
       {:ok, %{resource: metadata, issuer: issuer, authorization_server: issuer_metadata}}
+    end
+  end
+
+  defp maybe_refuse_outbound_for_issuer(opts) do
+    case Keyword.get(opts, :issuer) do
+      issuer when is_binary(issuer) and issuer != "" -> :ok
+      _other -> Outbound.refuse(opts)
     end
   end
 
@@ -645,7 +658,7 @@ defmodule AttestoClient.Discovery do
 
     case OutboundTarget.screen(url, screen_opts) do
       {:ok, target} -> {:ok, target}
-      {:error, :invalid_resolver} = error -> error
+      {:error, reason} when reason in [:invalid_resolver, :unresolvable] -> {:error, reason}
       {:error, _reason} -> {:error, :blocked_host}
     end
   end

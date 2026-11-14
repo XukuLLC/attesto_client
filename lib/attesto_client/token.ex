@@ -44,8 +44,9 @@ defmodule AttestoClient.Token do
   ahead of `AttestoClient.Wallet.request_credential/3`.
 
   Required option: `:token_endpoint`. Private-key JWT authentication also
-  uses `:issuer` from trusted discovery when supplied. An omitted issuer
-  retains the deprecated endpoint-audience fallback in 2.x. `:client_id` may
+  requires `:issuer` from trusted discovery: it is the assertion's audience
+  (RFC 10070 §4), and without it the call returns
+  `{:error, {:client_assertion, :invalid_audience}}`. `:client_id` may
   be omitted only with `client_auth: :none`, as permitted for anonymous
   pre-authorized-code flows; authenticated methods still require it.
   `:client_auth` and `:req_options` otherwise behave as for `refresh/4`.
@@ -65,6 +66,7 @@ defmodule AttestoClient.Token do
       when is_binary(pre_authorized_code) and pre_authorized_code != "" and is_list(opts) do
     with :ok <- AttestoClient.Outbound.validate(opts),
          {:ok, endpoint} <- required_string(opts, :token_endpoint),
+         :ok <- AttestoClient.Outbound.check_issuer(Keyword.get(opts, :issuer, endpoint), opts),
          {:ok, profile} <- new_profile(opts),
          {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
          :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
@@ -210,14 +212,17 @@ defmodule AttestoClient.Token do
   the token. Required options: `:revocation_endpoint`, `:client_id`; optional
   `:token_type_hint`, `:client_auth`, `:req_options`, `:timeout`, and
   `:outbound` (see `AttestoClient.Outbound`).
-  With `private_key_jwt`, pass `:issuer` from trusted discovery, or an explicit
-  registered audience in the assertion options for a legacy server. Omitting
-  both retains the deprecated endpoint-audience fallback in 2.x.
+  With `private_key_jwt`, pass `:issuer` from trusted discovery; it is the
+  assertion's audience (RFC 10070 §4). An explicit `:audience` in the assertion
+  options takes its place. With neither, the call returns
+  `{:error, {:client_assertion, :invalid_audience}}`; the endpoint URL is never
+  used as the audience.
   """
   @spec revoke(String.t(), keyword()) :: :ok | {:error, term()}
   def revoke(token, opts) when is_binary(token) and token != "" and is_list(opts) do
     with :ok <- AttestoClient.Outbound.validate(opts),
          {:ok, endpoint} <- required_string(opts, :revocation_endpoint),
+         :ok <- AttestoClient.Outbound.check_issuer(Keyword.get(opts, :issuer, endpoint), opts),
          {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, hint} <- token_type_hint(opts) do
       form = %{"token" => token} |> maybe_put("token_type_hint", hint)

@@ -399,7 +399,11 @@ defmodule AttestoClient.AuthorizationProfileBindingTest do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
     data =
-      :public_key.pkix_test_data(%{root: [key: curve], intermediates: [], peer: [key: curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: curve, digest: :sha256]
+      })
 
     provider = data[:key] |> elem(1) |> JOSE.JWK.from_der()
     chain = [Base.encode64(data[:cert])]

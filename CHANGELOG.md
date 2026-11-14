@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0] - 2026-11-14
+
+### Breaking / Security
+
+- Requires `attesto >= 2.20.0 and < 3.0.0`.
+- `AttestoClient.ResourceServer.Plug.init/1` (delegated to `Attesto.Plug.Authenticate`) now requires `:origin` or a 1-arity `:htu` callback when `:replay_check` is configured (accepting DPoP) and rejects malformed `:htu` values instead of falling back to `Host`-derived URIs. Bearer-only mounts (without `:replay_check`) require neither.
+- `AttestoClient.AuthorizationTransaction`, `AttestoClient.TokenSet`, and `AttestoClient.RefreshResult` derive `Inspect` with `:only` so PKCE verifiers, nonces, browser bindings, and tokens are omitted from crash reports and `inspect/1`, and `AuthorizationTransaction.Store.ETS` catches `GenServer` exits (`{:error, :store_unavailable}`) instead of crashing with secrets in the exit reason.
+- `AttestoClient.Wallet.request_credential/3`, `Token.exchange_pre_authorized_code/2`, `Token.revoke/2`, and `WalletAttestation.fetch_challenge/2` now enforce the loopback-issuer check for `:allow_loopback_http`.
+- `AttestoClient.Discovery.fetch_resource/2` refuses `:outbound` when `:metadata_url` is given, and `AttestoClient.Discovery.authorization_server/2` refuses it unless the caller passes `:issuer`. In both refused cases the address being fetched was written by the resource server, not chosen by the operator.
+- `private_key_jwt` client authentication takes its assertion audience from the trusted `:issuer` (or an explicit assertion `:audience`) and nothing else, as RFC 10070 §4 requires. The fallback that sent the endpoint URL as the audience when `:issuer` was omitted is removed, with its `[:attesto_client, :client_assertion, :legacy_endpoint_audience]` telemetry event and warning; `AttestoClient.Token.exchange_pre_authorized_code/2`, `AttestoClient.Token.revoke/2` and any other call that authenticates with `private_key_jwt` without `:issuer` now return `{:error, {:client_assertion, :invalid_audience}}` and send nothing.
+
+### Fixes
+
+- `AttestoClient.Wallet.Presentation.DCQL` uses `Attesto.VpToken.dcql_value_matches?/2` and filters wildcard array claim paths so elements not listed in DCQL `values` are not disclosed.
+- `AttestoClient.IDToken.verify/2` delegates `max_age` checking to `Attesto.AuthorizationRequest.check_auth_time/4` with optional `:auth_time_allowance_seconds`.
+- `AttestoClient.ResourceServer` now supports plain `AttestoClient.Issuer` cache references, bounds `:clock_skew_seconds` consistently with `IDToken`, and reuses `Attesto.Claims.typ_matches?/3` and `Attesto.Scope.parse/2`.
+- `AttestoClient.Outbound.screen_options/2` extends `:allow_loopback` to `https` literal loopback URLs as well as `http`, and `Discovery` + `Issuer.Cache` treat `:unresolvable` as transient.
+- `AttestoClient.AuthorizationCode` and `AttestoClient.Logout` preserve existing query parameters with `Attesto.URI.put_query_params/3` and validate loopback redirects with `Attesto.URI.https_identifier?/2`.
+
 ## [2.19.0] - 2026-11-13
 
 Requires Attesto >= 2.19.0 (was >= 2.15.0).

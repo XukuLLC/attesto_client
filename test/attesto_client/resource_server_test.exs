@@ -636,6 +636,43 @@ defmodule AttestoClient.ResourceServerTest do
           IO.puts("Skipping PyJWT resource-server rotation parity: #{reason}")
       end
     end
+
+    test "verifies tokens against a plain AttestoClient.Issuer process using runtime policy",
+         ctx do
+      issuer =
+        start_supervised!(
+          {AttestoClient.Issuer,
+           issuer: @issuer,
+           req_options: [plug: issuer_plug(ctx.state)],
+           fresh_ttl: 60_000,
+           stale_ttl: 60_000}
+        )
+
+      token = access_token(ctx.key)
+
+      assert {:error, :invalid_policy} =
+               ResourceServer.verify(issuer, token, accepted_algs: ["RS256"], now: @now)
+
+      assert {:ok, claims} =
+               ResourceServer.verify(issuer, token,
+                 audience: @audience,
+                 accepted_algs: ["RS256"],
+                 now: @now
+               )
+
+      assert claims["sub"] == "user-123"
+    end
+
+    test "bounds :clock_skew_seconds at start_link like IDToken" do
+      assert_raise ArgumentError, ~r/:clock_skew_seconds/, fn ->
+        ResourceServer.start_link(
+          issuer: @issuer,
+          audience: @audience,
+          accepted_algs: ["RS256"],
+          clock_skew_seconds: 301
+        )
+      end
+    end
   end
 
   defp issuer_plug(state) do

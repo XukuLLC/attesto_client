@@ -8,10 +8,10 @@ defmodule AttestoClient.UserInfo do
   supplies `:id_token_sub`, the UserInfo `sub` must match the ID Token subject.
   """
 
-  alias Attesto.SigningAlg
+  alias Attesto.{Claims, NumericDate, SigningAlg}
   alias AttestoClient.{ClaimValidation, Verifier}
 
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
 
@@ -97,11 +97,12 @@ defmodule AttestoClient.UserInfo do
 
   def verify(_jwt, _opts), do: {:error, :invalid_token}
 
-  defp check_typ(%{"typ" => typ}) when is_binary(typ) do
-    if String.downcase(typ) == "jwt", do: :ok, else: {:error, :unexpected_typ}
+  defp check_typ(%{"typ" => typ}) do
+    if Claims.typ_matches?(typ, ["JWT"], normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :unexpected_typ}
   end
 
-  defp check_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
   defp check_typ(_header), do: :ok
 
   defp check_issuer(%{"iss" => iss}, issuer) when is_binary(iss) do

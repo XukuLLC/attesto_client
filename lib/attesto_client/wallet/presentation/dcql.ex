@@ -60,11 +60,17 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
         []
 
       claims ->
-        claims
-        |> selected_claims(Map.get(query, "claim_sets"), held)
-        |> Enum.map(& &1["path"])
+        case selected_claims(claims, Map.get(query, "claim_sets"), held) do
+          :no_match -> []
+          selected -> Enum.flat_map(selected, &claim_paths(held.claims, &1))
+        end
     end
   end
+
+  defp claim_paths(claims, %{"path" => path, "values" => allowed}) when is_list(allowed),
+    do: matching_paths(claims, path, allowed)
+
+  defp claim_paths(_claims, %{"path" => path}), do: [path]
 
   @doc false
   def matches?(%{format: format, claims: claims} = held, %{"format" => format} = query)
@@ -76,45 +82,44 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
   def matches?(_held, _query), do: false
 
   @doc false
-  def values_at(value, path) do
-    case resolve_values(value, path) do
+  def values_at(value, path)
+      when is_map(value) and not is_struct(value) and is_list(path) and path != [] do
+    case Attesto.VpToken.resolve_json_path(value, path) do
       {:ok, values} -> values
       :error -> []
     end
   end
 
-  defp resolve_values(value, []), do: {:ok, [value]}
+  def values_at(_value, _path), do: []
 
-  defp resolve_values(map, [key | rest]) when is_map(map) and is_binary(key) do
+  defp matching_paths(value, [], allowed) do
+    if Attesto.VpToken.dcql_value_matches?(value, allowed), do: [[]], else: []
+  end
+
+  defp matching_paths(map, [key | rest], allowed) when is_map(map) and is_binary(key) do
     case Map.fetch(map, key) do
-      {:ok, value} -> resolve_values(value, rest)
-      :error -> {:ok, []}
+      {:ok, next} -> Enum.map(matching_paths(next, rest, allowed), &[key | &1])
+      :error -> []
     end
   end
 
-  defp resolve_values(list, [nil | rest]) when is_list(list) do
+  defp matching_paths(list, [nil | rest], allowed) when is_list(list) do
     list
-    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
-      case resolve_values(value, rest) do
-        {:ok, values} -> {:cont, {:ok, [values | acc]}}
-        :error -> {:halt, :error}
-      end
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {item, index} ->
+      Enum.map(matching_paths(item, rest, allowed), &[index | &1])
     end)
-    |> flatten_values()
   end
 
-  defp resolve_values(list, [index | rest])
+  defp matching_paths(list, [index | rest], allowed)
        when is_list(list) and is_integer(index) and index >= 0 do
     case Enum.fetch(list, index) do
-      {:ok, value} -> resolve_values(value, rest)
-      :error -> {:ok, []}
+      {:ok, item} -> Enum.map(matching_paths(item, rest, allowed), &[index | &1])
+      :error -> []
     end
   end
 
-  defp resolve_values(_value, _path), do: :error
-
-  defp flatten_values({:ok, chunks}), do: {:ok, chunks |> Enum.reverse() |> Enum.flat_map(& &1)}
-  defp flatten_values(:error), do: :error
+  defp matching_paths(_value, _path, _allowed), do: []
 
   defp query_id(%{"id" => id}), do: id
   defp query_id(_query), do: nil
@@ -130,7 +135,7 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
   defp valid_query?(_query), do: false
 
   defp valid_id?(id) when is_binary(id),
-    do: byte_size(id) in 1..128 and Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, id)
+    do: byte_size(id) <= 128 and Attesto.PresentationRequest.valid_dcql_id?(id)
 
   defp valid_id?(_id), do: false
   defp valid_optional_map?(map, key), do: not Map.has_key?(map, key) or is_map(map[key])
@@ -289,9 +294,9 @@ defmodule AttestoClient.Wallet.Presentation.DCQL do
   end
 
   defp claim_matches?(held, claim) do
-    values = values_at(held.claims, claim["path"])
-
-    values != [] and
-      (not Map.has_key?(claim, "values") or Enum.any?(values, &(&1 in claim["values"])))
+    case Map.fetch(claim, "values") do
+      {:ok, allowed} -> matching_paths(held.claims, claim["path"], allowed) != []
+      :error -> values_at(held.claims, claim["path"]) != []
+    end
   end
 end

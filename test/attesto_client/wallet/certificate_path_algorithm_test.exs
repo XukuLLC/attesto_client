@@ -33,8 +33,8 @@ defmodule AttestoClient.Wallet.CertificatePathAlgorithmTest do
     data =
       :public_key.pkix_test_data(%{
         root: ctx.ec_root,
-        intermediates: [[key: {:rsa, 2048, 65_537}]],
-        peer: [key: @curve]
+        intermediates: [[key: {:rsa, 2048, 65_537}, digest: :sha256]],
+        peer: [key: @curve, digest: :sha256]
       })
 
     intermediate = Enum.find(data[:cacerts], &(&1 != ctx.ec_root.cert))
@@ -78,10 +78,16 @@ defmodule AttestoClient.Wallet.CertificatePathAlgorithmTest do
     end
   end
 
-  defp root(:rsa),
-    do: :public_key.pkix_test_root_cert(~c"synthetic-rsa-path-root", key: {:rsa, 2048, 65_537})
+  defp root(:rsa) do
+    :public_key.pkix_test_root_cert(~c"synthetic-rsa-path-root",
+      key: {:rsa, 2048, 65_537},
+      digest: :sha256
+    )
+  end
 
-  defp root(:ec), do: :public_key.pkix_test_root_cert(~c"synthetic-ec-path-root", key: @curve)
+  defp root(:ec) do
+    :public_key.pkix_test_root_cert(~c"synthetic-ec-path-root", key: @curve, digest: :sha256)
+  end
 
   # OTP29 admits these genuinely signed v1.5 children. Older OTP versions
   # can raise while decoding absent PSS parameters; the SDK rejection above
@@ -95,7 +101,13 @@ defmodule AttestoClient.Wallet.CertificatePathAlgorithmTest do
   end
 
   defp peer(root, key) do
-    :public_key.pkix_test_data(%{root: root, intermediates: [], peer: [key: key]})[:cert]
+    :public_key.pkix_test_data(%{
+      root: root,
+      intermediates: [],
+      peer: [key: key, digest: :sha256]
+    })[
+      :cert
+    ]
   end
 
   defp replace_algorithm(der, signer, oid, parameters) do

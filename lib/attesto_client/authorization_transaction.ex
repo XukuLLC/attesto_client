@@ -40,6 +40,7 @@ defmodule AttestoClient.AuthorizationTransaction do
     :browser_binding,
     :max_age
   ]
+  @derive {Inspect, only: [:issuer, :client_id, :protocol, :profile]}
   defstruct @enforce_keys ++
               [
                 protocol: :oidc,

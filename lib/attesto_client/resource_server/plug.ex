@@ -30,8 +30,14 @@ if Code.ensure_loaded?(Plug.Conn) do
       * `:dpop_max_age_seconds` - maximum DPoP proof age passed to Attesto.
       * `:cert_der` - callback returning the authenticated client certificate's
         DER bytes or `nil`; the TLS terminator remains responsible for trust.
-      * `:htu` - callback returning the externally visible request URI without
-        query or fragment.
+      * `:origin` - fixed `https://host[:port]` string used to construct DPoP
+        `htu` from the request path when `:htu` is not given.
+      * `:htu` - 1-arity callback `(conn -> String.t())` returning the
+        externally visible request URI without query or fragment (mutually
+        exclusive with `:origin`). When `:replay_check` is set (so the mount
+        accepts DPoP requests), `init/1` requires `:origin` or `:htu` so `htu`
+        is never derived from an unpinned `Host` header. Bearer-only mounts
+        (without `:replay_check`) require neither.
       * `:resource_metadata`, `:send_error`, `:www_authenticate`, `:no_store` -
         forwarded to Attesto's OAuth error transport.
 

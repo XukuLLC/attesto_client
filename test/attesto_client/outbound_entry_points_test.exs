@@ -128,6 +128,48 @@ defmodule AttestoClient.OutboundEntryPointsTest do
                  "a.b.c",
                  [issuer: @issuer, audience: "https://rs.example"] ++ loopback
                )
+
+      assert {:error, :invalid_outbound} =
+               Token.exchange_pre_authorized_code(
+                 "pre-auth-code",
+                 [token_endpoint: @issuer <> "/token"] ++ loopback
+               )
+
+      assert {:error, :invalid_outbound} =
+               Token.revoke(
+                 "token",
+                 [revocation_endpoint: @issuer <> "/revoke"] ++ loopback
+               )
+
+      assert {:error, :invalid_outbound} =
+               WalletAttestation.fetch_challenge(@issuer <> "/challenge", loopback)
+
+      assert {:error, :outbound_not_supported} =
+               AttestoClient.Discovery.authorization_server(@issuer <> "/mcp", loopback)
+
+      # With an explicit pinned :issuer and no :metadata_url, :outbound is accepted
+      # rather than rejected with :outbound_not_supported.
+      refute {:error, :outbound_not_supported} ==
+               AttestoClient.Discovery.authorization_server(
+                 @issuer <> "/mcp",
+                 [issuer: @issuer] ++ loopback
+               )
+
+      assert {:error, :outbound_not_supported} =
+               AttestoClient.Discovery.authorization_server(
+                 @issuer <> "/mcp",
+                 [
+                   issuer: @issuer,
+                   metadata_url: @issuer <> "/.well-known/oauth-protected-resource/mcp"
+                 ] ++ loopback
+               )
+
+      assert {:error, :outbound_not_supported} =
+               AttestoClient.Discovery.fetch_resource(
+                 @issuer <> "/mcp",
+                 [metadata_url: @issuer <> "/.well-known/oauth-protected-resource/mcp"] ++
+                   loopback
+               )
     end
 
     test "Wallet.request_credential/3", %{base: base, origin: origin} do

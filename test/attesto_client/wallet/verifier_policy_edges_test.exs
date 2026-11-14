@@ -134,7 +134,11 @@ defmodule AttestoClient.Wallet.VerifierPolicyEdgesTest do
 
   test "x509 format metadata must come from the actual signed request" do
     chain =
-      :public_key.pkix_test_data(%{root: [key: @curve], intermediates: [], peer: [key: @curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: @curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: @curve, digest: :sha256]
+      })
 
     key = chain[:key] |> elem(1) |> JOSE.JWK.from_der()
     id = "x509_hash:" <> Base.url_encode64(:crypto.hash(:sha256, chain[:cert]), padding: false)
@@ -162,7 +166,11 @@ defmodule AttestoClient.Wallet.VerifierPolicyEdgesTest do
 
   test "malformed raw certificates fail closed without invalidating unrelated valid anchors" do
     chain =
-      :public_key.pkix_test_data(%{root: [key: @curve], intermediates: [], peer: [key: @curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: @curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: @curve, digest: :sha256]
+      })
 
     for malformed <- [
           <<48, 128, 0, 0>>,

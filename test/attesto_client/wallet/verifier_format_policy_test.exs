@@ -63,7 +63,11 @@ defmodule AttestoClient.Wallet.VerifierFormatPolicyTest do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
     chain =
-      :public_key.pkix_test_data(%{root: [key: curve], intermediates: [], peer: [key: curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: curve, digest: :sha256]
+      })
 
     key = chain[:key] |> elem(1) |> JOSE.JWK.from_der()
     id = "x509_hash:" <> Base.url_encode64(:crypto.hash(:sha256, chain[:cert]), padding: false)

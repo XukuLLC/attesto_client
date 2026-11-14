@@ -7,7 +7,11 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
     data =
-      :public_key.pkix_test_data(%{root: [key: curve], intermediates: [], peer: [key: curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: curve, digest: :sha256]
+      })
 
     key = data[:key] |> elem(1) |> JOSE.JWK.from_der()
     recipient = JOSE.JWK.generate_key({:ec, "P-256"}) |> JOSE.JWK.to_public_map() |> elem(1)
@@ -102,10 +106,11 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
   test "an mdoc issuer leaf cannot authenticate an x509 verifier request", context do
     data =
       :public_key.pkix_test_data(%{
-        root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}],
+        root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}, digest: :sha256],
         intermediates: [],
         peer: [
           key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}},
+          digest: :sha256,
           extensions: [{:Extension, {2, 5, 29, 37}, true, [{1, 0, 18_013, 5, 1, 2}]}]
         ]
       })
@@ -182,7 +187,8 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     assert {:error, :untrusted_certificate} =
              PresentationRequest.verify(jwt, nil, certificate_trust: fn _ -> :ok end)
 
-    %{cert: unrelated} = :public_key.pkix_test_root_cert(~c"unrelated-root", [])
+    %{cert: unrelated} =
+      :public_key.pkix_test_root_cert(~c"unrelated-root", digest: :sha256)
 
     assert {:error, :untrusted_certificate} =
              PresentationRequest.verify(jwt, nil, trusted_certificates: [unrelated])
@@ -276,7 +282,8 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
 
     data =
       :public_key.pkix_test_root_cert(~c"self-signed-verifier",
-        key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
+        key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}},
+        digest: :sha256
       )
 
     assert {:error, :untrusted_certificate} =
@@ -357,9 +364,13 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
 
     data =
       :public_key.pkix_test_data(%{
-        root: [key: curve, extensions: [{:Extension, {2, 5, 29, 14}, false, aki}]],
+        root: [
+          key: curve,
+          digest: :sha256,
+          extensions: [{:Extension, {2, 5, 29, 14}, false, aki}]
+        ],
         intermediates: [],
-        peer: [key: curve, extensions: extensions]
+        peer: [key: curve, digest: :sha256, extensions: extensions]
       })
 
     assert {:ok, provenance} =
@@ -374,9 +385,9 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     for bits <- [1024, 2048] do
       data =
         :public_key.pkix_test_data(%{
-          root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}],
+          root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}, digest: :sha256],
           intermediates: [],
-          peer: [key: {:rsa, bits, 65_537}]
+          peer: [key: {:rsa, bits, 65_537}, digest: :sha256]
         })
 
       rsa_context = certificate_context(context, data)
@@ -403,9 +414,9 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     for {curve, algorithm} <- [{{1, 3, 132, 0, 34}, "ES384"}, {{1, 3, 132, 0, 35}, "ES512"}] do
       data =
         :public_key.pkix_test_data(%{
-          root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}],
+          root: [key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}, digest: :sha256],
           intermediates: [],
-          peer: [key: {:namedCurve, curve}]
+          peer: [key: {:namedCurve, curve}, digest: :sha256]
         })
 
       ec_context = certificate_context(context, data)

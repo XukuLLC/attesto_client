@@ -7,6 +7,7 @@ defmodule AttestoClient.RefreshResult do
   """
 
   @enforce_keys [:tokens]
+  @derive {Inspect, only: []}
   defstruct [:tokens, :id_token_claims]
 
   @type t :: %__MODULE__{

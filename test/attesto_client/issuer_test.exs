@@ -131,6 +131,7 @@ defmodule AttestoClient.IssuerTest do
       for reason <- [
             {:transport, :closed},
             :timeout,
+            :unresolvable,
             :refresh_timeout,
             {:refresh_task_exit, :killed},
             {:http_status, 429},

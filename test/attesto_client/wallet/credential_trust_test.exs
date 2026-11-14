@@ -14,10 +14,15 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
 
     data =
       :public_key.pkix_test_data(%{
-        root: [key: @curve, extensions: [{:Extension, {2, 5, 29, 14}, false, aki}]],
+        root: [
+          key: @curve,
+          digest: :sha256,
+          extensions: [{:Extension, {2, 5, 29, 14}, false, aki}]
+        ],
         intermediates: [],
         peer: [
           key: @curve,
+          digest: :sha256,
           extensions: [
             {:Extension, {2, 5, 29, 35}, false,
              {:AuthorityKeyIdentifier, aki, :asn1_NOVALUE, :asn1_NOVALUE}}
@@ -54,8 +59,11 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
 
     test "#{@format} rejects absent, untrusted, self-signed and root-in-chain certificates",
          context do
-      self_signed = :public_key.pkix_test_root_cert(~c"synthetic-issuer", key: @curve)
-      unrelated = :public_key.pkix_test_root_cert(~c"unrelated-issuer", key: @curve)
+      self_signed =
+        :public_key.pkix_test_root_cert(~c"synthetic-issuer", key: @curve, digest: :sha256)
+
+      unrelated =
+        :public_key.pkix_test_root_cert(~c"unrelated-issuer", key: @curve, digest: :sha256)
 
       cases = [
         {[], context.anchors},
@@ -172,7 +180,9 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
   test "mdoc purpose retains certificate time, chain and signature validation", context do
     issuer = signer_context(context, [signer_usage()])
     opts = Keyword.put(options(issuer), :purpose, :mdoc_issuer)
-    unrelated = :public_key.pkix_test_root_cert(~c"unrelated-mdoc-root", key: @curve)
+
+    unrelated =
+      :public_key.pkix_test_root_cert(~c"unrelated-mdoc-root", key: @curve, digest: :sha256)
 
     assert {:error, :untrusted_certificate} =
              CertificateTrust.verify(
@@ -199,9 +209,9 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
   test "mdoc purpose does not recognize document signer usage on an intermediate CA" do
     data =
       :public_key.pkix_test_data(%{
-        root: [key: @curve],
-        intermediates: [[key: @curve, extensions: [signer_usage()]]],
-        peer: [key: @curve]
+        root: [key: @curve, digest: :sha256],
+        intermediates: [[key: @curve, digest: :sha256, extensions: [signer_usage()]]],
+        peer: [key: @curve, digest: :sha256]
       })
 
     root = Enum.find(data[:cacerts], &:public_key.pkix_is_self_signed/1)
@@ -219,9 +229,9 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     for bits <- [1024, 2048] do
       data =
         :public_key.pkix_test_data(%{
-          root: [key: @curve],
+          root: [key: @curve, digest: :sha256],
           intermediates: [],
-          peer: [key: {:rsa, bits, 65_537}]
+          peer: [key: {:rsa, bits, 65_537}, digest: :sha256]
         })
 
       issuer = certificate_context(context, data)
@@ -276,9 +286,9 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     for {curve, alg} <- [{{1, 3, 132, 0, 34}, "ES384"}, {{1, 3, 132, 0, 35}, "ES512"}] do
       data =
         :public_key.pkix_test_data(%{
-          root: [key: @curve],
+          root: [key: @curve, digest: :sha256],
           intermediates: [],
-          peer: [key: {:namedCurve, curve}]
+          peer: [key: {:namedCurve, curve}, digest: :sha256]
         })
 
       issuer = certificate_context(context, data)
@@ -469,9 +479,9 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
   defp signer_context(context, extensions, overrides \\ []) do
     data =
       :public_key.pkix_test_data(%{
-        root: [key: @curve],
+        root: [key: @curve, digest: :sha256],
         intermediates: [],
-        peer: Keyword.merge([key: @curve, extensions: extensions], overrides)
+        peer: Keyword.merge([key: @curve, digest: :sha256, extensions: extensions], overrides)
       })
 
     certificate_context(context, data)

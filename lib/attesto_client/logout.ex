@@ -37,17 +37,11 @@ defmodule AttestoClient.Logout do
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
          {:ok, endpoint} <- end_session_endpoint(metadata),
          {:ok, params} <- logout_params(opts) do
-      uri = URI.parse(endpoint)
-      existing = if uri.query, do: URI.decode_query(uri.query), else: %{}
-      {:ok, %{uri | query: query(Map.merge(existing, params))} |> URI.to_string()}
+      {:ok, Attesto.URI.put_query_params(endpoint, Enum.sort_by(params, &elem(&1, 0)))}
     end
   end
 
   def url(_opts), do: {:error, :invalid_options}
-
-  # No parameters means no query, not a trailing "?".
-  defp query(params) when map_size(params) == 0, do: nil
-  defp query(params), do: URI.encode_query(params)
 
   defp logout_params(opts) do
     keys = [

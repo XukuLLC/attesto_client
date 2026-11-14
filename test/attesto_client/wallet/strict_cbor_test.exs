@@ -12,7 +12,11 @@ defmodule AttestoClient.Wallet.StrictCBORTest do
     curve = {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
     chain =
-      :public_key.pkix_test_data(%{root: [key: curve], intermediates: [], peer: [key: curve]})
+      :public_key.pkix_test_data(%{
+        root: [key: curve, digest: :sha256],
+        intermediates: [],
+        peer: [key: curve, digest: :sha256]
+      })
 
     issuer = chain[:key] |> elem(1) |> JOSE.JWK.from_der()
     holder = JOSE.JWK.generate_key({:ec, "P-256"})

@@ -2,8 +2,8 @@
 
 ```elixir
 Mix.install([
-  {:attesto, ">= 2.19.0 and < 3.0.0"},
-  {:attesto_client, "~> 2.19"},
+  {:attesto, ">= 2.20.0 and < 3.0.0"},
+  {:attesto_client, "~> 2.20"},
   {:kino, "~> 0.14"},
   {:eqrcode, "~> 0.2"}
 ])
@@ -31,7 +31,7 @@ leaves the device. That's **selective disclosure**.
 Everything below runs locally on [`attesto`](https://hex.pm/packages/attesto)
 (issuer/verifier core) and [`attesto_client`](https://hex.pm/packages/attesto_client)
 (the wallet) — no HTTP servers or mock transports. The encrypted example
-requires Attesto `>= 2.19.0 and < 3.0.0` and AttestoClient 2.19 or later. See the
+requires Attesto `>= 2.20.0 and < 3.0.0` and AttestoClient 2.20 or later. See the
 [Credential wallet guide](credential-wallet.md) to connect this local exercise
 to real issuance, authorization, trust and consent flows.
 
@@ -328,5 +328,6 @@ issuer + OID4VP verifier HTTP surface is available via
 
 Continue with the [Credential wallet guide](credential-wallet.md) for real
 offers, OAuth/PAR callbacks, HAIP certificates and attestation providers. The
-existing issuer/verifier and OIDC RP certifications cover their listed roles;
-wallet certification requires its own conformance run and submission.
+wallet role is certified separately from the issuer/verifier and OIDC RP
+roles: OpenID4VCI 1.0 + HAIP 1.0 Wallet and OpenID4VP 1.0 + HAIP 1.0 Wallet
+(`Attesto Client 2.7.0` / `Attesto 2.3.1`, certified `2026-10-08`).

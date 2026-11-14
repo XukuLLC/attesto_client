@@ -82,11 +82,11 @@ defmodule AttestoClient.ResourceServer do
   fetches; every address it returns is screened the same way.
   """
 
-  alias Attesto.{NumericDate, SigningAlg}
+  alias Attesto.{Claims, NumericDate, Scope, SigningAlg}
   alias AttestoClient.{ClaimValidation, Discovery, Issuer, Verifier}
 
   @label "ResourceServer"
-  @default_clock_skew_seconds 60
+  @default_clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type server :: GenServer.server()
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
@@ -202,8 +202,9 @@ defmodule AttestoClient.ResourceServer do
 
   # The keys come from the snapshot; the token policy is the one this module
   # validated at start, carried on the snapshot as `private`.
-  defp verify_snapshot(%{private: policy} = snapshot, access_token, opts) do
-    with {:ok, algs} <- Verifier.accepted_algs(accepted_algs: policy.accepted_algs),
+  defp verify_snapshot(snapshot, access_token, opts) do
+    with {:ok, policy} <- resolve_policy(Map.get(snapshot, :private), opts),
+         {:ok, algs} <- Verifier.accepted_algs(accepted_algs: policy.accepted_algs),
          {:ok, claims, header, _verified_jwk} <-
            Verifier.verify_signature(access_token, snapshot.keys, algs),
          :ok <- check_typ(header),
@@ -240,8 +241,8 @@ defmodule AttestoClient.ResourceServer do
     end
   end
 
-  defp check_typ(%{"typ" => typ}) when is_binary(typ) do
-    if String.downcase(typ) in ["at+jwt", "application/at+jwt"],
+  defp check_typ(%{"typ" => typ}) do
+    if Claims.typ_matches?(typ, ["at+jwt"], normalization: :application_subtype),
       do: :ok,
       else: {:error, :unexpected_typ}
   end
@@ -314,11 +315,15 @@ defmodule AttestoClient.ResourceServer do
   defp check_max_lifetime(_iat, _exp, _invalid), do: {:error, :invalid_policy}
 
   defp scopes(%{"scope" => scope}) when is_binary(scope) do
-    scopes = String.split(scope, " ", trim: true)
+    case Scope.parse(scope, allow_empty?: false) do
+      scopes when is_list(scopes) ->
+        if Enum.all?(scopes, &Scope.valid_token?/1),
+          do: {:ok, scopes},
+          else: {:error, :invalid_scope}
 
-    if scopes != [] and Enum.all?(scopes, &Attesto.Scope.valid_token?/1),
-      do: {:ok, scopes},
-      else: {:error, :invalid_scope}
+      :empty ->
+        {:error, :invalid_scope}
+    end
   end
 
   defp scopes(claims) when not is_map_key(claims, "scope"), do: {:ok, []}
@@ -327,7 +332,7 @@ defmodule AttestoClient.ResourceServer do
   defp check_required_scopes(_granted, []), do: :ok
 
   defp check_required_scopes(granted, required) when is_list(required) do
-    if Enum.all?(required, &Attesto.Scope.valid_token?/1) and
+    if Enum.all?(required, &Scope.valid_token?/1) and
          Enum.all?(required, &(&1 in granted)),
        do: :ok,
        else: {:error, :insufficient_scope}
@@ -389,13 +394,52 @@ defmodule AttestoClient.ResourceServer do
     end
   end
 
-  defp clock_skew_seconds!(opts) do
-    case Keyword.get(opts, :clock_skew_seconds, @default_clock_skew_seconds) do
-      value when is_integer(value) and value >= 0 ->
-        value
+  defp resolve_policy(%{} = policy, _opts), do: {:ok, policy}
 
-      _invalid ->
-        raise ArgumentError, "ResourceServer :clock_skew_seconds must be a non-negative integer"
+  defp resolve_policy(nil, opts) do
+    with {:ok, audiences} <- resolve_audiences(Keyword.get(opts, :audience)),
+         {:ok, accepted_algs} <- Verifier.accepted_algs(Keyword.take(opts, [:accepted_algs])),
+         {:ok, skew} <- resolve_tolerance(opts, :clock_skew_seconds, @default_clock_skew_seconds),
+         {:ok, leeway} <- resolve_tolerance(opts, :expiry_leeway_seconds, 0) do
+      {:ok,
+       %{
+         audiences: audiences,
+         accepted_algs: accepted_algs,
+         clock_skew_seconds: skew,
+         expiry_leeway_seconds: leeway
+       }}
+    end
+  end
+
+  defp resolve_policy(_invalid, _opts), do: {:error, :invalid_policy}
+
+  defp resolve_audiences(audience) when is_binary(audience) and audience != "",
+    do: {:ok, [audience]}
+
+  defp resolve_audiences(audiences) when is_list(audiences) and audiences != [] do
+    if Enum.all?(audiences, &(is_binary(&1) and &1 != "")),
+      do: {:ok, Enum.uniq(audiences)},
+      else: {:error, :invalid_policy}
+  end
+
+  defp resolve_audiences(_invalid), do: {:error, :invalid_policy}
+
+  defp resolve_tolerance(opts, key, default) do
+    case ClaimValidation.tolerance(opts, key, default) do
+      {:ok, seconds} -> {:ok, seconds}
+      :error -> {:error, :invalid_policy}
+    end
+  end
+
+  defp clock_skew_seconds!(opts) do
+    case ClaimValidation.tolerance(opts, :clock_skew_seconds, @default_clock_skew_seconds) do
+      {:ok, seconds} ->
+        seconds
+
+      :error ->
+        raise ArgumentError,
+              "ResourceServer :clock_skew_seconds must be an integer from 0 to " <>
+                "#{ClaimValidation.max_tolerance_seconds()}"
     end
   end
 

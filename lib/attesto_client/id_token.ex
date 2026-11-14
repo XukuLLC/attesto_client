@@ -108,11 +108,10 @@ defmodule AttestoClient.IDToken do
   and never applies to artifacts received through the front channel.
   """
 
-  alias Attesto.SecureCompare
-  alias Attesto.SigningAlg
+  alias Attesto.{AuthorizationRequest, NumericDate, SecureCompare, SigningAlg}
   alias AttestoClient.{ClaimValidation, Issuer, Verifier}
 
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @id_token_typ "JWT"
 
   @type jwks :: %{optional(String.t()) => term()} | [map()] | map()
@@ -134,6 +133,7 @@ defmodule AttestoClient.IDToken do
           | {:outbound, AttestoClient.Outbound.t()}
           | {:clock_skew_seconds, 0..300}
           | {:expiry_leeway_seconds, 0..300}
+          | {:auth_time_allowance_seconds, 0..300}
           | {:access_token, String.t()}
           | {:require_at_hash, boolean()}
           | {:code, String.t()}
@@ -163,6 +163,7 @@ defmodule AttestoClient.IDToken do
           | :invalid_issuer_aliases
           | :invalid_clock_skew_seconds
           | :invalid_expiry_leeway_seconds
+          | :invalid_auth_time_allowance_seconds
           | :invalid_max_token_age_seconds
           | :invalid_require_auth_time
           | :invalid_require_typ
@@ -457,8 +458,10 @@ defmodule AttestoClient.IDToken do
              :require_auth_time,
              :invalid_require_auth_time
            ),
-         :ok <- require_positive_auth_time(claims, Keyword.get(opts, :require_auth_time, false)) do
-      check_auth_time(claims, opts, now, skew)
+         :ok <- require_positive_auth_time(claims, Keyword.get(opts, :require_auth_time, false)),
+         {:ok, allowance} <-
+           tolerance(opts, :auth_time_allowance_seconds, 0, :invalid_auth_time_allowance_seconds) do
+      check_auth_time(claims, opts, now, skew, allowance)
     end
   end
 
@@ -468,26 +471,22 @@ defmodule AttestoClient.IDToken do
 
   defp require_positive_auth_time(_claims, _required), do: :ok
 
-  defp check_auth_time(claims, opts, now, skew) do
+  defp check_auth_time(claims, opts, now, skew, allowance) do
     case Keyword.get(opts, :max_age) do
       nil ->
         check_unbounded_auth_time(claims, Keyword.get(opts, :require_auth_time, false), now, skew)
 
       max_age when is_integer(max_age) and max_age >= 0 ->
-        check_auth_age(claims, max_age, now, skew)
+        AuthorizationRequest.check_auth_time(
+          max_age,
+          Map.get(claims, "auth_time"),
+          now,
+          future_skew: skew,
+          allowance: allowance
+        )
 
       _other ->
         {:error, :invalid_max_age}
-    end
-  end
-
-  defp check_auth_age(claims, max_age, now, skew) do
-    case fetch_auth_time(claims, now, skew) do
-      {:ok, auth_time} ->
-        if auth_time + max_age >= now, do: :ok, else: {:error, :max_age_exceeded}
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 

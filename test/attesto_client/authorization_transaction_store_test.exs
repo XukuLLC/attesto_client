@@ -94,6 +94,9 @@ defmodule AttestoClient.AuthorizationTransactionStoreTest do
 
     formatted = ETS.format_status(status)
     inspected = inspect(formatted)
+    tx_inspected = inspect(transaction("secret-tx-state"))
+
+    refute tx_inspected =~ "secret-tx-state"
 
     assert formatted.state == %{
              table: :redacted,

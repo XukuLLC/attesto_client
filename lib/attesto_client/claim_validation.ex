@@ -94,9 +94,11 @@ defmodule AttestoClient.ClaimValidation do
         error_result(opts, :invalid_error)
 
       {:ok, value} ->
-        if NumericDate.not_before_reached?(value, now, skew: Keyword.get(opts, :skew, 60)),
-          do: :ok,
-          else: error_result(opts, :future_error)
+        if NumericDate.not_before_reached?(value, now,
+             skew: Keyword.get(opts, :skew, NumericDate.default_clock_skew_seconds())
+           ),
+           do: :ok,
+           else: error_result(opts, :future_error)
     end
   end
 

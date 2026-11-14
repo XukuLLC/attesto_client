@@ -522,6 +522,15 @@ defmodule AttestoClient.IDTokenTest do
       assert {:ok, _claims} = verify(token, clock_skew_seconds: 300, expiry_leeway_seconds: 300)
       assert {:ok, _claims} = verify(token, clock_skew_seconds: nil, expiry_leeway_seconds: nil)
     end
+
+    test ":auth_time_allowance_seconds delegates max_age freshness to core with bounded allowance" do
+      token = sign(base_claims(%{"auth_time" => @now - 1}))
+      assert {:error, :max_age_exceeded} = verify(token, max_age: 0)
+      assert {:ok, _claims} = verify(token, max_age: 0, auth_time_allowance_seconds: 30)
+
+      assert {:error, :invalid_auth_time_allowance_seconds} =
+               verify(token, max_age: 0, auth_time_allowance_seconds: 301)
+    end
   end
 
   describe "verify/2 compact input bounds" do

@@ -50,6 +50,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           required_scopes: ["documents.read"],
           now: @now
         )
@@ -71,6 +72,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           allowed_subjects: ["user-123"],
           allowed_client_ids: ["client-123"],
           max_token_age_seconds: 60,
@@ -86,7 +88,12 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> conn("/documents")
       |> put_req_header("authorization", "Bearer #{token}")
       |> ResourceServerPlug.call(
-        ResourceServerPlug.init(server: ctx.server, allowed_subjects: ["other"], now: @now)
+        ResourceServerPlug.init(
+          server: ctx.server,
+          origin: "https://api.example",
+          allowed_subjects: ["other"],
+          now: @now
+        )
       )
 
     assert rejected.status == 401
@@ -102,6 +109,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           required_scopes: ["admin"],
           now: @now
         )
@@ -115,7 +123,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
   end
 
   test "rejects malformed or absent authorization", ctx do
-    opts = ResourceServerPlug.init(server: ctx.server, now: @now)
+    opts = ResourceServerPlug.init(server: ctx.server, origin: "https://api.example", now: @now)
 
     missing = ResourceServerPlug.call(conn(:get, "/"), opts)
     assert missing.halted
@@ -146,6 +154,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
         |> ResourceServerPlug.call(
           ResourceServerPlug.init(
             server: ctx.server,
+            origin: "https://api.example",
             now: @now,
             resource_metadata: url
           )
@@ -174,6 +183,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           required_scopes: ["documents.read"],
           replay_check: fn jti, ttl ->
             send(parent, {:replay_check, jti, ttl})
@@ -213,6 +223,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           replay_check: fn replay_key, ttl ->
             send(parent, {:unexpected_replay_claim, replay_key, ttl})
             :ok
@@ -245,6 +256,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
     opts =
       ResourceServerPlug.init(
         server: ctx.server,
+        origin: "https://api.example",
         replay_check: replay_check,
         now: @now
       )
@@ -297,6 +309,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
         |> ResourceServerPlug.call(
           ResourceServerPlug.init(
             server: ctx.server,
+            origin: "https://[2001:db8::1]:8443",
             replay_check: fn _jti, _ttl -> :ok end,
             now: @now
           )
@@ -325,6 +338,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           replay_check: fn _jti, _ttl -> :ok end,
           cert_der: fn _conn -> cert end,
           now: @now
@@ -339,7 +353,13 @@ defmodule AttestoClient.ResourceServerPlugTest do
     {:ok, thumbprint} = Attesto.MTLS.compute_thumbprint(cert)
     token = access_token(ctx.key, %{"cnf" => %{"x5t#S256" => thumbprint}})
 
-    opts = ResourceServerPlug.init(server: ctx.server, cert_der: fn _conn -> cert end, now: @now)
+    opts =
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        cert_der: fn _conn -> cert end,
+        now: @now
+      )
 
     conn =
       :get
@@ -353,7 +373,9 @@ defmodule AttestoClient.ResourceServerPlugTest do
       :get
       |> conn("/documents")
       |> put_req_header("authorization", "Bearer #{token}")
-      |> ResourceServerPlug.call(ResourceServerPlug.init(server: ctx.server, now: @now))
+      |> ResourceServerPlug.call(
+        ResourceServerPlug.init(server: ctx.server, origin: "https://api.example", now: @now)
+      )
 
     assert missing.status == 401
 
@@ -364,6 +386,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           cert_der: fn _conn -> "not DER" end,
           now: @now
         )
@@ -383,6 +406,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           cert_der: fn _conn -> cert end,
           now: @now
         )
@@ -406,6 +430,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           replay_check: fn _jti, _ttl -> :ok end,
           nonce_check: fn _nonce -> {:error, :use_dpop_nonce} end,
           nonce_issue: fn -> "next-nonce" end,
@@ -451,6 +476,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           replay_check: fn _jti, _ttl -> :ok end,
           nonce_check: fn _nonce -> {:error, :use_dpop_nonce} end,
           nonce_issue: fn -> nil end,
@@ -479,6 +505,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           replay_check: fn _jti, _ttl -> :ok end,
           dpop_max_age_seconds: 120,
           now: @now
@@ -492,7 +519,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
     token = access_token(ctx.key)
     proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
     proof = dpop_proof(proof_key, token, "https://api.example/documents")
-    opts = ResourceServerPlug.init(server: ctx.server, now: @now)
+    opts = ResourceServerPlug.init(server: ctx.server, origin: "https://api.example", now: @now)
 
     downgrade =
       :get
@@ -535,7 +562,9 @@ defmodule AttestoClient.ResourceServerPlugTest do
       :get
       |> conn("/documents")
       |> put_req_header("authorization", "Bearer token")
-      |> ResourceServerPlug.call(ResourceServerPlug.init(server: dead_server))
+      |> ResourceServerPlug.call(
+        ResourceServerPlug.init(server: dead_server, origin: "https://api.example")
+      )
 
     assert conn.status == 503
     assert JSON.decode!(conn.resp_body) == %{"error" => "temporarily_unavailable"}
@@ -558,6 +587,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
       |> ResourceServerPlug.call(
         ResourceServerPlug.init(
           server: ctx.server,
+          origin: "https://api.example",
           dpop_replay_unprotected_acknowledged?: true,
           now: @now
         )
@@ -578,7 +608,9 @@ defmodule AttestoClient.ResourceServerPlugTest do
       :get
       |> conn("/documents")
       |> put_req_header("authorization", "Bearer #{expired}")
-      |> ResourceServerPlug.call(ResourceServerPlug.init(server: ctx.server, now: @now))
+      |> ResourceServerPlug.call(
+        ResourceServerPlug.init(server: ctx.server, origin: "https://api.example", now: @now)
+      )
 
     assert conn.status == 401
     assert JSON.decode!(conn.resp_body) == %{"error" => "invalid_token"}
@@ -591,11 +623,27 @@ defmodule AttestoClient.ResourceServerPlugTest do
     assert_raise ArgumentError, fn -> ResourceServerPlug.init([]) end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: ctx.server, nonce_check: fn _ -> :ok end)
+      ResourceServerPlug.init(server: ctx.server, replay_check: fn _jti, _ttl -> :ok end)
     end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: ctx.server, required_scopes: ["bad scope"])
+      ResourceServerPlug.init(server: ctx.server, htu: "https://api.example/documents")
+    end
+
+    assert_raise ArgumentError, fn ->
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        nonce_check: fn _ -> :ok end
+      )
+    end
+
+    assert_raise ArgumentError, fn ->
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        required_scopes: ["bad scope"]
+      )
     end
 
     for {key, callback} <- [
@@ -606,25 +654,70 @@ defmodule AttestoClient.ResourceServerPlugTest do
           replay_check: fn _jti -> :wrong_arity end
         ] do
       assert_raise ArgumentError, fn ->
-        ResourceServerPlug.init([{:server, ctx.server}, {key, callback}])
+        ResourceServerPlug.init([
+          {:server, ctx.server},
+          {:origin, "https://api.example"},
+          {key, callback}
+        ])
       end
     end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: fn _argument -> ctx.server end)
+      ResourceServerPlug.init(
+        server: fn _argument -> ctx.server end,
+        origin: "https://api.example"
+      )
     end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: ctx.server, dpop_max_age_seconds: 0)
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        dpop_max_age_seconds: 0
+      )
     end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: ctx.server, allowed_subjects: ["valid", 123])
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        allowed_subjects: ["valid", 123]
+      )
     end
 
     assert_raise ArgumentError, fn ->
-      ResourceServerPlug.init(server: ctx.server, max_token_age_seconds: -1)
+      ResourceServerPlug.init(
+        server: ctx.server,
+        origin: "https://api.example",
+        max_token_age_seconds: -1
+      )
     end
+  end
+
+  test "bearer-only mounts start without origin or htu and reject DPoP requests", ctx do
+    opts = ResourceServerPlug.init(server: ctx.server, now: @now)
+    token = access_token(ctx.key)
+
+    bearer_conn =
+      :get
+      |> conn("/documents")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> ResourceServerPlug.call(opts)
+
+    refute bearer_conn.halted
+
+    proof_key = JOSE.JWK.generate_key({:ec, "P-256"})
+    proof = dpop_proof(proof_key, token, "https://api.example/documents")
+
+    dpop_conn =
+      :get
+      |> conn("/documents")
+      |> external_https_conn()
+      |> put_req_header("authorization", "DPoP #{token}")
+      |> put_req_header("dpop", proof)
+      |> ResourceServerPlug.call(opts)
+
+    assert dpop_conn.status == 401
   end
 
   defp access_token(key, overrides \\ %{}) do
@@ -675,7 +768,7 @@ defmodule AttestoClient.ResourceServerPlugTest do
   defp external_https_conn(conn), do: %{conn | scheme: :https, host: "api.example", port: 443}
 
   defp cert_der(name) do
-    %{cert: der} = :public_key.pkix_test_root_cert(String.to_charlist(name), [])
+    %{cert: der} = :public_key.pkix_test_root_cert(String.to_charlist(name), digest: :sha256)
     der
   end
 end

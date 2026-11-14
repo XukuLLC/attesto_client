@@ -172,4 +172,21 @@ defmodule AttestoClient.Wallet.PresentationDCQLTest do
     invalid = put_in(held().claims["roles"], [%{"name" => "reader"}, 1])
     assert {:error, {:no_match, "identity"}} = Presentation.select(query(q), [invalid])
   end
+
+  test "wildcard array values filter discloses only matching elements and checks strict types" do
+    nat_held = %{
+      held()
+      | claims: %{"vct" => "identity", "nationalities" => ["DE", "FR"], "age" => 18.0}
+    }
+
+    q =
+      credential()
+      |> Map.put("claims", [%{"path" => ["nationalities", nil], "values" => ["DE"]}])
+
+    assert DCQL.matches?(nat_held, q)
+    assert DCQL.paths(q, nat_held) == [["nationalities", 0]]
+
+    float_q = credential() |> Map.put("claims", [%{"path" => ["age"], "values" => [18]}])
+    refute DCQL.matches?(nat_held, float_q)
+  end
 end

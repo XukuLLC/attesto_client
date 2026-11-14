@@ -1,12 +1,12 @@
 defmodule AttestoClient.Wallet.CredentialTrust do
   @moduledoc false
 
-  alias Attesto.{JWS, StrictCBOR}
+  alias Attesto.{JWS, StrictCBOR, X509}
   alias AttestoClient.Wallet.Presentation.CertificateTrust
 
   @formats ~w(dc+sd-jwt vc+sd-jwt mso_mdoc)
-  @max_chain_length 8
-  @max_cert_bytes 65_536
+  @max_chain_length X509.max_chain_length()
+  @max_cert_bytes X509.max_cert_bytes()
 
   @spec validate_options(keyword()) :: :ok | {:error, atom()}
   def validate_options(opts) do
@@ -22,7 +22,7 @@ defmodule AttestoClient.Wallet.CredentialTrust do
       Keyword.get(opts, :format) not in @formats ->
         {:error, :unsupported_haip_format}
 
-      not valid_anchors?(Keyword.get(opts, :trusted_certificates)) ->
+      not X509.valid_trust_anchors?(Keyword.get(opts, :trusted_certificates)) ->
         {:error, :missing_trusted_certificates}
 
       not valid_policy?(Keyword.get(opts, :certificate_trust)) ->
@@ -33,10 +33,6 @@ defmodule AttestoClient.Wallet.CredentialTrust do
     end
   end
 
-  defp valid_anchors?(anchors) when is_list(anchors) and length(anchors) in 1..@max_chain_length,
-    do: Enum.all?(anchors, &(is_binary(&1) and byte_size(&1) in 1..@max_cert_bytes))
-
-  defp valid_anchors?(_anchors), do: false
   defp valid_policy?(nil), do: true
   defp valid_policy?(policy), do: is_function(policy, 1)
 
