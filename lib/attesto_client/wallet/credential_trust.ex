@@ -1,12 +1,9 @@
 defmodule AttestoClient.Wallet.CredentialTrust do
   @moduledoc false
 
-  alias Attesto.{JWS, StrictCBOR, X509}
-  alias AttestoClient.Wallet.Presentation.CertificateTrust
+  alias Attesto.{JWS, X509}
 
-  @formats ~w(dc+sd-jwt vc+sd-jwt mso_mdoc)
-  @max_chain_length X509.max_chain_length()
-  @max_cert_bytes X509.max_cert_bytes()
+  @formats ~w(dc+sd-jwt mso_mdoc)
 
   @spec validate_options(keyword()) :: :ok | {:error, atom()}
   def validate_options(opts) do
@@ -41,11 +38,12 @@ defmodule AttestoClient.Wallet.CredentialTrust do
   def resolve(format, credential, opts) do
     if Keyword.get(opts, :haip, false) do
       with {:ok, chain} <- certificate_chain(format, credential),
-           {:ok, verified} <- CertificateTrust.verify(chain, trust_options(format, opts)),
+           {:ok, verified} <- X509.verify(chain, trust_options(format, opts)),
            :ok <- signature_key_strength(format, credential, verified.public_key) do
         provenance = %{
           authority_key_identifiers: verified.authority_key_identifiers,
-          issuer_certificate_chain: chain
+          issuer_certificate_chain: chain,
+          issuer_trusted_certificates: [verified.trust_anchor]
         }
 
         {:ok, verified.public_key, provenance}
@@ -62,17 +60,17 @@ defmodule AttestoClient.Wallet.CredentialTrust do
   def attach(held, nil), do: held
   def attach(held, provenance), do: Map.merge(held, provenance)
 
-  defp certificate_chain(format, credential) when format in ~w(dc+sd-jwt vc+sd-jwt) do
+  defp certificate_chain("dc+sd-jwt", credential) do
     issuer_jwt = credential |> :binary.split("~") |> hd()
 
     with {:ok, header} <- JWS.peek_json(issuer_jwt, :protected),
-         do: CertificateTrust.decode_x5c(header["x5c"])
+         do: X509.decode_x5c(header["x5c"])
   end
 
   defp certificate_chain("mso_mdoc", credential), do: mdoc_chain(credential)
   defp certificate_chain(_format, _credential), do: {:error, :unsupported_haip_format}
 
-  defp signature_key_strength(format, credential, key) when format in ~w(dc+sd-jwt vc+sd-jwt) do
+  defp signature_key_strength("dc+sd-jwt", credential, key) do
     issuer_jwt = credential |> :binary.split("~") |> hd()
 
     with {:ok, header} <- JWS.peek_json(issuer_jwt, :protected) do
@@ -93,8 +91,12 @@ defmodule AttestoClient.Wallet.CredentialTrust do
   defp check_ps256_strength(_algorithm, _key), do: :ok
 
   if Code.ensure_loaded?(CBOR) do
+    alias Attesto.StrictCBOR
+
     @max_cbor_bytes 1_048_576
     @max_encoded_cbor_bytes div(@max_cbor_bytes * 4 + 2, 3)
+    @max_chain_length X509.max_chain_length()
+    @max_cert_bytes X509.max_cert_bytes()
 
     defp mdoc_chain(credential) do
       with {:ok, bytes} <- mdoc_bytes(credential),

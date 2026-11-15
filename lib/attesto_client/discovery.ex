@@ -533,7 +533,7 @@ defmodule AttestoClient.Discovery do
   end
 
   defp perform_get_json(url, opts, timeout_ms) do
-    with {:ok, request_opts} <- request_options(opts),
+    with {:ok, request_opts} <- PinnedRequest.extract_options(opts),
          req_options = Keyword.put_new(request_opts, :receive_timeout, timeout_ms),
          {:ok, target} <- screen_endpoint(url, Keyword.put(opts, :req_options, request_opts)),
          {:ok, req_options} <-
@@ -571,16 +571,6 @@ defmodule AttestoClient.Discovery do
     end
   rescue
     error -> {:error, {:transport, Exception.message(error)}}
-  end
-
-  defp request_options(opts) do
-    case Keyword.get(opts, :req_options, []) do
-      request_opts when is_list(request_opts) ->
-        with :ok <- PinnedRequest.validate_options(request_opts), do: {:ok, request_opts}
-
-      _invalid ->
-        {:error, :unsafe_transport_options}
-    end
   end
 
   defp request(target, req_options, max_bytes) do

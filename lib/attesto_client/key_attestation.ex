@@ -14,7 +14,7 @@ defmodule AttestoClient.KeyAttestation do
   `AttestoClient.Wallet.Proof` (shared `AttestoClient.Builder` internals).
   """
 
-  alias AttestoClient.Builder
+  alias AttestoClient.{Builder, InputValidation}
 
   @typ "key-attestation+jwt"
 
@@ -74,7 +74,7 @@ defmodule AttestoClient.KeyAttestation do
          {:ok, user_authentication} <-
            optional_string_list(opts, :user_authentication, :invalid_user_authentication),
          {:ok, certification} <- optional_url(opts, :certification, :invalid_certification),
-         {:ok, nonce} <- optional_string(opts, :nonce, :invalid_nonce),
+         {:ok, nonce} <- InputValidation.optional_string(opts, :nonce, :invalid_nonce),
          {:ok, x5c} <- Builder.validate_x5c(opts),
          {:ok, lifetime} <- Builder.validate_lifetime(opts, @default_lifetime_seconds),
          {:ok, now} <- Builder.validate_now(opts),
@@ -139,16 +139,8 @@ defmodule AttestoClient.KeyAttestation do
     end
   end
 
-  defp optional_string(opts, key, error) do
-    case Keyword.fetch(opts, key) do
-      :error -> {:ok, nil}
-      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
-      {:ok, _invalid} -> {:error, error}
-    end
-  end
-
   defp optional_url(opts, key, error) do
-    with {:ok, value} <- optional_string(opts, key, error) do
+    with {:ok, value} <- InputValidation.optional_string(opts, key, error) do
       validate_optional_url(value, error)
     end
   end

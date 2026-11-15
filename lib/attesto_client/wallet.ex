@@ -31,11 +31,12 @@ defmodule AttestoClient.Wallet do
   alias AttestoClient.TokenSet
   alias AttestoClient.Wallet.CredentialEncryption
   alias AttestoClient.Wallet.CredentialOffer
+  alias AttestoClient.Wallet.CredentialStatus
   alias AttestoClient.Wallet.CredentialTrust
   alias AttestoClient.Wallet.Deferred
   alias AttestoClient.Wallet.Proof
 
-  @sd_jwt_vc_formats ~w(vc+sd-jwt dc+sd-jwt)
+  @sd_jwt_vc_formats ~w(dc+sd-jwt)
   @jwt_vc_format "jwt_vc_json"
   @mdoc_format "mso_mdoc"
 
@@ -45,6 +46,9 @@ defmodule AttestoClient.Wallet do
           required(:claims) => map(),
           required(:holder_binding) => map() | nil,
           optional(:doc_type) => String.t(),
+          optional(:issuer_key) => term(),
+          optional(:issuer_trusted_certificates) => [binary()],
+          optional(:credential_status) => map(),
           optional(:authority_key_identifiers) => [String.t()],
           optional(:issuer_certificate_chain) => [binary()]
         }
@@ -103,8 +107,8 @@ defmodule AttestoClient.Wallet do
   Run the wallet-holder issuance flow for `offer` and return the verified,
   held credential(s) (or a pending marker for deferred issuance).
 
-  Required options: `:credential_endpoint`, `:format` (one of `"vc+sd-jwt"`,
-  `"dc+sd-jwt"`, `"jwt_vc_json"`, or `"mso_mdoc"`), and `:trusted` (the
+  Required options: `:credential_endpoint`, `:format` (one of `"dc+sd-jwt"`,
+  `"jwt_vc_json"`, or `"mso_mdoc"`), and `:trusted` (the
   Credential Issuer's verification key material, in the shape the matching
   attesto verifier expects - a JWKS/JWK list for `Attesto.SdJwtVc` and
   `Attesto.JwtVc`, a single JWK/PEM for `Attesto.Mdoc`). `:verify_opts` are
@@ -768,10 +772,16 @@ defmodule AttestoClient.Wallet do
 
   defp verify_credential(format, credential, opts) do
     with {:ok, key, provenance} <- CredentialTrust.resolve(format, credential, opts),
-         {:ok, held} <- verify_format(format, credential, key, opts) do
-      {:ok, CredentialTrust.attach(held, provenance)}
+         verify_options = credential_status_trust(opts, provenance),
+         {:ok, held} <- verify_format(format, credential, key, verify_options) do
+      {:ok, held |> Map.put(:issuer_key, key) |> CredentialTrust.attach(provenance)}
     end
   end
+
+  defp credential_status_trust(opts, %{issuer_trusted_certificates: anchors}),
+    do: Keyword.put(opts, :status_trusted_certificates, anchors)
+
+  defp credential_status_trust(opts, _provenance), do: opts
 
   defp verify_format(format, credential, key, opts) when format in @sd_jwt_vc_formats do
     with {:ok, %{claims: claims, cnf: cnf, iss: issuer}} <-
@@ -792,7 +802,7 @@ defmodule AttestoClient.Wallet do
 
   if Code.ensure_loaded?(CBOR) do
     defp verify_format(@mdoc_format, credential, key, opts) do
-      with {:ok, %{namespaces: namespaces, device_key: device_key, doc_type: doc_type}} <-
+      with {:ok, %{namespaces: namespaces, device_key: device_key, doc_type: doc_type} = verified} <-
              Attesto.Mdoc.verify(credential, key, verify_opts(opts)) do
         {:ok,
          %{
@@ -800,7 +810,8 @@ defmodule AttestoClient.Wallet do
            credential: credential,
            claims: namespaces,
            holder_binding: device_key,
-           doc_type: doc_type
+           doc_type: doc_type,
+           credential_status: Map.get(verified, :status)
          }}
       end
     end
@@ -820,7 +831,9 @@ defmodule AttestoClient.Wallet do
   end
 
   defp verify_opts(opts) do
-    verify_opts = Keyword.get(opts, :verify_opts, [])
+    verify_opts =
+      Keyword.get(opts, :verify_opts, [])
+      |> Keyword.put(:resolve_status, CredentialStatus.resolver(opts))
 
     if Keyword.get(opts, :haip, false) do
       # CredentialTrust has already enforced certificate provenance and PS256
@@ -828,6 +841,14 @@ defmodule AttestoClient.Wallet do
       # algorithm policy is explicit at this composition boundary.
       verify_opts
       |> Keyword.put(:issuer_identity, :certificate)
+      |> Keyword.put(
+        :status_trusted_certificates,
+        Keyword.get(
+          opts,
+          :status_trusted_certificates,
+          Keyword.fetch!(opts, :trusted_certificates)
+        )
+      )
       |> Keyword.put_new(:enforce_fapi_alg_policy, false)
     else
       verify_opts

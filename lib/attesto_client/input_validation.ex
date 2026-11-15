@@ -17,6 +17,15 @@ defmodule AttestoClient.InputValidation do
       else: {:error, error}
   end
 
+  @spec optional_string(keyword(), atom(), term()) :: {:ok, String.t() | nil} | {:error, term()}
+  def optional_string(opts, key, error) when is_list(opts) and is_atom(key) do
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, nil}
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      {:ok, _invalid} -> {:error, error}
+    end
+  end
+
   defp fetch(container, key) when is_list(container) do
     if Keyword.keyword?(container), do: Keyword.get(container, key), else: nil
   end

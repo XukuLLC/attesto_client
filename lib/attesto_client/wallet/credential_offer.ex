@@ -1,6 +1,6 @@
 defmodule AttestoClient.Wallet.CredentialOffer do
   @moduledoc """
-  Parse an OID4VCI Credential Offer (`draft-ietf-oauth-openid4vci` §4.1) the
+  Parse an OID4VCI Credential Offer (`OpenID4VCI 1.0`, 2025-09-16, §4.1) the
   wallet receives - the holder-side mirror of `Attesto.CredentialOffer.build/1`.
 
   A Credential Offer reaches the wallet in one of three shapes:

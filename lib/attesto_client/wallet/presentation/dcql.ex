@@ -1,7 +1,7 @@
 defmodule AttestoClient.Wallet.Presentation.DCQL do
   @moduledoc false
 
-  @formats ~w(dc+sd-jwt vc+sd-jwt mso_mdoc)
+  @formats ~w(dc+sd-jwt mso_mdoc)
 
   def validate(%{"credentials" => queries} = query) when is_list(queries) and queries != [] do
     ids = Enum.map(queries, &query_id/1)

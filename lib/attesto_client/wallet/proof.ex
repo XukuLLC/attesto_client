@@ -1,7 +1,7 @@
 defmodule AttestoClient.Wallet.Proof do
   @moduledoc """
   Build the OID4VCI holder key proof of possession
-  (`draft-ietf-oauth-openid4vci` §8.2.1.1), the wallet-side mirror of
+  (`OpenID4VCI 1.0`, 2025-09-16, §8.2.1.1), the wallet-side mirror of
   `Attesto.CredentialProof.verify_jwt/2`.
 
   A proof is a JWT, typed `openid4vci-proof+jwt`, whose header carries the
@@ -18,9 +18,9 @@ defmodule AttestoClient.Wallet.Proof do
   `AttestoClient.Builder` internals).
   """
 
-  alias AttestoClient.Builder
+  alias AttestoClient.{Builder, InputValidation}
 
-  # draft-ietf-oauth-openid4vci §8.2.1.1: explicit typing of a key proof, a
+  # OpenID4VCI 1.0 (2025-09-16) §8.2.1.1: explicit typing of a key proof, a
   # defence against cross-JWT confusion. Not overridable - unlike the request
   # object's FAPI typ, this exact value is what
   # `Attesto.CredentialProof.verify_jwt/2` requires.
@@ -66,10 +66,10 @@ defmodule AttestoClient.Wallet.Proof do
     with {:ok, jose_jwk} <- Builder.normalize_key(jwk),
          {:ok, credential_issuer} <-
            Builder.require_string(opts, :credential_issuer, :invalid_credential_issuer),
-         {:ok, nonce} <- optional_string(opts, :nonce, :invalid_nonce),
-         {:ok, client_id} <- optional_string(opts, :client_id, :invalid_client_id),
+         {:ok, nonce} <- InputValidation.optional_string(opts, :nonce, :invalid_nonce),
+         {:ok, client_id} <- InputValidation.optional_string(opts, :client_id, :invalid_client_id),
          {:ok, key_attestation} <-
-           optional_string(opts, :key_attestation, :invalid_key_attestation),
+           InputValidation.optional_string(opts, :key_attestation, :invalid_key_attestation),
          {:ok, now} <- Builder.validate_now(opts),
          {:ok, kid} <- Builder.resolve_kid(jose_jwk, opts),
          {:ok, alg} <- Builder.resolve_alg(jose_jwk, opts) do
@@ -84,14 +84,6 @@ defmodule AttestoClient.Wallet.Proof do
         |> Builder.put_kid(kid)
 
       Builder.sign(jose_jwk, header, claims)
-    end
-  end
-
-  defp optional_string(opts, key, error) do
-    case Keyword.fetch(opts, key) do
-      :error -> {:ok, nil}
-      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
-      {:ok, _invalid} -> {:error, error}
     end
   end
 end

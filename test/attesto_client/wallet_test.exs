@@ -110,13 +110,13 @@ defmodule AttestoClient.WalletTest do
                  nonce_endpoint: "#{@issuer}/nonce",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: sd_jwt_vc_plug(issuer_pem, self())]
                )
 
       assert %{c_nonce: @c_nonce, credentials: [held]} = result
-      assert held.format == "vc+sd-jwt"
+      assert held.format == "dc+sd-jwt"
       assert held.claims["given_name"] == "Jane"
       assert held.claims["vct"] == @configuration_id
 
@@ -165,12 +165,12 @@ defmodule AttestoClient.WalletTest do
                Wallet.request_credential(offer(), key,
                  access_token: "already-have-one",
                  credential_endpoint: "#{@issuer}/credential",
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
 
-      assert held.format == "vc+sd-jwt"
+      assert held.format == "dc+sd-jwt"
       assert_receive {:credential_request, ["Bearer already-have-one"]}
     end
 
@@ -192,7 +192,7 @@ defmodule AttestoClient.WalletTest do
         nonce_endpoint: "#{@issuer}/nonce",
         credential_endpoint: "#{@issuer}/credential",
         client_id: @client_id,
-        format: "vc+sd-jwt",
+        format: "dc+sd-jwt",
         trusted: issuer_jwk,
         req_options: [plug: sd_jwt_vc_plug(issuer_pem, test_pid)]
       ]
@@ -233,7 +233,7 @@ defmodule AttestoClient.WalletTest do
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -264,7 +264,7 @@ defmodule AttestoClient.WalletTest do
                    token_endpoint: "#{@issuer}/token",
                    credential_endpoint: "#{@issuer}/credential",
                    client_id: @client_id,
-                   format: "vc+sd-jwt",
+                   format: "dc+sd-jwt",
                    trusted: issuer_jwk,
                    req_options: [plug: plug]
                  )
@@ -329,7 +329,7 @@ defmodule AttestoClient.WalletTest do
                  nonce_endpoint: "#{@issuer}/nonce",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  dpop: dpop_key,
                  client_auth: {:client_secret_post, "wallet-secret"},
@@ -443,7 +443,7 @@ defmodule AttestoClient.WalletTest do
                    credential_endpoint: "#{@issuer}/credential",
                    client_id: @client_id,
                    client_auth: client_auth,
-                   format: "vc+sd-jwt",
+                   format: "dc+sd-jwt",
                    trusted: issuer_jwk,
                    dpop: dpop_key,
                    req_options: [plug: plug]
@@ -508,7 +508,7 @@ defmodule AttestoClient.WalletTest do
                    nonce_endpoint: "#{@issuer}/nonce",
                    credential_endpoint: "#{@issuer}/credential",
                    client_id: @client_id,
-                   format: "vc+sd-jwt",
+                   format: "dc+sd-jwt",
                    trusted: @trusted_placeholder,
                    dpop: holder_key(),
                    req_options: [plug: plug]
@@ -528,7 +528,7 @@ defmodule AttestoClient.WalletTest do
                  nonce_endpoint: "#{@issuer}/nonce",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  dpop: holder_key(),
                  req_options: [plug: dpop_capturing_plug(issuer_pem, self(), "dPoP")]
@@ -585,7 +585,7 @@ defmodule AttestoClient.WalletTest do
                  credential_endpoint: "#{@issuer}/credential",
                  notification_endpoint: "#{@issuer}/notification",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -633,7 +633,7 @@ defmodule AttestoClient.WalletTest do
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -684,7 +684,7 @@ defmodule AttestoClient.WalletTest do
                  credential_endpoint: "#{@issuer}/credential",
                  notification_endpoint: "#{@issuer}/notification",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -699,7 +699,7 @@ defmodule AttestoClient.WalletTest do
                Wallet.request_credential(offer(), JOSE.JWK.generate_key({:oct, 32}),
                  access_token: "already-have-one",
                  credential_endpoint: "#{@issuer}/credential",
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: @trusted_placeholder,
                  req_options: [plug: fn _conn -> flunk("unexpected HTTP") end]
                )
@@ -719,7 +719,7 @@ defmodule AttestoClient.WalletTest do
                  Wallet.request_credential(offer(), duplicate_keys,
                    access_token: "already-have-one",
                    credential_endpoint: "#{@issuer}/credential",
-                   format: "vc+sd-jwt",
+                   format: "dc+sd-jwt",
                    trusted: @trusted_placeholder,
                    req_options: [plug: fn _conn -> flunk("unexpected HTTP") end]
                  )
@@ -766,7 +766,7 @@ defmodule AttestoClient.WalletTest do
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -814,7 +814,7 @@ defmodule AttestoClient.WalletTest do
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -849,7 +849,7 @@ defmodule AttestoClient.WalletTest do
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  req_options: [plug: plug]
                )
@@ -867,7 +867,7 @@ defmodule AttestoClient.WalletTest do
                Wallet.request_credential(offer(), holder_key(),
                  token_endpoint: "#{@issuer}/token",
                  credential_endpoint: "#{@issuer}/credential",
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  req_options: [plug: plug]
                )
 
@@ -894,7 +894,7 @@ defmodule AttestoClient.WalletTest do
                  nonce_endpoint: "#{@issuer}/nonce",
                  credential_endpoint: "#{@issuer}/credential",
                  client_id: @client_id,
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: issuer_jwk,
                  key_attestation: builder,
                  req_options: [plug: sd_jwt_vc_plug(issuer_pem, self())]
@@ -912,7 +912,7 @@ defmodule AttestoClient.WalletTest do
       assert {:error, :missing_pre_authorized_code_grant} =
                Wallet.request_credential(offer, holder_key(),
                  credential_endpoint: "#{@issuer}/credential",
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: @trusted_placeholder
                )
     end
@@ -946,14 +946,24 @@ defmodule AttestoClient.WalletTest do
                Wallet.request_credential(multi, holder_key(),
                  access_token: "t",
                  credential_endpoint: "#{@issuer}/credential",
-                 format: "vc+sd-jwt",
+                 format: "dc+sd-jwt",
                  trusted: @trusted_placeholder
                )
     end
 
     test "not a CredentialOffer struct" do
       assert {:error, :invalid_offer} =
-               Wallet.request_credential(%{}, holder_key(), format: "vc+sd-jwt")
+               Wallet.request_credential(%{}, holder_key(), format: "dc+sd-jwt")
+    end
+
+    test "rejects legacy vc+sd-jwt format under draft-26" do
+      assert {:error, :missing_format} =
+               Wallet.request_credential(offer(), holder_key(),
+                 access_token: "t",
+                 credential_endpoint: "#{@issuer}/credential",
+                 format: "vc+sd-jwt",
+                 trusted: @trusted_placeholder
+               )
     end
   end
 

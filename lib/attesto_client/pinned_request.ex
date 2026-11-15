@@ -107,6 +107,18 @@ defmodule AttestoClient.PinnedRequest do
   end
 
   @doc false
+  @spec extract_options(keyword()) :: {:ok, keyword()} | {:error, :unsafe_transport_options}
+  def extract_options(opts) when is_list(opts) do
+    case Keyword.get(opts, :req_options, []) do
+      request_opts when is_list(request_opts) ->
+        with :ok <- validate_options(request_opts), do: {:ok, request_opts}
+
+      _invalid ->
+        {:error, :unsafe_transport_options}
+    end
+  end
+
+  @doc false
   @spec validate_options(term()) :: :ok | {:error, :unsafe_transport_options}
   def validate_options(options) when is_list(options) do
     connect = Keyword.get(options, :connect_options, [])
@@ -213,161 +225,55 @@ defmodule AttestoClient.PinnedRequest do
   end
 
   # The Req adapter for every screened request: one Mint connection to the
-  # pinned address, closed when the response is complete. Req's Finch adapter
-  # starts a Finch instance, with its own registered processes and atoms, for
-  # each distinct set of `connect_options`, which here includes the hostname,
-  # and never stops it. Hostnames reach this module from untrusted documents,
-  # so that state would grow without bound.
+  # One-shot Mint connections are delegated to `Attesto.PinnedHTTP.passive_request/7`
+  # so a connection is closed as soon as the response completes. Req's Finch
+  # adapter starts a Finch instance, with its own registered processes and
+  # atoms, for each distinct set of `connect_options`, which here includes the
+  # hostname, and never stops it. Hostnames reach this module from untrusted
+  # documents, so that state would grow without bound.
   @doc false
   @spec run(Req.Request.t()) :: {Req.Request.t(), Req.Response.t() | Exception.t()}
   def run(%Req.Request{} = request) do
     connect_options = Map.get(request.options, :connect_options, [])
     timeout = Map.get(request.options, :receive_timeout, @receive_timeout)
-
-    with {:ok, conn} <- connect(request.url, connect_options),
-         {:ok, conn, ref} <- send_request(conn, request) do
-      receive_response(conn, ref, timeout, {:head, request, nil, []})
-    else
-      {:error, conn, error} ->
-        _closed = Mint.HTTP.close(conn)
-        {request, normalize_error(error)}
-
-      {:error, error} ->
-        {request, normalize_error(error)}
-    end
-  end
-
-  # Mirrors how Req's Finch adapter turns `connect_options` into Mint options.
-  defp connect(%URI{host: address, port: port} = url, connect_options) do
-    transport_opts =
-      connect_options
-      |> Keyword.take([:timeout])
-      |> Keyword.merge(Keyword.get(connect_options, :transport_opts, []))
-
-    # URI.parse drops the brackets of an IPv6 literal; Mint needs the family.
-    transport_opts =
-      if String.contains?(address, ":"),
-        do: Keyword.put(transport_opts, :inet6, true),
-        else: transport_opts
-
-    protocols =
-      Keyword.get_lazy(connect_options, :protocols, fn ->
-        connect_options |> Keyword.get(:protocol, :http1) |> List.wrap()
-      end)
-
-    mint_options =
-      connect_options
-      |> Keyword.take([:client_settings])
-      |> Keyword.merge(
-        hostname: Keyword.fetch!(connect_options, :hostname),
-        mode: :passive,
-        protocols: protocols,
-        transport_opts: transport_opts
-      )
-
-    Mint.HTTP.connect(scheme(url), address, port, mint_options)
-  end
-
-  defp scheme(%URI{scheme: "https"}), do: :https
-  defp scheme(%URI{scheme: "http"}), do: :http
-
-  defp send_request(conn, request) do
     headers = for {name, values} <- request.headers, value <- values, do: {name, value}
-    method = request.method |> to_string() |> String.upcase()
 
-    Mint.HTTP.request(conn, method, request_target(request.url), headers, request.body)
-  end
+    on_head = fn status, resp_headers ->
+      {request, Req.Response.new(status: status, headers: resp_headers)}
+    end
 
-  defp request_target(%URI{path: path, query: query}) do
-    path = if path in [nil, ""], do: "/", else: path
-    if query in [nil, ""], do: path, else: path <> "?" <> query
-  end
+    on_data = fn data, {req, _response} = acc ->
+      collect(req.into, data, acc)
+    end
 
-  defp receive_response(conn, ref, timeout, state) do
-    case Mint.HTTP.recv(conn, 0, timeout) do
-      {:ok, conn, responses} ->
-        case handle_responses(responses, ref, state) do
-          {:cont, state} ->
-            receive_response(conn, ref, timeout, state)
-
-          {:done, result} ->
-            _closed = Mint.HTTP.close(conn)
-            result
-        end
-
-      {:error, conn, error, _responses} ->
-        _closed = Mint.HTTP.close(conn)
-        {request_of(state), normalize_error(error)}
+    case Attesto.PinnedHTTP.passive_request(
+           request.method,
+           request.url,
+           headers,
+           request.body,
+           [connect_options: connect_options, receive_timeout: timeout],
+           on_head,
+           on_data
+         ) do
+      {:ok, result} -> result
+      {:error, reason} -> {request, normalize_error(reason)}
     end
   end
-
-  defp handle_responses([], _ref, state), do: {:cont, state}
-
-  defp handle_responses([response | rest], ref, state) do
-    case handle_response(response, ref, state) do
-      {:cont, state} -> handle_responses(rest, ref, state)
-      {:done, _result} = done -> done
-    end
-  end
-
-  # The state is `{:head, request, status, headers}` until body data arrives,
-  # then `{:body, {request, response}}`, the accumulator Req's `:into` takes.
-  # A new status line (after a 1xx informational response) starts a new head.
-  # Headers arriving after body data are trailers, which no caller reads.
-  defp handle_response({:status, ref, status}, ref, {:head, request, _status, _headers}),
-    do: {:cont, {:head, request, status, []}}
-
-  defp handle_response({:headers, ref, headers}, ref, {:head, request, status, acc}),
-    do: {:cont, {:head, request, status, acc ++ headers}}
-
-  defp handle_response({:data, ref, _data} = data, ref, {:head, request, status, headers}),
-    do: handle_response(data, ref, {:body, head(request, status, headers)})
-
-  defp handle_response({:data, ref, data}, ref, {:body, {request, _response} = acc}),
-    do: collect(request.into, data, acc)
-
-  defp handle_response({:headers, ref, _trailers}, ref, {:body, _acc} = state),
-    do: {:cont, state}
-
-  defp handle_response({:done, ref}, ref, {:head, request, status, headers}),
-    do: {:done, head(request, status, headers)}
-
-  defp handle_response({:done, ref}, ref, {:body, acc}), do: {:done, acc}
-
-  defp handle_response({:error, ref, error}, ref, state),
-    do: {:done, {request_of(state), normalize_error(error)}}
-
-  # An HTTP/2 server push opens another stream; it is not this response.
-  defp handle_response({:push_promise, ref, _promised_ref, _headers}, ref, state),
-    do: {:cont, state}
-
-  defp handle_response(response, ref, state) when elem(response, 1) != ref,
-    do: {:cont, state}
 
   defp collect(nil, data, {request, response}),
-    do: {:cont, {:body, {request, %{response | body: response.body <> data}}}}
+    do: {:cont, {request, %{response | body: response.body <> data}}}
 
-  defp collect(into, data, acc) when is_function(into, 2) do
-    case into.({:data, data}, acc) do
-      {:cont, acc} -> {:cont, {:body, acc}}
-      {:halt, acc} -> {:done, acc}
-    end
-  end
+  defp collect(into, data, acc) when is_function(into, 2),
+    do: into.({:data, data}, acc)
 
-  defp head(request, status, headers),
-    do: {request, Req.Response.new(status: status, headers: headers)}
-
-  defp request_of({:head, request, _status, _headers}), do: request
-  defp request_of({:body, {request, _response}}), do: request
-
-  defp normalize_error(%Mint.TransportError{reason: reason}),
+  defp normalize_error({:transport, reason}),
     do: %Req.TransportError{reason: reason}
 
-  defp normalize_error(%Mint.HTTPError{module: Mint.HTTP2, reason: reason}),
-    do: %Req.HTTPError{protocol: :http2, reason: reason}
+  defp normalize_error({:http, protocol, reason}),
+    do: %Req.HTTPError{protocol: protocol, reason: reason}
 
-  defp normalize_error(%Mint.HTTPError{reason: reason}),
-    do: %Req.HTTPError{protocol: :http1, reason: reason}
+  defp normalize_error(other),
+    do: %Req.TransportError{reason: other}
 
   defp sanitize_headers(headers, reserved) when is_list(headers) or is_map(headers) do
     reserved = MapSet.new(reserved, &String.downcase/1)

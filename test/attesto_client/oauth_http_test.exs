@@ -488,6 +488,80 @@ defmodule AttestoClient.OAuthHTTPTest do
       end
     end
 
+    test "ignores duplicate, non-NQCHAR, and overlong DPoP-Nonce challenge headers" do
+      parent = self()
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+
+      invalid_cases = [
+        {"multiple", [{"dpop-nonce", "one"}, {"dpop-nonce", "two"}]},
+        {"space", [{"dpop-nonce", "bad nonce"}]},
+        {"quote", [{"dpop-nonce", ~s(bad"nonce)}]},
+        {"backslash", [{"dpop-nonce", ~s(bad\\nonce)}]},
+        {"tab", [{"dpop-nonce", "bad\tnonce"}]},
+        {"non_ascii", [{"dpop-nonce", "noncé"}]},
+        {"over_limit", [{"dpop-nonce", String.duplicate("a", 1025)}]}
+      ]
+
+      for {label, nonce_headers} <- invalid_cases do
+        plug = fn conn ->
+          send(parent, {:rejected_nonce, label})
+
+          conn =
+            Enum.reduce(nonce_headers, conn, fn {name, value}, acc ->
+              Plug.Conn.prepend_resp_headers(acc, [{name, value}])
+            end)
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+        end
+
+        assert {:error, {:oauth_error, 400, %{"error" => "use_dpop_nonce"}}} =
+                 OAuthHTTP.post_form(
+                   "https://op.example.com/token",
+                   %{"grant_type" => "authorization_code"},
+                   client_id: "c",
+                   dpop: key,
+                   req_options: [plug: plug]
+                 )
+
+        assert_receive {:rejected_nonce, ^label}
+        refute_receive {:rejected_nonce, ^label}
+      end
+
+      max_valid = String.duplicate("a", 1024)
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      valid_plug = fn conn ->
+        n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+
+        if n == 0 do
+          conn
+          |> Plug.Conn.put_resp_header("dpop-nonce", max_valid)
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(400, JSON.encode!(%{"error" => "use_dpop_nonce"}))
+        else
+          [proof] = Plug.Conn.get_req_header(conn, "dpop")
+          assert dpop_claims(proof)["nonce"] == max_valid
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(200, JSON.encode!(%{"ok" => true}))
+        end
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               OAuthHTTP.post_form(
+                 "https://op.example.com/token",
+                 %{"grant_type" => "authorization_code"},
+                 client_id: "c",
+                 dpop: key,
+                 req_options: [plug: valid_plug]
+               )
+
+      Agent.stop(counter)
+    end
+
     test "a use_dpop_nonce retry re-authenticates with a fresh client_assertion" do
       parent = self()
       key = JOSE.JWK.generate_key({:ec, "P-256"})

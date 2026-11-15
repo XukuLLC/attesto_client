@@ -20,8 +20,8 @@ defmodule AttestoClient.ClientAssertion do
 
   Signing uses the client key directly (a `JOSE.JWK` or a JWK map); the algorithm
   defaults to the key's natural algorithm (`Attesto.SigningAlg.infer/1`:
-  RS256 for RSA, the curve-matched ES algorithm for EC, or legacy `EdDSA` for
-  Edwards keys) and may be overridden with `:alg`. A FAPI client using RSA must
+  RS256 for RSA, the curve-matched ES algorithm for EC, or RFC 9864 `Ed25519` /
+  `Ed448` for Edwards OKP keys) and may be overridden with `:alg`. A FAPI client using RSA must
   therefore select `alg: "PS256"` explicitly; FAPI does not permit the inferred
   RS256 default. An explicit algorithm is validated against the key before
   signing; in particular, `Ed25519` and `Ed448` require their matching OKP

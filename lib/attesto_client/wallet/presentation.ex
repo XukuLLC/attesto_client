@@ -8,7 +8,12 @@ defmodule AttestoClient.Wallet.Presentation do
   key also binds the mdoc session transcript. `direct_post` remains supported.
 
   Requested nested claims, claim alternatives, and credential sets are evaluated
-  before disclosure. An explicit `:selection` remains subject to those constraints.
+  before disclosure. Signed status references are fetched and enforced before
+  every presentation; revoked credentials, invalid lists and fetch failures
+  are refused. `:resolve_status` can supply a 1- or 2-arity fetch callback;
+  the default is `Attesto.StatusList.fetch/3`. Persist the complete held
+  credential map returned by the wallet, including its public `:issuer_key`
+  and mdoc `:credential_status`. An explicit `:selection` remains subject to those constraints.
   Omitted claim queries disclose no selectively disclosable claims; otherwise
   only requested disclosures and their necessary parents are included. Public
   issuer claims remain visible because they cannot be removed from the signed credential.
@@ -27,8 +32,8 @@ defmodule AttestoClient.Wallet.Presentation do
 
   alias Attesto.{JWS, Thumbprint}
   alias AttestoClient.{Builder, OAuthHTTP}
+  alias AttestoClient.Wallet.{CredentialStatus, PresentationRequest}
   alias AttestoClient.Wallet.Presentation.{DCQL, Disclosures, Encryption, Formats, Mdoc}
-  alias AttestoClient.Wallet.PresentationRequest
 
   @max_response_bytes 1_048_576
 
@@ -196,7 +201,8 @@ defmodule AttestoClient.Wallet.Presentation do
   defp build_one(id, held, request, encryption, opts) do
     with {:ok, key} <- holder_key(id, opts),
          :ok <- check_holder_key(key, held),
-         :ok <- Formats.check_credential(request.client_metadata, held, key, opts) do
+         :ok <- Formats.check_credential(request.client_metadata, held, key, opts),
+         :ok <- CredentialStatus.check(held, opts) do
       query = Enum.find(request.dcql_query["credentials"], &(&1["id"] == id))
       paths = DCQL.paths(query, held)
       build_credential(held, request, key, paths, encryption, opts)
@@ -234,8 +240,7 @@ defmodule AttestoClient.Wallet.Presentation do
   defp binding_key(%{format: "mso_mdoc", holder_binding: key}) when is_map(key), do: {:ok, key}
   defp binding_key(_held), do: {:error, :missing_holder_binding}
 
-  defp build_credential(%{format: format} = held, request, key, paths, _encryption, opts)
-       when format in ["dc+sd-jwt", "vc+sd-jwt"] do
+  defp build_credential(%{format: "dc+sd-jwt"} = held, request, key, paths, _encryption, opts) do
     with {:ok, filtered, hash_alg} <- Disclosures.filter(held.credential, paths),
          {:ok, jwk} <- Builder.normalize_key(key),
          {:ok, alg} <- Builder.resolve_alg(jwk, opts),

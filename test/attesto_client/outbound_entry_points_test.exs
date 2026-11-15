@@ -195,7 +195,7 @@ defmodule AttestoClient.OutboundEntryPointsTest do
             token_endpoint: origin <> "/token",
             credential_endpoint: origin <> "/credential",
             client_id: "wallet",
-            format: "vc+sd-jwt",
+            format: "dc+sd-jwt",
             trusted: trusted
           ] ++ opts
         )

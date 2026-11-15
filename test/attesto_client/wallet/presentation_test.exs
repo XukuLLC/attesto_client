@@ -59,7 +59,8 @@ defmodule AttestoClient.Wallet.PresentationTest do
         issue_opts
       )
 
-    {:ok, %{claims: claims}} = SdJwtVc.verify(credential, issuer_jwks_for(issuer_pem), now: @now)
+    {:ok, %{claims: claims}} =
+      SdJwtVc.verify(credential, issuer_jwks_for(issuer_pem), now: @now, resolve_status: false)
 
     %{
       format: "dc+sd-jwt",
@@ -499,7 +500,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
         )
 
       {:ok, %{claims: claims}} =
-        SdJwtVc.verify(credential, issuer_jwks_for(issuer_pem), now: @now)
+        SdJwtVc.verify(credential, issuer_jwks_for(issuer_pem), now: @now, resolve_status: false)
 
       held = %{
         format: "dc+sd-jwt",
@@ -711,6 +712,134 @@ defmodule AttestoClient.Wallet.PresentationTest do
                Presentation.build_vp_token(%{"mdl" => held}, req,
                  holder_keys: %{"mdl" => holder_jwk},
                  now: @now
+               )
+    end
+  end
+
+  test "status is fetched again before presentation and revoked or unavailable credentials are refused" do
+    issuer = JOSE.JWK.generate_key({:ec, "P-256"})
+    issuer_pem = issuer |> JOSE.JWK.to_pem() |> elem(1)
+    {holder, holder_public} = ec_keypair()
+    uri = "https://status.example/list"
+
+    held =
+      issue_held_sd_jwt(issuer_pem, holder_public, status: Attesto.StatusList.reference(uri, 0))
+      |> Map.put(:issuer_key, issuer_jwks_for(issuer_pem))
+      |> Map.update!(:claims, &Map.delete(&1, "status"))
+
+    req = request()
+
+    for state <- [0, 1, :unreachable, :invalid] do
+      claims = %{
+        "sub" => uri,
+        "iat" => @now,
+        "status_list" => Attesto.StatusList.build([if(state == 1, do: 1, else: 0)])
+      }
+
+      {_jws, jwt} =
+        issuer
+        |> JOSE.JWT.sign(%{"alg" => "ES256", "typ" => "statuslist+jwt"}, claims)
+        |> JOSE.JWS.compact()
+
+      resolver = fn ^uri, "application/statuslist+jwt" ->
+        case state do
+          :unreachable -> {:error, :unreachable}
+          :invalid -> {:ok, "invalid.signature.token"}
+          _ -> {:ok, jwt}
+        end
+      end
+
+      result =
+        Presentation.build_vp_token(%{"identity" => held}, req,
+          holder_keys: %{"identity" => holder},
+          now: @now,
+          resolve_status: resolver
+        )
+
+      case state do
+        0 -> assert {:ok, _} = result
+        1 -> assert {:error, {"identity", :credential_revoked}} = result
+        :unreachable -> assert {:error, {"identity", :unreachable}} = result
+        :invalid -> assert {:error, {"identity", _}} = result
+      end
+    end
+  end
+
+  test "mdoc status is read from the signed MSO even when stored derived fields are absent" do
+    {issuer, issuer_public} = ec_keypair()
+    {holder, holder_public} = ec_keypair()
+    pem = issuer |> JOSE.JWK.to_pem() |> elem(1)
+    uri = "https://status.example/mdoc"
+
+    req =
+      request(%{dcql_query: %{"credentials" => [%{"id" => "identity", "format" => "mso_mdoc"}]}})
+
+    for kind <- [:status_list, :identifier_list] do
+      status =
+        case kind do
+          :status_list -> %{"status_list" => %{"idx" => 0, "uri" => uri}}
+          :identifier_list -> %{"identifier_list" => %{"id" => <<1, 2>>, "uri" => uri}}
+        end
+
+      {:ok, credential} =
+        Mdoc.issue(
+          issuer_pem: pem,
+          doc_type: @doc_type,
+          device_key: holder_public,
+          namespaces: %{@mdl_namespace => %{"given_name" => "Alice"}},
+          validity: %{signed: @now - 1, valid_from: @now - 1, valid_until: @now + 3600},
+          status: status
+        )
+
+      {:ok, verified} = Mdoc.verify(credential, issuer_public, now: @now, resolve_status: false)
+
+      held = %{
+        format: "mso_mdoc",
+        credential: credential,
+        claims: verified.namespaces,
+        holder_binding: verified.device_key,
+        doc_type: verified.doc_type,
+        issuer_key: issuer_public
+      }
+
+      for revoked <- [false, true] do
+        {accept, token} =
+          case kind do
+            :status_list ->
+              {"application/statuslist+cwt",
+               Attesto.StatusList.issue_cwt(pem, uri, [if(revoked, do: 1, else: 0)], now: @now)}
+
+            :identifier_list ->
+              {"application/identifierlist+cwt",
+               Attesto.StatusList.issue_identifier_list_cwt(
+                 pem,
+                 uri,
+                 if(revoked, do: [<<1, 2>>], else: []),
+                 now: @now
+               )}
+          end
+
+        resolver = fn ^uri, ^accept -> {:ok, token} end
+
+        result =
+          Presentation.build_vp_token(%{"identity" => held}, req,
+            holder_keys: %{"identity" => holder},
+            now: @now,
+            resolve_status: resolver
+          )
+
+        if revoked do
+          assert {:error, {"identity", :credential_revoked}} = result
+        else
+          assert {:ok, _} = result
+        end
+      end
+
+      assert {:error, {"identity", :missing_status_trust}} =
+               Presentation.build_vp_token(%{"identity" => Map.delete(held, :issuer_key)}, req,
+                 holder_keys: %{"identity" => holder},
+                 now: @now,
+                 resolve_status: fn _, _ -> flunk("untrusted status must not be fetched") end
                )
     end
   end

@@ -4,6 +4,10 @@ defmodule AttestoClient.OAuthHTTP.Challenge do
   alias AttestoClient.Wallet.CredentialJSON
   alias AttestoClient.WWWAuthenticate
 
+  @max_dpop_nonce_bytes 1024
+  # RFC 9449 §8: nonce = 1*NQCHAR, NQCHAR = %x21 / %x23-5B / %x5D-7E.
+  @dpop_nonce_pattern ~r/\A[\x21\x23-\x5B\x5D-\x7E]+\z/
+
   @spec attestation_error?(Req.Response.t()) :: boolean()
   def attestation_error?(%Req.Response{
         status: 400,
@@ -31,9 +35,13 @@ defmodule AttestoClient.OAuthHTTP.Challenge do
   @spec dpop_nonce(Req.Response.t()) :: String.t() | nil
   def dpop_nonce(%Req.Response{} = response) do
     case Req.Response.get_header(response, "dpop-nonce") do
-      [nonce | _] when is_binary(nonce) and nonce != "" -> nonce
+      [nonce] when is_binary(nonce) -> if valid_dpop_nonce?(nonce), do: nonce
       _ -> nil
     end
+  end
+
+  defp valid_dpop_nonce?(nonce) do
+    byte_size(nonce) in 1..@max_dpop_nonce_bytes and Regex.match?(@dpop_nonce_pattern, nonce)
   end
 
   defp dpop_error(%Req.Response{body: %{"error" => error}}) when is_binary(error), do: error

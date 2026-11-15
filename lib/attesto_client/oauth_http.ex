@@ -346,7 +346,7 @@ defmodule AttestoClient.OAuthHTTP do
   defp screen_request(endpoint, opts) when is_binary(endpoint) do
     with :ok <- Outbound.validate(opts),
          :ok <- request_endpoint(endpoint, opts),
-         {:ok, request_opts} <- validate_req_options(opts),
+         {:ok, request_opts} <- PinnedRequest.extract_options(opts),
          {:ok, screen_opts} <- screen_options(opts, request_opts),
          {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
          {:ok, prepared} <-
@@ -838,16 +838,6 @@ defmodule AttestoClient.OAuthHTTP do
 
       _invalid ->
         {:error, :invalid_response_content_type}
-    end
-  end
-
-  defp validate_req_options(opts) do
-    case Keyword.get(opts, :req_options, []) do
-      request_opts when is_list(request_opts) ->
-        with :ok <- PinnedRequest.validate_options(request_opts), do: {:ok, request_opts}
-
-      _invalid ->
-        {:error, :unsafe_transport_options}
     end
   end
 

@@ -3,6 +3,7 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
 
   alias AttestoClient.Wallet
   alias AttestoClient.Wallet.CredentialOffer
+  alias AttestoClient.Wallet.CredentialStatus
   alias AttestoClient.Wallet.CredentialTrust
   alias AttestoClient.Wallet.Presentation.CertificateTrust
 
@@ -55,6 +56,8 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
       assert held.issuer_certificate_chain == [context.leaf]
       assert held.authority_key_identifiers == [context.aki]
       assert held.credential == credential
+      assert [anchor] = held.issuer_trusted_certificates
+      assert anchor in context.anchors
     end
 
     test "#{@format} rejects absent, untrusted, self-signed and root-in-chain certificates",
@@ -400,6 +403,56 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
       assert {:error, :invalid_certificate} =
                request("mso_mdoc", Base.url_encode64(input, padding: false), context)
     end
+  end
+
+  test "wallet retains the credential authority for an independently signed mdoc status list",
+       context do
+    root =
+      :public_key.pkix_test_root_cert(~c"wallet-status-authority", key: @curve, digest: :sha256)
+
+    make_chain = fn ->
+      :public_key.pkix_test_data(%{
+        root: root,
+        intermediates: [],
+        peer: [key: @curve, digest: :sha256]
+      })
+    end
+
+    issuer = certificate_context(context, make_chain.())
+    list_data = make_chain.()
+    signer_pem = list_data[:key] |> elem(1) |> JOSE.JWK.from_der() |> JOSE.JWK.to_pem() |> elem(1)
+    issuer_pem = issuer.key |> JOSE.JWK.to_pem() |> elem(1)
+    now = System.system_time(:second)
+    uri = @issuer <> "/status"
+
+    {:ok, credential} =
+      Attesto.Mdoc.issue(
+        issuer_pem: issuer_pem,
+        doc_type: "org.iso.18013.5.1.mDL",
+        namespaces: %{"org.iso.18013.5.1" => %{"given_name" => "Alice"}},
+        device_key: context.public,
+        validity: %{signed: now - 10, valid_from: now - 5, valid_until: now + 3600},
+        x5chain: [issuer.leaf],
+        status: Attesto.StatusList.reference(uri, 0)
+      )
+
+    token =
+      Attesto.StatusList.issue_cwt(signer_pem, uri, [0], now: now, x5chain: [list_data[:cert]])
+
+    assert {:ok, %{credentials: [held]}} =
+             request("mso_mdoc", credential, issuer,
+               resolve_status: fn ^uri, "application/statuslist+cwt" -> {:ok, token} end
+             )
+
+    assert held.issuer_trusted_certificates == [root.cert]
+
+    revoked =
+      Attesto.StatusList.issue_cwt(signer_pem, uri, [1], now: now, x5chain: [list_data[:cert]])
+
+    assert {:error, :credential_revoked} =
+             CredentialStatus.check(held,
+               resolve_status: fn ^uri, "application/statuslist+cwt" -> {:ok, revoked} end
+             )
   end
 
   defp issue("dc+sd-jwt", context, chain) do

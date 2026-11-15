@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.0] - 2026-11-15
+
+### Breaking
+
+- Requires `attesto >= 2.21.0 and < 3.0.0`.
+- The wallet fetches and enforces status references for SD-JWT VC and mdoc credentials, at issuance and before every presentation. A revoked or suspended credential, an invalid list and a failed fetch are refused. `:resolve_status` replaces the default fetcher, `Attesto.StatusList.fetch/3`; no option turns enforcement off. An issuer has to publish the list entry before it returns the credential, or issuance fails.
+- A held credential now carries the issuer's public `:issuer_key` and, under certificate trust, `:issuer_trusted_certificates`. A credential saved by 2.20.0 has neither. If it has a status reference, verify it again or pass `:trusted` or trusted certificates before presenting it.
+- A `DPoP-Nonce` response header is used only when there is exactly one, it is at most 1,024 bytes, and every byte is an RFC 9449 §8 `NQCHAR`.
+- Client assertions, request objects and wallet proofs signed with an Ed25519 or Ed448 key use the RFC 9864 identifiers `Ed25519` and `Ed448` by default. Pass `alg: "EdDSA"` for a peer that accepts only that.
+- The wallet accepts and presents `dc+sd-jwt` only. `vc+sd-jwt` is refused.
+
+### Changed
+
+- The pinned connection is `Attesto.PinnedHTTP`. Option screening, redirect refusal and error shapes are unchanged.
+
 ## [2.20.0] - 2026-11-14
 
 ### Breaking / Security
