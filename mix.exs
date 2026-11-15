@@ -113,7 +113,11 @@ defmodule AttestoClient.MixProject do
         # Deprecated 2.x compatibility entry points named in the changelog.
         "AttestoClient.CryptoJWE",
         "AttestoClient.OpenIDMetadata.validate/2",
-        "AttestoClient.Verifier.compact_segments/0"
+        "AttestoClient.Verifier.compact_segments/0",
+        # Hidden functions and modules that released changelog entries name.
+        "AttestoClient.Outbound.screen_options/2",
+        "AttestoClient.ResourceServer.Plug.init/1",
+        "AttestoClient.Wallet.Presentation.DCQL"
       ],
       extras: [
         "README.md",

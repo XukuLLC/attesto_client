@@ -161,6 +161,12 @@ jobs:
           MIX_ENV: dev
         run: mix dialyzer
 
+      - name: Build docs (warnings as errors)
+        if: ${{ matrix.lint }}
+        env:
+          MIX_ENV: dev
+        run: mix docs --warnings-as-errors
+
   attesto-2-hex:
     name: Published Attesto 2.21.0 compatibility
     if: github.event_name != 'pull_request' && inputs.dependency_source != 'candidate'
