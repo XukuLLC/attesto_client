@@ -10,7 +10,10 @@ defmodule AttestoClient.IDToken do
   ## Checks
 
     * signature verifies against the issuer JWKS, selected by `kid`, with
-      Attesto's supported asymmetric algorithms.
+      Attesto's supported asymmetric algorithms. A missing `kid` is refused
+      with `:missing_kid` when the issuer's complete key set has more than one
+      entry, even if only one is eligible. `require_kid: true` requires it
+      for a single key too; the default is `false`.
     * JOSE `typ`, when present, must be `"JWT"` or `"application/jwt"`,
       case-insensitively; an access-token type such as `"at+jwt"` is rejected.
       `require_typ: true` also rejects an absent `typ` with `:unexpected_typ`.
@@ -127,6 +130,7 @@ defmodule AttestoClient.IDToken do
           | {:max_age, non_neg_integer()}
           | {:require_auth_time, boolean()}
           | {:require_typ, boolean()}
+          | {:require_kid, boolean()}
           | {:max_token_age_seconds, non_neg_integer()}
           | {:issuer_aliases, [String.t()]}
           | {:trusted_audiences, [String.t()]}
@@ -156,6 +160,8 @@ defmodule AttestoClient.IDToken do
           | :invalid_token
           | :invalid_signature
           | :ambiguous_key
+          | :missing_kid
+          | :invalid_require_kid
           | :weak_key
           | :unsupported_critical_header
           | :unexpected_typ
@@ -222,6 +228,7 @@ defmodule AttestoClient.IDToken do
   def verify(id_token, opts) when is_binary(id_token) and is_list(opts) do
     with :ok <- Verifier.validate_now_option(opts, allow_datetime: true),
          :ok <- validate_require_typ(opts),
+         :ok <- validate_require_kid(opts),
          {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, issuer} <- Verifier.require_string(opts, :issuer, :missing_issuer),
          {:ok, client_id} <- Verifier.require_string(opts, :client_id, :missing_client_id),
@@ -317,7 +324,11 @@ defmodule AttestoClient.IDToken do
   # signature path, where it fails.
   defp verify_or_decode(id_token, opts, issuer) do
     if Keyword.get(opts, :allow_unsigned, false) == true and Verifier.unsigned?(id_token) do
-      with {:ok, claims, header} <- Verifier.decode_unsigned(id_token) do
+      with {:ok, claims, header} <- Verifier.decode_unsigned(id_token),
+           :ok <-
+             Attesto.Key.validate_kid([], Map.get(header, "kid"),
+               require_kid: Keyword.get(opts, :require_kid, false)
+             ) do
         {:ok, claims, header, nil}
       end
     else
@@ -327,16 +338,26 @@ defmodule AttestoClient.IDToken do
           opts,
           issuer,
           algs,
-          Keyword.take(opts, [:enforce_fapi_alg_policy])
+          signature_options(opts)
         )
       end
     end
+  end
+
+  defp signature_options(opts) do
+    policy = if Keyword.get(opts, :require_kid, false), do: true, else: :multiple
+    opts |> Keyword.take([:enforce_fapi_alg_policy]) |> Keyword.put(:require_kid, policy)
   end
 
   @doc false
   @spec validate_require_typ(keyword()) :: :ok | {:error, :invalid_require_typ}
   def validate_require_typ(opts),
     do: AttestoClient.InputValidation.boolean_option(opts, :require_typ, :invalid_require_typ)
+
+  @doc false
+  @spec validate_require_kid(keyword()) :: :ok | {:error, :invalid_require_kid}
+  def validate_require_kid(opts),
+    do: AttestoClient.InputValidation.boolean_option(opts, :require_kid, :invalid_require_kid)
 
   defp check_header_typ(%{"typ" => typ}, _required) do
     if Attesto.Claims.typ_matches?(typ, [@id_token_typ], normalization: :application_subtype),

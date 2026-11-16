@@ -36,7 +36,9 @@ defmodule AttestoClient do
     * `AttestoClient.AuthorizationCode` - run the Authorization Code flow with
       S256 PKCE and atomically consumed transaction state.
     * `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` - refresh
-      rotation single-flight and RFC 7009 revocation with bounded deadlines.
+      rotation single-flight, client credentials and RFC 7009 revocation with bounded deadlines.
+    * `AttestoClient.Error` - project failures to fixed codes and optional HTTP
+      statuses without provider text.
     * `AttestoClient.Logout` - build an RP-Initiated Logout request.
 
   The lifecycle helpers retain only short-lived protocol transactions and

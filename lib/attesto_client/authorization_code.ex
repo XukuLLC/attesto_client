@@ -286,10 +286,17 @@ defmodule AttestoClient.AuthorizationCode do
   checks, as in `AttestoClient.IDToken.verify/2`. The latter treats non-positive
   integer `auth_time` as missing. `require_typ: true` requires a JOSE `typ` of
   `JWT` or `application/jwt`, case-insensitively; it defaults to `false`.
+  `require_kid: true` requires an ID Token key identifier even with one issuer
+  key; with multiple keys it is always required.
 
   `:now` accepts integer Unix seconds or a zero-arity function returning them.
   It applies to the transaction deadline, DPoP proofs, and all ID Token time
-  checks. ID Token verification reads the function after signature verification,
+  checks. For the transaction deadline, seconds mean the last millisecond of
+  that second. `:now_ms` accepts integer Unix milliseconds or a zero-arity
+  function returning them and overrides only the transaction clock. Both
+  deadline checks read the clock, including before an authorization error is
+  returned and after key lookup, before the code is spent. `:now_ms` does not
+  change DPoP or ID Token NumericDates. ID Token verification reads the function after signature verification,
   including any key refresh. A function is also read after the initial key
   lookup to check the transaction deadline before spending the code. Store TTLs
   and network timeouts still use elapsed time. Invalid `:now` or `:require_typ`
@@ -332,13 +339,15 @@ defmodule AttestoClient.AuthorizationCode do
 
     with :ok <- Verifier.validate_now_option(opts),
          :ok <- IDToken.validate_require_typ(opts),
+         :ok <- IDToken.validate_require_kid(opts),
+         :ok <- validate_transaction_clock(opts),
          {:ok, opts} <- Issuer.expand_option(opts),
          # Checked before the transaction is taken, so a malformed option does
          # not spend it.
          :ok <- Outbound.validate(opts),
          {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state, opts),
-         :ok <- check_initial_transaction_deadline(transaction, opts),
+         :ok <- check_transaction_deadline(transaction, opts),
          :ok <- Outbound.check_issuer(transaction.issuer, opts),
          :ok <- check_issuer_cache(transaction, opts),
          :ok <- check_browser_binding(transaction, opts),
@@ -483,12 +492,6 @@ defmodule AttestoClient.AuthorizationCode do
   # A store enforces the lifetime itself; this is the same deadline carried on
   # the transaction, so one kept by the caller expires too. A transaction
   # stored by an earlier version has no deadline of its own.
-  defp check_initial_transaction_deadline(transaction, opts) do
-    if is_function(Keyword.get(opts, :now), 0),
-      do: :ok,
-      else: check_transaction_deadline(transaction, opts)
-  end
-
   defp check_transaction_deadline(transaction, opts) do
     case Map.get(transaction, :expires_at) do
       nil ->
@@ -507,9 +510,32 @@ defmodule AttestoClient.AuthorizationCode do
   defp transaction_not_expired(now, expires_at) when now < expires_at, do: :ok
   defp transaction_not_expired(_now, _expires_at), do: {:error, {:invalid_state, :expired}}
 
+  defp validate_transaction_clock(opts) do
+    case Keyword.fetch(opts, :now_ms) do
+      :error -> :ok
+      {:ok, value} when is_integer(value) or is_function(value, 0) -> :ok
+      _invalid -> {:error, :invalid_time}
+    end
+  end
+
   defp transaction_now(opts) do
+    case Keyword.fetch(opts, :now_ms) do
+      {:ok, clock} when is_function(clock, 0) -> millisecond_time(clock.())
+      {:ok, value} -> millisecond_time(value)
+      :error -> transaction_seconds(opts)
+    end
+  rescue
+    _error -> {:error, :invalid_time}
+  catch
+    _kind, _reason -> {:error, :invalid_time}
+  end
+
+  defp millisecond_time(value) when is_integer(value), do: {:ok, value}
+  defp millisecond_time(_invalid), do: {:error, :invalid_time}
+
+  defp transaction_seconds(opts) do
     if Keyword.has_key?(opts, :now) do
-      with {:ok, now} <- Verifier.read_now(opts), do: {:ok, now * 1_000}
+      with {:ok, now} <- Verifier.read_now(opts), do: {:ok, now * 1_000 + 999}
     else
       {:ok, System.system_time(:millisecond)}
     end
@@ -847,6 +873,7 @@ defmodule AttestoClient.AuthorizationCode do
         max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
         require_auth_time: Keyword.get(opts, :require_auth_time, false),
         require_typ: Keyword.get(opts, :require_typ, false),
+        require_kid: Keyword.get(opts, :require_kid, false),
         trusted_audiences: Keyword.get(opts, :trusted_audiences),
         client_id: transaction.client_id,
         nonce: transaction.nonce,

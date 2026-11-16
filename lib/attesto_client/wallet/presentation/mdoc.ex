@@ -39,7 +39,8 @@ if Code.ensure_loaded?(CBOR) do
     structure, `:doc_type` the verified document type). `holder_key` is the
     device's *private* key (a `JOSE.JWK`, a JWK map, or a PEM string) matching
     the public device key the issuer bound in the credential's MSO -
-    ES256/P-256 only, per `Attesto.Cose`. `request` supplies `:client_id`,
+    ES256/P-256 only, per `Attesto.Cose`. JWK usage must permit signing, as
+    required by `Attesto.Key.signing_jwk/1`, before conversion to PEM. `request` supplies `:client_id`,
     `:nonce`, and `:response_uri` for the `OpenID4VPHandover` (a
     `AttestoClient.Wallet.PresentationRequest` struct or an equivalent map).
 
@@ -122,7 +123,7 @@ if Code.ensure_loaded?(CBOR) do
     defp holder_pem(pem) when is_binary(pem), do: {:ok, pem}
 
     defp holder_pem(%JOSE.JWK{} = jwk) do
-      case JOSE.JWK.to_pem(jwk) do
+      case jwk |> Attesto.Key.signing_jwk() |> JOSE.JWK.to_pem() do
         {_type, pem} when is_binary(pem) -> {:ok, pem}
         _other -> {:error, :invalid_key}
       end

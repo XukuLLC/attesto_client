@@ -116,6 +116,44 @@ defmodule AttestoClient.ConnectRetryTest do
     assert_receive {:second, {:error, :timeout}}, 1_000
   end
 
+  test "client credentials are never repeated after a POST is read and closed" do
+    {socket, port} = listener()
+    parent = self()
+
+    spawn_link(fn ->
+      {:ok, peer} = :gen_tcp.accept(socket, 2_000)
+      send(parent, {:request, read_credentials_request(peer, "")})
+      :gen_tcp.close(peer)
+      send(parent, {:second, :gen_tcp.accept(socket, 150)})
+    end)
+
+    assert {:error, :transport_error} =
+             Token.client_credentials(
+               Keyword.merge(options(),
+                 token_endpoint: "http://localhost:#{port}/token",
+                 client_id: "client",
+                 client_auth: {:client_secret_basic, "secret"}
+               )
+             )
+
+    assert_receive {:request, request}
+    assert request =~ "POST /token HTTP/1.1"
+    assert request =~ "grant_type=client_credentials"
+    assert_receive {:attempt, %{attempt: 1, outcome: :ok}}
+    refute_received {:attempt, _}
+    assert_receive {:second, {:error, :timeout}}, 1_000
+  end
+
+  defp read_credentials_request(socket, acc) do
+    if String.contains?(acc, "\r\n\r\n") and
+         String.contains?(acc, "grant_type=client_credentials") do
+      acc
+    else
+      {:ok, data} = :gen_tcp.recv(socket, 0, 2_000)
+      read_credentials_request(socket, acc <> data)
+    end
+  end
+
   test "a token response timeout after writing is timeout and is not repeated" do
     {socket, port} = listener()
     parent = self()

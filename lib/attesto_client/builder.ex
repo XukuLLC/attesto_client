@@ -146,8 +146,7 @@ defmodule AttestoClient.Builder do
   # The public JWK map for embedding in a JOSE header (`jwk`) or `cnf`.
   @spec public_jwk(JOSE.JWK.t()) :: map()
   def public_jwk(jose_jwk) do
-    {_type, map} = JOSE.JWK.to_public_map(jose_jwk)
-    map
+    Attesto.Key.public_map(jose_jwk)
   end
 
   @doc false

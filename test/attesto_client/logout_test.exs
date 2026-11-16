@@ -109,4 +109,43 @@ defmodule AttestoClient.LogoutTest do
 
     assert URI.parse(url).path == "/logout"
   end
+
+  test "refuses reserved and repeated percent-decoded endpoint query names" do
+    for name <- ~w(post_logout_redirect_uri state client_id id_token_hint logout_hint ui_locales) do
+      encoded =
+        "%" <>
+          (name |> :binary.first() |> Integer.to_string(16)) <>
+          binary_part(name, 1, byte_size(name) - 1)
+
+      for query <- [name <> "=fixed", encoded <> "=fixed", name <> "%5B%5D=fixed"] do
+        assert {:error, :invalid_endpoint_query} =
+                 Logout.url(
+                   issuer: @issuer,
+                   metadata: metadata(%{"end_session_endpoint" => @issuer <> "/logout?" <> query})
+                 )
+      end
+    end
+
+    for query <- ["tenant=a&tenant=b", "tenant=a&%74enant=b"] do
+      assert {:error, :invalid_endpoint_query} =
+               Logout.url(
+                 issuer: @issuer,
+                 metadata: metadata(%{"end_session_endpoint" => @issuer <> "/logout?" <> query})
+               )
+    end
+  end
+
+  test "keeps unrelated endpoint query bytes when adding logout parameters" do
+    assert {:ok, url} =
+             Logout.url(
+               issuer: @issuer,
+               metadata:
+                 metadata(%{
+                   "end_session_endpoint" => @issuer <> "/logout?tenant=a%20b&theme=dark"
+                 }),
+               state: "state"
+             )
+
+    assert URI.parse(url).query == "tenant=a%20b&theme=dark&state=state"
+  end
 end

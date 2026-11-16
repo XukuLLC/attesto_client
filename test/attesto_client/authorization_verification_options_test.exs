@@ -158,6 +158,50 @@ defmodule AttestoClient.AuthorizationVerificationOptionsTest do
     end
   end
 
+  test "callback and refresh forward the always-required key identifier policy", ctx do
+    for required <- [false, true] do
+      {:ok, %{transaction: transaction}} = AuthorizationCode.start(:return, start_opts())
+      claims = JOSE.JWT.peek_payload(sign(transaction.nonce, %{}, "JWT")).fields
+      jwt = Attesto.JWS.sign_compact_jwk(@key, %{"alg" => "ES256", "typ" => "JWT"}, claims)
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/jwks" ->
+            json(conn, jwks())
+
+          "/token" ->
+            json(conn, %{"access_token" => "access", "token_type" => "Bearer", "id_token" => jwt})
+        end
+      end
+
+      opts = [jwks: jwks(), now: @now, require_kid: required, req_options: [plug: plug]]
+
+      callback =
+        AuthorizationCode.callback(
+          :return,
+          %{"state" => transaction.state, "code" => "code"},
+          [transaction: transaction, browser_binding: @binding] ++ opts
+        )
+
+      refresh =
+        Token.refresh(
+          ctx.coordinator,
+          make_ref(),
+          tokens(),
+          [
+            issuer: @issuer,
+            client_id: @client,
+            subject: "subject",
+            token_endpoint: @issuer <> "/token"
+          ] ++ opts
+        )
+
+      for result <- [callback, refresh] do
+        if required, do: assert(result == {:error, :missing_kid}), else: assert({:ok, _} = result)
+      end
+    end
+  end
+
   test "callback applies the injected clock to max_age and the transaction deadline" do
     {:ok, %{transaction: transaction}} =
       AuthorizationCode.start(:return, start_opts(authorization_params: %{"max_age" => 5}))
@@ -293,7 +337,7 @@ defmodule AttestoClient.AuthorizationVerificationOptionsTest do
     end
   end
 
-  test "function clocks are read after initial key lookup and again after cache rotation", ctx do
+  test "function clocks check both callback deadlines and time after cache rotation", ctx do
     state = start_supervised!({Agent, fn -> 0 end})
     parent = self()
 
@@ -335,6 +379,7 @@ defmodule AttestoClient.AuthorizationVerificationOptionsTest do
                    req_options: [plug: transport(transaction.nonce, %{}, "JWT", self())]
                  )
 
+        assert_received {:clock_after_fetch, 0}
         assert_received {:clock_after_fetch, 0}
       else
         assert {:ok, _} =

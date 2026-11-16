@@ -111,7 +111,9 @@ the tool for DPoP-binding arbitrary outgoing requests.
 - `AttestoClient.AuthorizationTransaction.Store.ETS` — bounded, expiring,
   single-node transaction store with atomic consumption.
 - `AttestoClient.RefreshCoordinator` and `AttestoClient.Token` — deadline-bound,
-  single-flight refresh rotation and RFC 7009 revocation.
+  single-flight refresh rotation, client credentials and RFC 7009 revocation.
+- `AttestoClient.Error.project/1` — fixed error codes and optional HTTP statuses
+  for logging or rendering without provider text.
 - `AttestoClient.Logout` — RP-Initiated Logout request construction.
 
 ### Wallet-holder (OID4VCI / OID4VP)
@@ -202,11 +204,11 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.22`.
+a new major version. Pin to `~> 2.23`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto `>= 2.24.0 and < 3.0.0`,
+AttestoClient requires Elixir 1.18 or later, Attesto `>= 2.25.0 and < 3.0.0`,
 and JOSE 1.11.13 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later

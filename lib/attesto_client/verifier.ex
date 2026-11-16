@@ -92,6 +92,7 @@ defmodule AttestoClient.Verifier do
              | :unsupported_critical_header
              | :invalid_signature
              | :ambiguous_key
+             | :missing_kid
              | :weak_key}
   def verify_signature(jwt, keys, accepted_algs, opts \\ [])
 
@@ -103,6 +104,7 @@ defmodule AttestoClient.Verifier do
              crit_error: :unsupported_critical_header
            ),
          :ok <- check_algorithm(header, accepted_algs),
+         :ok <- Attesto.Key.validate_kid(keys, Map.get(header, "kid"), opts),
          {:ok, candidate} <- verification_candidate(keys, header, accepted_algs, opts),
          {:ok, claims, {_kid, _alg, verified_jwk}} <-
            JWS.verify_strict(jwt, [candidate],

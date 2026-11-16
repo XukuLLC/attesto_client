@@ -20,6 +20,10 @@ defmodule AttestoClient.Logout do
   `:id_token_hint`, `:logout_hint`, `:client_id`, `:post_logout_redirect_uri`,
   `:state`, and `:ui_locales`.
 
+  An endpoint query containing any of those names, or any repeated name,
+  returns `{:error, :invalid_endpoint_query}`. Names are percent-decoded
+  before comparison. Other fixed query parameters are preserved.
+
   Send `:id_token_hint` when the ID Token is still at hand; the specification
   recommends it. Without one, the URL is the validated `end_session_endpoint`
   with whatever parameters were given, and the provider decides whether to ask
@@ -36,6 +40,11 @@ defmodule AttestoClient.Logout do
     with {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, metadata} <- OpenIDMetadata.resolve(issuer, opts),
          {:ok, endpoint} <- end_session_endpoint(metadata),
+         :ok <-
+           AttestoClient.OAuthHTTP.validate_endpoint_query(
+             endpoint,
+             ~w(post_logout_redirect_uri state client_id id_token_hint logout_hint ui_locales)
+           ),
          {:ok, params} <- logout_params(opts) do
       {:ok, Attesto.URI.put_query_params(endpoint, Enum.sort_by(params, &elem(&1, 0)))}
     end

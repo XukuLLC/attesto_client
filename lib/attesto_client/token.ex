@@ -1,6 +1,6 @@
 defmodule AttestoClient.Token do
   @moduledoc """
-  Refresh and revoke OAuth tokens.
+  Obtain, refresh, and revoke OAuth tokens.
 
   Connections are retried up to three times, within the request deadline, only
   before any HTTP request can have been sent. Each connect has a three-second
@@ -35,6 +35,7 @@ defmodule AttestoClient.Token do
   @verification_options [
     :now,
     :require_typ,
+    :require_kid,
     :require_auth_time,
     :issuer_aliases,
     :trusted_audiences,
@@ -43,6 +44,74 @@ defmodule AttestoClient.Token do
     :expiry_leeway_seconds,
     :max_token_age_seconds
   ]
+
+  @doc """
+  Obtain a token with the OAuth client-credentials grant.
+
+  Required options: `:token_endpoint`, `:client_id`, and `:client_auth`.
+  Authentication uses the same methods as `refresh/4`; `:none` is refused
+  with `:invalid_client_auth` because this grant requires an authenticated
+  confidential client. For private-key JWT, supply the trusted `:issuer`
+  (or an explicit assertion audience), as with the other token operations.
+
+  `:scopes` is a list of scope tokens (default `[]`); `:resource` is an
+  absolute resource URI or list of URIs. Invalid values return
+  `:invalid_scopes` or `:invalid_target`. `:dpop`, `:dpop_nonce`, `:alg`,
+  `:kid`, `:now`, `:outbound`, `:req_options`, and
+  `:timeout` have the same meanings as for the other token requests. A
+  `:profile` applies its client-authentication and DPoP requirements too.
+  Response bodies have the same fixed 2,000,000-byte limit as other grants.
+
+  Returns `{:ok, token_set}`, with unknown response members in
+  `AttestoClient.TokenSet`'s `:extra`. Any ID Token is returned unverified:
+  this grant establishes no end-user identity. A DPoP response without a key
+  returns `:missing_dpop_key`; a Bearer response with a key returns
+  `:invalid_token_type`. Access-token contents are never inspected.
+
+  Connect failures may retry before a request is written. A transport failure
+  after writing never retries; see the module's `:not_sent` contract.
+  """
+  @spec client_credentials(keyword()) :: {:ok, TokenSet.t()} | {:error, term()}
+  def client_credentials(opts) when is_list(opts) do
+    with :ok <- AttestoClient.Outbound.validate(opts),
+         {:ok, endpoint} <- required_string(opts, :token_endpoint),
+         :ok <- AttestoClient.Outbound.check_issuer(Keyword.get(opts, :issuer, endpoint), opts),
+         {:ok, _client_id} <- required_string(opts, :client_id),
+         :ok <- require_client_auth(opts),
+         {:ok, scopes} <- credential_scopes(opts),
+         {:ok, resources} <- Attesto.ResourceIndicator.validate(Keyword.get(opts, :resource)),
+         {:ok, profile} <- new_profile(opts),
+         {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
+         :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
+         :ok <- AuthorizationProfile.dpop_policy(profile.profile, opts) do
+      form =
+        %{"grant_type" => "client_credentials"}
+        |> maybe_put("scope", if(scopes == [], do: nil, else: Enum.join(scopes, " ")))
+        |> maybe_put("resource", if(resources == [], do: nil, else: resources))
+
+      with {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts),
+           {:ok, tokens} <- TokenSet.from_response(response, nil),
+           {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt) do
+        {:ok, Map.merge(tokens, profile)}
+      end
+    end
+  end
+
+  def client_credentials(_opts), do: {:error, :invalid_options}
+
+  defp require_client_auth(opts) do
+    if Keyword.get(opts, :client_auth, :none) == :none,
+      do: {:error, :invalid_client_auth},
+      else: :ok
+  end
+
+  defp credential_scopes(opts) do
+    scopes = Keyword.get(opts, :scopes, [])
+
+    if is_list(scopes) and Enum.all?(scopes, &Attesto.Scope.valid_token?/1),
+      do: {:ok, Enum.uniq(scopes)},
+      else: {:error, :invalid_scopes}
+  end
 
   @doc """
   Exchange an OID4VCI pre-authorized code for an access token
@@ -114,7 +183,7 @@ defmodule AttestoClient.Token do
   take the identifier and the ID Token verification keys from a running cache.
 
   `:issuer_aliases`, `:clock_skew_seconds`, `:expiry_leeway_seconds`,
-  `:max_token_age_seconds`, `:require_auth_time`, `:require_typ`, and `:trusted_audiences` apply
+  `:max_token_age_seconds`, `:require_auth_time`, `:require_typ`, `:require_kid`, and `:trusted_audiences` apply
   to an ID Token returned with the refresh, as in
   `AttestoClient.IDToken.verify/2`. A token set does not retain the aliases
   given to `AttestoClient.AuthorizationCode.start/2`, so pass them again here.
@@ -159,6 +228,7 @@ defmodule AttestoClient.Token do
       when is_binary(refresh_token) and refresh_token != "" and is_list(opts) do
     with :ok <- Verifier.validate_now_option(opts),
          :ok <- IDToken.validate_require_typ(opts),
+         :ok <- IDToken.validate_require_kid(opts),
          {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          {:ok, _endpoint} <- required_string(opts, :token_endpoint),
@@ -378,6 +448,7 @@ defmodule AttestoClient.Token do
           max_token_age_seconds: Keyword.get(opts, :max_token_age_seconds),
           require_auth_time: Keyword.get(opts, :require_auth_time),
           require_typ: Keyword.get(opts, :require_typ, false),
+          require_kid: Keyword.get(opts, :require_kid, false),
           trusted_audiences: Keyword.get(opts, :trusted_audiences),
           client_id: client_id,
           subject: Keyword.get(opts, :subject),

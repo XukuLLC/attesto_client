@@ -3,6 +3,7 @@ defmodule AttestoClient.Wallet.PresentationTest do
 
   alias Attesto.{Mdoc, SdJwtVc, VpToken}
   alias AttestoClient.Wallet.Presentation
+  alias AttestoClient.Wallet.Presentation.Mdoc, as: MdocPresentation
   alias AttestoClient.Wallet.PresentationRequest
 
   @doc_type "org.iso.18013.5.1.mDL"
@@ -117,6 +118,34 @@ defmodule AttestoClient.Wallet.PresentationTest do
       assert result.iss == "https://issuer.example.com"
       assert result.claims["given_name"] == "Alice"
       assert result.claims["family_name"] == "Example"
+    end
+
+    test "SD-JWT key binding applies the private key signing rule" do
+      issuer_pem = JOSE.JWK.generate_key({:ec, "P-256"}) |> JOSE.JWK.to_pem() |> elem(1)
+      {holder, public} = ec_keypair()
+      {_, fields} = JOSE.JWK.to_map(holder)
+      held = issue_held_sd_jwt(issuer_pem, public)
+      req = request()
+
+      assert {:ok, vp_token} =
+               Presentation.build_vp_token(%{"identity" => held}, req,
+                 holder_keys: %{"identity" => Map.put(fields, "key_ops", ["sign"])},
+                 now: @now
+               )
+
+      assert {:ok, _} =
+               VpToken.verify(vp_token,
+                 nonce: req.nonce,
+                 audience: req.client_id,
+                 issuer_jwks: issuer_jwks_for(issuer_pem),
+                 now: @now
+               )
+
+      assert {:error, {"identity", {:signing_failed, "signing operation failed"}}} =
+               Presentation.build_vp_token(%{"identity" => held}, req,
+                 holder_keys: %{"identity" => Map.put(fields, "key_ops", ["verify"])},
+                 now: @now
+               )
     end
 
     test "uses the issuer-selected SHA-384 and SHA-512 algorithms for sd_hash" do
@@ -650,6 +679,39 @@ defmodule AttestoClient.Wallet.PresentationTest do
       assert result.namespaces == %{
                @mdl_namespace => %{"given_name" => "Jane", "family_name" => "Doe"}
              }
+    end
+
+    test "mdoc holder keys retain signing usage checks before PEM conversion" do
+      issuer = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer |> JOSE.JWK.to_pem() |> elem(1)
+      {holder, public} = mdoc_holder_keypair()
+      {_, fields} = JOSE.JWK.to_map(holder)
+      held = issue_held_mdoc(issuer_pem, public)
+      req = request()
+      signing = Map.put(fields, "key_ops", ["sign"])
+
+      for key <- [signing, JOSE.JWK.from_map(signing)] do
+        assert {:ok, response} = MdocPresentation.build_device_response(held, req, key)
+
+        assert {:ok, _} =
+                 VpToken.verify(%{"mdl" => [response]},
+                   nonce: req.nonce,
+                   audience: req.client_id,
+                   issuer_jwks: issuer_jwks_for(issuer_pem),
+                   response_uri: req.response_uri,
+                   formats: %{"mdl" => "mso_mdoc"},
+                   now: @now
+                 )
+      end
+
+      for ops <- [["verify"], [], nil, ["sign", 7]] do
+        assert {:error, :invalid_key} =
+                 MdocPresentation.build_device_response(
+                   held,
+                   req,
+                   Map.put(fields, "key_ops", ops)
+                 )
+      end
     end
 
     test "select/2 matches by doctype_value" do

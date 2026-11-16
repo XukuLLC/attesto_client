@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.0] - 2026-11-15
+
+Requires `attesto >= 2.25.0 and < 3.0.0`.
+
+### Breaking
+
+- `AttestoClient.IDToken.verify/2` refuses a missing `kid` when the issuer's
+  complete key set contains more than one entry, before filtering. The same
+  rule applies to authorization callbacks and refresh. `:require_kid` can
+  require an identifier even with one key; refusals return `:missing_kid`.
+- `AttestoClient.AuthorizationCode.callback/3` checks the transaction deadline
+  with function clocks before handling authorization errors and again before
+  token exchange. Seconds readings represent the last millisecond of their
+  second, so transactions no longer get an extra fraction of a second.
+  `:now_ms` supplies an exact millisecond transaction clock.
+- `AttestoClient.Logout.url/1` refuses an endpoint query containing logout
+  parameter names or any repeated name after percent-decoding, returning
+  `:invalid_endpoint_query`. Other fixed query parameters are preserved.
+- Signing JWKs must permit `sign` when `key_ops` is present and `sig` when
+  `use` is present. Public halves derived for proofs and attestations omit
+  private operation metadata; public-only verification restrictions remain.
+
+### Added
+
+- `AttestoClient.Error.project/1` returns a fixed code and an optional HTTP
+  status, discarding provider text, credentials and other variable details.
+- `AttestoClient.Token.client_credentials/1` uses the existing authenticated,
+  pinned and bounded token request path and returns `AttestoClient.TokenSet`,
+  preserving unknown response members in `:extra`. DPoP type checks apply;
+  transport failures after a request is written never retry.
+
 ## [2.22.0] - 2026-11-15
 
 Requires `attesto >= 2.24.0 and < 3.0.0`.
