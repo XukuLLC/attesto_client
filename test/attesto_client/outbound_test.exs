@@ -103,7 +103,12 @@ defmodule AttestoClient.OutboundTest do
       allowed = Keyword.put(opts, :outbound, allowed_cidrs: ["10.20.0.0/16"])
       assert :ok = Discovery.validate_endpoint(url, allowed)
 
-      assert {:ok, %{url: "https://10.20.0.5/token", host: "idp.internal.example"}} =
+      assert {:ok,
+              %{
+                url: "https://idp.internal.example/token",
+                addresses: [{10, 20, 0, 5}],
+                host: "idp.internal.example"
+              }} =
                Discovery.screen_endpoint(url, allowed)
     end
 
@@ -540,7 +545,12 @@ defmodule AttestoClient.OutboundTest do
       assert :ok = Discovery.validate_browser_endpoint(url)
       assert :ok = Discovery.validate_endpoint(url, resolver: public)
 
-      assert {:ok, %{url: "https://93.184.216.34/token", host: "auth.test"}} =
+      assert {:ok,
+              %{
+                url: "HTTPS://auth.test/token",
+                addresses: [{93, 184, 216, 34}],
+                host: "auth.test"
+              }} =
                Discovery.screen_endpoint(url, resolver: public)
     end
 

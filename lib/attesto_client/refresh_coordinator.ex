@@ -15,6 +15,8 @@ defmodule AttestoClient.RefreshCoordinator do
 
   use GenServer
 
+  alias AttestoClient.Deadline
+
   @type option :: GenServer.option()
 
   @spec start_link([option()]) :: GenServer.on_start()
@@ -36,6 +38,15 @@ defmodule AttestoClient.RefreshCoordinator do
 
   def run(_server, _key, _fun, _timeout_ms), do: {:error, :invalid_timeout}
 
+  @doc false
+  def run_with_context(server, key, fun, timeout_ms, opts) do
+    context = Deadline.context(timeout_ms, opts)
+    GenServer.call(server, {:run, key, fun, timeout_ms, context}, timeout_ms + 1_000)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, reason -> {:error, {:coordinator_exit, reason}}
+  end
+
   @impl true
   def init(:ok) do
     Process.flag(:trap_exit, true)
@@ -44,6 +55,10 @@ defmodule AttestoClient.RefreshCoordinator do
 
   @impl true
   def handle_call({:run, key, fun, timeout_ms}, from, inflight) do
+    handle_call({:run, key, fun, timeout_ms, Deadline.context(timeout_ms)}, from, inflight)
+  end
+
+  def handle_call({:run, key, fun, _timeout_ms, context}, from, inflight) do
     case Map.fetch(inflight, key) do
       {:ok, entry} ->
         {:noreply, Map.put(inflight, key, %{entry | waiters: [from | entry.waiters]})}
@@ -56,7 +71,14 @@ defmodule AttestoClient.RefreshCoordinator do
             fn ->
               result =
                 try do
-                  fun.()
+                  if is_function(fun, 1) do
+                    fun.(context)
+                  else
+                    # The public zero-arity callback belongs to a host and has
+                    # no argument channel. Our token path uses run_with_context.
+                    Process.put({__MODULE__, :callback_context}, context)
+                    fun.()
+                  end
                 rescue
                   _error -> {:error, :operation_failed}
                 catch
@@ -68,8 +90,14 @@ defmodule AttestoClient.RefreshCoordinator do
             [:link, :monitor]
           )
 
-        timer = Process.send_after(self(), {:refresh_timeout, key, pid}, timeout_ms)
-        entry = %{pid: pid, monitor: monitor, timer: timer, waiters: [from]}
+        timer =
+          Process.send_after(
+            self(),
+            {:refresh_timeout, key, pid},
+            max(0, context.deadline - System.monotonic_time(:millisecond)) + 50
+          )
+
+        entry = %{pid: pid, monitor: monitor, timer: timer, waiters: [from], context: context}
         {:noreply, Map.put(inflight, key, entry)}
     end
   end
@@ -93,7 +121,7 @@ defmodule AttestoClient.RefreshCoordinator do
       {:ok, %{pid: ^pid} = entry} ->
         Process.exit(pid, :kill)
         Process.demonitor(entry.monitor, [:flush])
-        reply_all(entry.waiters, {:error, :timeout})
+        reply_all(entry.waiters, Deadline.timeout_result(entry.context))
         {:noreply, Map.delete(inflight, key)}
 
       _stale ->

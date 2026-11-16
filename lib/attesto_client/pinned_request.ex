@@ -56,6 +56,7 @@ defmodule AttestoClient.PinnedRequest do
   )
 
   @type target :: %{
+          required(:addresses) => [:inet.ip_address()],
           required(:url) => String.t(),
           required(:host) => String.t(),
           required(:authority) => String.t()
@@ -102,6 +103,7 @@ defmodule AttestoClient.PinnedRequest do
   @spec new(keyword()) :: Req.Request.t()
   def new(options) when is_list(options) do
     Req.Request.new()
+    |> Req.Request.register_options([:attesto_target, :attesto_body_limit, :attesto_context])
     |> Req.Steps.attach()
     |> Req.merge(options)
   end
@@ -204,7 +206,7 @@ defmodule AttestoClient.PinnedRequest do
     end
   end
 
-  # The URL dials the screened IP. Mint still needs the external host for SNI
+  # The adapter carries every screened IP. Mint still needs the external host for SNI
   # and certificate verification. A caller-owned Finch pool cannot be combined
   # with per-request connection options, so it is rejected above. An
   # in-process `:plug` replaces the adapter set here.
@@ -212,6 +214,7 @@ defmodule AttestoClient.PinnedRequest do
     options
     |> Keyword.delete(:finch)
     |> Keyword.put(:connect_options, Keyword.put(connect_options, :hostname, target.host))
+    |> Keyword.put(:attesto_target, target)
     |> Keyword.put(:adapter, adapter())
   end
 
@@ -224,8 +227,7 @@ defmodule AttestoClient.PinnedRequest do
     end
   end
 
-  # The Req adapter for every screened request: one Mint connection to the
-  # One-shot Mint connections are delegated to `Attesto.PinnedHTTP.passive_request/7`
+  # The Req adapter for every screened request. Connections are delegated to `Attesto.PinnedHTTP.passive_request/2`
   # so a connection is closed as soon as the response completes. Req's Finch
   # adapter starts a Finch instance, with its own registered processes and
   # atoms, for each distinct set of `connect_options`, which here includes the
@@ -236,6 +238,12 @@ defmodule AttestoClient.PinnedRequest do
   def run(%Req.Request{} = request) do
     connect_options = Map.get(request.options, :connect_options, [])
     timeout = Map.get(request.options, :receive_timeout, @receive_timeout)
+
+    context =
+      Map.get(request.options, :attesto_context) ||
+        AttestoClient.Deadline.context(if(timeout == :infinity, do: 15_000, else: timeout))
+
+    deadline = context.deadline
     headers = for {name, values} <- request.headers, value <- values, do: {name, value}
 
     on_head = fn status, resp_headers ->
@@ -246,17 +254,24 @@ defmodule AttestoClient.PinnedRequest do
       collect(req.into, data, acc)
     end
 
+    AttestoClient.Deadline.connecting(context)
+
     case Attesto.PinnedHTTP.passive_request(
-           request.method,
-           request.url,
-           headers,
-           request.body,
-           [connect_options: connect_options, receive_timeout: timeout],
-           on_head,
-           on_data
+           Map.fetch!(request.options, :attesto_target),
+           method: request.method,
+           headers: headers,
+           body: request.body,
+           deadline: deadline,
+           receive_timeout: timeout,
+           connect_timeout: Keyword.get(connect_options, :timeout, 3_000),
+           connect_options: connect_options,
+           body_limit: Map.get(request.options, :attesto_body_limit, 2_000_000),
+           on_request: fn -> AttestoClient.Deadline.sending(context, request.method) end,
+           on_head: on_head,
+           on_data: on_data
          ) do
       {:ok, result} -> result
-      {:error, reason} -> {request, normalize_error(reason)}
+      {:error, reason} -> {request, normalize_error(reason, context)}
     end
   end
 
@@ -266,14 +281,28 @@ defmodule AttestoClient.PinnedRequest do
   defp collect(into, data, acc) when is_function(into, 2),
     do: into.({:data, data}, acc)
 
-  defp normalize_error({:transport, reason}),
+  defp normalize_error({:not_sent, cause}, context) do
+    reason =
+      case AttestoClient.Deadline.not_sent(context, cause) do
+        :not_sent -> {:not_sent, cause}
+        :timeout -> :request_timeout
+        :transport_error -> :transport_error
+      end
+
+    %Req.TransportError{reason: reason}
+  end
+
+  defp normalize_error({:maybe_sent, :deadline_exceeded}, _context),
+    do: %Req.TransportError{reason: :request_timeout}
+
+  defp normalize_error({:maybe_sent, {:transport, reason}}, _context),
     do: %Req.TransportError{reason: reason}
 
-  defp normalize_error({:http, protocol, reason}),
+  defp normalize_error({:maybe_sent, {:http, protocol, reason}}, _context),
     do: %Req.HTTPError{protocol: protocol, reason: reason}
 
-  defp normalize_error(other),
-    do: %Req.TransportError{reason: other}
+  defp normalize_error({:maybe_sent, cause}, _context),
+    do: %Req.TransportError{reason: cause}
 
   defp sanitize_headers(headers, reserved) when is_list(headers) or is_map(headers) do
     reserved = MapSet.new(reserved, &String.downcase/1)

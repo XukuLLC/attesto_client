@@ -144,6 +144,7 @@ defmodule AttestoClient.Issuer.Cache do
   @doc "Whether a refresh failure is one a stale snapshot may cover."
   @spec transient?(term()) :: boolean()
   def transient?({:transport, _reason}), do: true
+  def transient?(:not_sent), do: true
   def transient?(:timeout), do: true
   def transient?(:unresolvable), do: true
   def transient?(:refresh_timeout), do: true

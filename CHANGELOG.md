@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.22.0] - 2026-11-15
+
+Requires `attesto >= 2.24.0 and < 3.0.0`.
+
+### Breaking
+
+- Connect failures, including a deadline ending during connect, now return
+  `{:error, :not_sent}`. Callers matching `:transport_error`, `:timeout` or
+  discovery's `{:transport, reason}` for those failures must handle the new
+  reason. It guarantees that no state-changing request in the public call was
+  written, excluding a refused authentication attempt that is being retried.
+  Earlier GET/HEAD requests do not count. After an unrefused write, a later
+  connect failure returns `:transport_error`, or `:timeout` for a deadline.
+- Connections retry up to three times on fresh sockets, rotating all screened
+  addresses, within the existing total deadline. Each attempt has a three-second
+  timeout, configurable through `:req_options`' `:connect_options` `:timeout`.
+  No transport retry occurs after the request starts, for any HTTP method.
+
 ## [2.21.0] - 2026-11-15
 
 ### Breaking

@@ -48,7 +48,8 @@ defmodule AttestoClient.PinnedRequestTest do
 
   test "pinning removes Req's URL-keyed cache options" do
     target = %{
-      url: "https://93.184.216.34/document",
+      url: "https://service.example.test/document",
+      addresses: [{93, 184, 216, 34}],
       host: "service.example.test",
       authority: "service.example.test"
     }
@@ -65,7 +66,8 @@ defmodule AttestoClient.PinnedRequestTest do
 
   test "pinning protects the destination, request fields, and TLS identity" do
     target = %{
-      url: "https://93.184.216.34:8443/document",
+      url: "https://service.example.test:8443/document",
+      addresses: [{93, 184, 216, 34}],
       host: "service.example.test",
       authority: "service.example.test:8443"
     }
@@ -148,6 +150,7 @@ defmodule AttestoClient.PinnedRequestTest do
   test "pinning rejects ambiguous duplicate transport options" do
     target = %{
       url: "https://93.184.216.34/document",
+      addresses: [{93, 184, 216, 34}],
       host: "93.184.216.34",
       authority: "93.184.216.34"
     }
@@ -174,7 +177,13 @@ defmodule AttestoClient.PinnedRequestTest do
     for index <- 1..20 do
       host = "host-#{index}.example.test"
       # Nothing listens on port 1, so each connection is refused locally.
-      target = %{url: "https://127.0.0.1:1/document", host: host, authority: host}
+      target = %{
+        url: "https://#{host}:1/document",
+        addresses: [{127, 0, 0, 1}],
+        host: host,
+        authority: host
+      }
+
       assert {:ok, options} = PinnedRequest.prepare(target, [])
 
       request =
@@ -201,11 +210,11 @@ defmodule AttestoClient.PinnedRequestTest do
       })
 
     server_config = [cert: data[:cert], key: data[:key]]
-    port = start_tls_server(server_config, ["pinned body", String.duplicate("a", 64), ""])
-    url = "https://127.0.0.1:#{port}/document?view=full"
+    port = start_tls_server(server_config, ["pinned body", String.duplicate("a", 64), "", "", ""])
 
     fetch = fn host ->
-      target = %{url: url, host: host, authority: "#{host}:#{port}"}
+      url = "https://#{host}:#{port}/document?view=full"
+      target = %{url: url, addresses: [{127, 0, 0, 1}], host: host, authority: "#{host}:#{port}"}
 
       assert {:ok, options} =
                PinnedRequest.prepare(target,
@@ -236,7 +245,7 @@ defmodule AttestoClient.PinnedRequestTest do
 
     assert_receive {:served, ~c"service.example.test", _head}
 
-    assert {:error, %Req.TransportError{reason: {:tls_alert, _alert}}} =
+    assert {:error, %Req.TransportError{reason: {:not_sent, {:transport, {:tls_alert, _alert}}}}} =
              fetch.("other.example.test")
 
     assert_receive {:handshake_failed, _reason}
@@ -245,6 +254,7 @@ defmodule AttestoClient.PinnedRequestTest do
   test "pinning rejects a custom adapter even for a direct public IP" do
     target = %{
       url: "https://93.184.216.34/document",
+      addresses: [{93, 184, 216, 34}],
       host: "93.184.216.34",
       authority: "93.184.216.34"
     }

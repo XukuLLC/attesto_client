@@ -221,6 +221,7 @@ defmodule AttestoClient.Verifier do
   defp discovery_opts(opts) do
     opts
     |> Keyword.take([
+      :attesto_context,
       :well_known,
       :req_options,
       :resolver,

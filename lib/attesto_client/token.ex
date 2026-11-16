@@ -2,8 +2,15 @@ defmodule AttestoClient.Token do
   @moduledoc """
   Refresh and revoke OAuth tokens.
 
-  Network operations are deadline-bound and are never retried because a timeout
-  can leave the remote outcome unknown. Refresh-token rotation is available
+  Connections are retried up to three times, within the request deadline, only
+  before any HTTP request can have been sent. Each connect has a three-second
+  cap (overridden by `:req_options`' `:connect_options` `:timeout`). No transport
+  failure after the request starts triggers a retry.
+
+  `{:error, :not_sent}` means no state-changing request was written during the
+  call (excluding a refused authentication attempt that is retried), including a deadline ending
+  during connect. `{:error, :transport_error}` and `{:error, :timeout}` mean the
+  remote outcome may be unknown; do not blindly retry a token operation. Refresh-token rotation is available
   through `refresh/4`, which uses `AttestoClient.RefreshCoordinator` to prevent
   concurrent reuse for the same application record.
 
@@ -166,14 +173,17 @@ defmodule AttestoClient.Token do
          {:ok, dpop_jkt} <- refresh_dpop_binding(tokens, opts),
          :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
          :ok <- AuthorizationProfile.dpop_policy(profile.profile, opts) do
-      RefreshCoordinator.run(
+      RefreshCoordinator.run_with_context(
         coordinator,
         key,
-        fn ->
+        fn context ->
+          opts = Keyword.put(opts, :attesto_context, context)
+
           {:verified_refresh, do_refresh(tokens, dpop_jkt, profile, opts),
            verification_options(opts)}
         end,
-        timeout_ms
+        timeout_ms,
+        opts
       )
       |> adopt_refresh(dpop_jkt, profile, id_token_alg, opts)
     end
@@ -381,6 +391,7 @@ defmodule AttestoClient.Token do
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
         |> Keyword.merge(
           Keyword.take(opts, [
+            :attesto_context,
             :now,
             :jwks_uri,
             :well_known,

@@ -245,7 +245,7 @@ defmodule AttestoClient.OAuthHTTP do
       case run_req(options) do
         {:ok, %Req.Response{} = response} -> {:ok, response}
         {:error, :response_too_large} = error -> error
-        {:error, _reason} -> {:error, :transport_error}
+        {:error, reason} -> transport_error(reason)
       end
     end)
   end
@@ -292,7 +292,7 @@ defmodule AttestoClient.OAuthHTTP do
 
       {:ok,
        opts
-       |> Keyword.take([:timeout, :resolver, :outbound])
+       |> Keyword.take([:timeout, :resolver, :outbound, :attesto_context])
        |> Keyword.put(:req_options, safe_options)}
     else
       _unsafe -> {:error, :unsafe_transport_options}
@@ -319,8 +319,16 @@ defmodule AttestoClient.OAuthHTTP do
     with {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
          :ok <- initial_dpop_nonce(opts) do
       Deadline.run(
-        fn -> execute_screened(endpoint, opts, timeout_ms, operation) end,
-        timeout_ms
+        fn context ->
+          execute_screened(
+            endpoint,
+            Keyword.put(opts, :attesto_context, context),
+            timeout_ms,
+            operation
+          )
+        end,
+        timeout_ms,
+        opts
       )
     end
   end
@@ -350,7 +358,12 @@ defmodule AttestoClient.OAuthHTTP do
          {:ok, screen_opts} <- screen_options(opts, request_opts),
          {:ok, target} <- AttestoClient.Discovery.screen_endpoint(endpoint, screen_opts),
          {:ok, prepared} <-
-           PinnedRequest.prepare(target, request_opts, @reserved_headers, [:auth]) do
+           PinnedRequest.prepare(
+             target,
+             Keyword.put(request_opts, :attesto_context, Keyword.fetch!(opts, :attesto_context)),
+             @reserved_headers,
+             [:auth]
+           ) do
       {:ok, target, Keyword.put(opts, :req_options, prepared)}
     end
   end
@@ -593,10 +606,13 @@ defmodule AttestoClient.OAuthHTTP do
   defp auth_attempt(ctx, builder, classify, state) do
     with {:ok, base} <- builder.(state.retry?, state.challenge),
          {:ok, headers} <- dpop_headers(ctx, state.nonce) do
+      context = Keyword.fetch!(base, :attesto_context)
+      state = Map.put(state, :delivery, {context, Deadline.written(context)})
+
       case send_request(base, headers) do
         {:ok, resp} -> handle_auth_response(resp, ctx, builder, classify, state)
         {:error, :response_too_large} = error -> error
-        {:error, _reason} -> {:error, :transport_error}
+        {:error, reason} -> transport_error(reason)
       end
     end
   end
@@ -614,9 +630,12 @@ defmodule AttestoClient.OAuthHTTP do
 
     cond do
       state.attestation_retry? and Challenge.attestation_error?(resp) and challenge != nil ->
+        refuse_attempt(state.delivery)
         auth_attempt(ctx, builder, classify, %{state | retry?: true, attestation_retry?: false})
 
       state.dpop_retry? and Challenge.dpop_nonce_challenge?(resp) ->
+        refuse_attempt(state.delivery)
+
         auth_attempt(ctx, builder, classify, %{
           state
           | nonce: Challenge.dpop_nonce(resp),
@@ -628,6 +647,8 @@ defmodule AttestoClient.OAuthHTTP do
         classify.(resp)
     end
   end
+
+  defp refuse_attempt({context, previous}), do: Deadline.refused(context, previous)
 
   defp notify_attestation_challenge(_callback, nil), do: :ok
   defp notify_attestation_challenge(nil, _challenge), do: :ok
@@ -690,7 +711,21 @@ defmodule AttestoClient.OAuthHTTP do
     |> run_req()
   end
 
+  defp transport_error(%Req.TransportError{reason: {:not_sent, _cause}}), do: {:error, :not_sent}
+  defp transport_error(%Req.TransportError{reason: :too_large}), do: {:error, :response_too_large}
+  defp transport_error(%Req.TransportError{reason: :request_timeout}), do: {:error, :timeout}
+  defp transport_error(_reason), do: {:error, :transport_error}
+
   defp run_req(options) do
+    # Req's in-process plug bypasses the socket adapter. Carry the same delivery
+    # accounting through this injectable transport.
+    if Keyword.get(options, :plug) not in [nil, false] do
+      Deadline.sending(
+        Keyword.fetch!(options, :attesto_context),
+        Keyword.fetch!(options, :method)
+      )
+    end
+
     case Req.request(PinnedRequest.new(options)) do
       {:ok, %Req.Response{private: %{attesto_client_response_too_large: true}}} ->
         {:error, :response_too_large}
@@ -750,7 +785,7 @@ defmodule AttestoClient.OAuthHTTP do
     case run_req(options) do
       {:ok, %Req.Response{} = response} -> {:ok, response}
       {:error, :response_too_large} = error -> error
-      {:error, _reason} -> {:error, :transport_error}
+      {:error, reason} -> transport_error(reason)
     end
   rescue
     _error -> {:error, :transport_error}
@@ -791,8 +826,8 @@ defmodule AttestoClient.OAuthHTTP do
       {:error, :response_too_large} = error ->
         error
 
-      {:error, _reason} ->
-        {:error, :transport_error}
+      {:error, reason} ->
+        transport_error(reason)
     end
   rescue
     _error -> {:error, :transport_error}

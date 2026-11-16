@@ -765,6 +765,59 @@ defmodule AttestoClient.Wallet.PresentationTest do
     end
   end
 
+  for operation <- [:build_vp_token, :present] do
+    @operation operation
+    test "#{operation}: a second status GET failure retains credential context" do
+      issuer = JOSE.JWK.generate_key({:ec, "P-256"})
+      issuer_pem = issuer |> JOSE.JWK.to_pem() |> elem(1)
+      {holder, holder_public} = ec_keypair()
+      uri = "https://status.example/list"
+
+      held =
+        issue_held_sd_jwt(issuer_pem, holder_public, status: Attesto.StatusList.reference(uri, 0))
+        |> Map.put(:issuer_key, issuer_jwks_for(issuer_pem))
+
+      query = %{
+        "credentials" =>
+          Enum.map(["first", "second"], fn id ->
+            %{"id" => id, "format" => "dc+sd-jwt", "meta" => %{"vct_values" => ["identity"]}}
+          end)
+      }
+
+      req = request(%{dcql_query: query})
+      selection = %{"first" => held, "second" => held}
+      claims = %{"sub" => uri, "iat" => @now, "status_list" => Attesto.StatusList.build([0])}
+
+      {_, jwt} =
+        issuer
+        |> JOSE.JWT.sign(%{"alg" => "ES256", "typ" => "statuslist+jwt"}, claims)
+        |> JOSE.JWS.compact()
+
+      calls = :atomics.new(1, [])
+
+      resolver = fn ^uri, "application/statuslist+jwt" ->
+        if :atomics.add_get(calls, 1, 1) == 1,
+          do: {:ok, jwt},
+          else: {:error, {:not_sent, {:transport, :econnrefused}}}
+      end
+
+      opts = [
+        selection: selection,
+        holder_keys: %{"first" => holder, "second" => holder},
+        now: @now,
+        resolve_status: resolver
+      ]
+
+      result =
+        if @operation == :present,
+          do: Presentation.present(req, [held], opts),
+          else: Presentation.build_vp_token(selection, req, opts)
+
+      assert {:error, {"second", {:not_sent, {:transport, :econnrefused}}}} = result
+      assert :atomics.get(calls, 1) == 2
+    end
+  end
+
   test "mdoc status is read from the signed MSO even when stored derived fields are absent" do
     {issuer, issuer_public} = ec_keypair()
     {holder, holder_public} = ec_keypair()

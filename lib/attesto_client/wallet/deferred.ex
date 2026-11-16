@@ -49,8 +49,19 @@ defmodule AttestoClient.Wallet.Deferred do
     with {:ok, limits} <- limits(opts) do
       result =
         Deadline.run(
-          fn -> poll(response, transaction_id, limits.clock.(), 0, limits, opts, request) end,
-          limits.timeout
+          fn context ->
+            poll(
+              response,
+              transaction_id,
+              limits.clock.(),
+              0,
+              limits,
+              Keyword.put(opts, :attesto_context, context),
+              request
+            )
+          end,
+          limits.timeout,
+          opts
         )
 
       case result do

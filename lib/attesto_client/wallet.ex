@@ -175,10 +175,29 @@ defmodule AttestoClient.Wallet do
   issuer at a private address or a loopback `http` issuer in development; see
   `AttestoClient.Outbound`. A malformed value is `{:error, :invalid_outbound}`
   before any request is sent.
+  `{:error, :not_sent}` guarantees that no state-changing request during this
+  call was written, except a refused authentication attempt being retried.
+  After an accepted token or credential request, a later connection failure
+  returns `:transport_error`, or `:timeout` for its request deadline. Deferred
+  polling retains `:deferred_timeout`; a notification failure is recorded in
+  `:notification_error` on the successful credential result.
   """
   @spec request_credential(CredentialOffer.t(), Proof.jwk() | [Proof.jwk()], [opt()]) ::
           {:ok, result()} | {:error, term()}
   def request_credential(%CredentialOffer{} = offer, holder_key, opts) when is_list(opts) do
+    opts = AttestoClient.Deadline.options(opts)
+    context = Keyword.fetch!(opts, :attesto_context)
+
+    case do_request_credential(offer, holder_key, opts) do
+      {:error, :not_sent} -> {:error, AttestoClient.Deadline.not_sent(context, :transport_error)}
+      {:error, {:not_sent, cause}} -> {:error, AttestoClient.Deadline.not_sent(context, cause)}
+      result -> result
+    end
+  end
+
+  def request_credential(_offer, _holder_key, _opts), do: {:error, :invalid_offer}
+
+  defp do_request_credential(offer, holder_key, opts) do
     with :ok <- AttestoClient.Outbound.validate(opts),
          :ok <- AttestoClient.Outbound.check_issuer(offer.credential_issuer, opts),
          {:ok, opts} <- issuer_options(offer, opts),
@@ -202,8 +221,6 @@ defmodule AttestoClient.Wallet do
       finalize(response, format, c_nonce, access_token, holder_publics, opts, type_binding)
     end
   end
-
-  def request_credential(_offer, _holder_key, _opts), do: {:error, :invalid_offer}
 
   defp issuer_options(offer, opts) do
     result =

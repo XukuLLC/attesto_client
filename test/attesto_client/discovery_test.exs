@@ -744,7 +744,8 @@ defmodule AttestoClient.DiscoveryTest do
                  resolver: resolver
                )
 
-      assert target.url == "https://93.184.216.34:8443/jwks"
+      assert target.url == "https://op.example.com:8443/jwks"
+      assert target.addresses == [{93, 184, 216, 34}]
       assert target.host == "op.example.com"
       assert target.authority == "op.example.com:8443"
     end

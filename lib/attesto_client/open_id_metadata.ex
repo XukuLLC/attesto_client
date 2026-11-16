@@ -126,6 +126,7 @@ defmodule AttestoClient.OpenIDMetadata do
         Discovery.fetch(
           issuer,
           Keyword.take(opts, [
+            :attesto_context,
             :well_known,
             :req_options,
             :resolver,

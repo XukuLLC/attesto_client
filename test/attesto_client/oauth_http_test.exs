@@ -992,7 +992,6 @@ defmodule AttestoClient.OAuthHTTPTest do
 
   describe "SSRF-safe pinned requests" do
     @pinned_endpoint "https://service.example.test:8443/oauth/path?existing=1"
-    @pinned_url "https://93.184.216.34:8443/oauth/path?existing=1"
     @pinned_dpop_htu "https://service.example.test:8443/oauth/path"
 
     test "every HTTP method family preserves protocol-owned request data" do
@@ -1055,7 +1054,8 @@ defmodule AttestoClient.OAuthHTTPTest do
                  resolver: rebinding_resolver(resolutions)
                )
 
-      assert target.url == @pinned_url
+      assert target.url == @pinned_endpoint
+      assert target.addresses == [{93, 184, 216, 34}]
       assert target.host == "service.example.test"
       assert target.authority == "service.example.test:8443"
       assert :atomics.get(resolutions, 1) == 2

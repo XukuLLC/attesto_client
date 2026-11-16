@@ -161,6 +161,7 @@ defmodule AttestoClient.AuthorizationCode do
            }}
           | {:error, term()}
   def start(store, opts) when is_list(opts) do
+    opts = AttestoClient.Deadline.options(opts)
     default_ttl_ms = @default_transaction_ttl_ms
 
     with {:ok, opts} <- Issuer.expand_option(opts),
@@ -327,6 +328,8 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   def callback(store, params, opts) when is_map(params) and is_list(opts) do
+    opts = AttestoClient.Deadline.options(opts)
+
     with :ok <- Verifier.validate_now_option(opts),
          :ok <- IDToken.validate_require_typ(opts),
          {:ok, opts} <- Issuer.expand_option(opts),
@@ -632,6 +635,7 @@ defmodule AttestoClient.AuthorizationCode do
     verify_opts =
       opts
       |> Keyword.take([
+        :attesto_context,
         :req_options,
         :resolver,
         :outbound,
@@ -675,6 +679,7 @@ defmodule AttestoClient.AuthorizationCode do
   defp http_options(transaction, opts) do
     opts
     |> Keyword.take([
+      :attesto_context,
       :client_auth,
       :req_options,
       :timeout,
@@ -851,7 +856,7 @@ defmodule AttestoClient.AuthorizationCode do
         max_age: transaction.max_age,
         accepted_algs: [transaction.id_token_alg],
         enforce_fapi_alg_policy: transaction_profile(transaction) == :fapi
-      ] ++ Keyword.take(opts, [:now])
+      ] ++ Keyword.take(opts, [:now, :attesto_context])
 
     # With an issuer cache the keys come from it, so an unknown `kid` can
     # refresh them; otherwise the keys resolved before the exchange are used.

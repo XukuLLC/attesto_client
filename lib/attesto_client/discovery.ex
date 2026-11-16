@@ -28,6 +28,15 @@ defmodule AttestoClient.Discovery do
   **before** the issuer's path component (RFC 8414 §3.1), so it is correct for
   path-based (multi-tenant) issuers.
 
+  Connect failures are retried up to three times within the overall deadline,
+  with a three-second per-attempt cap (override through `:req_options`'s
+  `:connect_options` `:timeout`). `{:error, :not_sent}` means the failed request
+  never started and no earlier state-changing request in the call was written.
+  Earlier GET/HEAD requests do not count. This includes deadline expiry during
+  connect. Other transport
+  failures retain `{:error, {:transport, reason}}`; they may follow a sent
+  request. No transport retry occurs after sending starts.
+
   ## Issuer / transport validation
 
     * The issuer MUST be an `https` URL with no query or fragment (RFC 8414 §2).
@@ -102,6 +111,8 @@ defmodule AttestoClient.Discovery do
           | :invalid_timeout
           | :invalid_resolver
           | :invalid_outbound
+          | :not_sent
+          | :transport_error
           | :timeout
           | {:http_status, pos_integer()}
           | {:transport, term()}
@@ -528,13 +539,22 @@ defmodule AttestoClient.Discovery do
 
   defp get_json(url, opts) do
     with {:ok, timeout_ms} <- HTTPPolicy.timeout(opts) do
-      Deadline.run(fn -> perform_get_json(url, opts, timeout_ms) end, timeout_ms)
+      Deadline.run(
+        fn context ->
+          perform_get_json(url, Keyword.put(opts, :attesto_context, context), timeout_ms)
+        end,
+        timeout_ms,
+        opts
+      )
     end
   end
 
   defp perform_get_json(url, opts, timeout_ms) do
     with {:ok, request_opts} <- PinnedRequest.extract_options(opts),
-         req_options = Keyword.put_new(request_opts, :receive_timeout, timeout_ms),
+         req_options =
+           request_opts
+           |> Keyword.put_new(:receive_timeout, timeout_ms)
+           |> Keyword.put(:attesto_context, Keyword.fetch!(opts, :attesto_context)),
          {:ok, target} <- screen_endpoint(url, Keyword.put(opts, :req_options, request_opts)),
          {:ok, req_options} <-
            PinnedRequest.prepare(target, req_options, ["authorization", "cookie"], [:auth]) do
@@ -566,12 +586,21 @@ defmodule AttestoClient.Discovery do
           {:error, {:http_status, status}}
 
         {:error, reason} ->
-          {:error, {:transport, reason}}
+          transport_error(reason)
       end
     end
   rescue
     error -> {:error, {:transport, Exception.message(error)}}
   end
+
+  defp transport_error(%Req.TransportError{reason: :request_timeout}), do: {:error, :timeout}
+  defp transport_error(%Req.TransportError{reason: :too_large}), do: {:error, :response_too_large}
+  defp transport_error(%Req.TransportError{reason: {:not_sent, _cause}}), do: {:error, :not_sent}
+
+  defp transport_error(%Req.TransportError{reason: :transport_error}),
+    do: {:error, :transport_error}
+
+  defp transport_error(reason), do: {:error, {:transport, reason}}
 
   defp request(target, req_options, max_bytes) do
     req_options
@@ -582,6 +611,7 @@ defmodule AttestoClient.Discovery do
       retry: false,
       compressed: false,
       raw: true,
+      attesto_body_limit: max_bytes,
       into: PinnedRequest.bounded_response_into(max_bytes)
     )
     |> PinnedRequest.new()
@@ -602,7 +632,7 @@ defmodule AttestoClient.Discovery do
   end
 
   # SSRF guard: resolve every A/AAAA answer, reject the whole set if any target
-  # is special-use, then rewrite the URL to one checked address. Mint's
+  # is special-use, then carry all checked addresses. Mint's
   # `connect_options[:hostname]` keeps TLS SNI and certificate verification on
   # the original host while the socket dials that IP. This closes the DNS-
   # rebinding window between validation and connect.
@@ -615,7 +645,7 @@ defmodule AttestoClient.Discovery do
 
   @doc false
   @spec screen_endpoint(String.t(), keyword()) ::
-          {:ok, %{url: String.t(), host: String.t(), authority: String.t()}}
+          {:ok, OutboundTarget.screened()}
           | {:error,
              :blocked_host | :invalid_resolver | :invalid_outbound | :unsafe_transport_options}
   def screen_endpoint(url, opts \\ [])
@@ -638,7 +668,13 @@ defmodule AttestoClient.Discovery do
     with {:ok, test_transport?} <- req_test_transport?(opts) do
       if test_transport?,
         do:
-          {:ok, %{url: URI.to_string(uri), host: host, authority: OutboundTarget.authority(uri)}},
+          {:ok,
+           %{
+             url: URI.to_string(uri),
+             addresses: [],
+             host: host,
+             authority: OutboundTarget.authority(uri)
+           }},
         else: screen_resolved(url, opts)
     end
   end
