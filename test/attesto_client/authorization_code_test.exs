@@ -9,7 +9,6 @@ defmodule AttestoClient.AuthorizationCodeTest do
   @client_id "client-123"
   @redirect_uri "https://rp.example.com/callback"
   @browser_binding "opaque-browser-binding"
-  @now System.system_time(:second)
   @key JOSE.JWK.generate_key({:rsa, 2048})
 
   defp metadata(overrides \\ %{}) do
@@ -64,8 +63,8 @@ defmodule AttestoClient.AuthorizationCodeTest do
           "iss" => @issuer,
           "sub" => "subject-1",
           "aud" => @client_id,
-          "iat" => @now,
-          "exp" => @now + 600,
+          "iat" => now(),
+          "exp" => now() + 600,
           "nonce" => nonce,
           "at_hash" => hash_claim(access_token)
         },
@@ -578,7 +577,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
     assert {:error, :invalid_max_age} =
              start_flow(store, authorization_params: %{"max_age" => "not-a-number"})
 
-    Enum.each([{@now - 30, :ok}, {@now - 120, :max_age_exceeded}], fn
+    Enum.each([{now() - 30, :ok}, {now() - 120, :max_age_exceeded}], fn
       {auth_time, expectation} ->
         assert {:ok, started} =
                  start_flow(store, authorization_params: %{"max_age" => "60"})
@@ -923,7 +922,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
 
       old = [
         transaction: transaction,
-        req_options: [plug: token_plug(transaction.nonce, %{"iat" => @now - 400})],
+        req_options: [plug: token_plug(transaction.nonce, %{"iat" => now() - 400})],
         timeout: 30_000
       ]
 
@@ -1037,4 +1036,8 @@ defmodule AttestoClient.AuthorizationCodeTest do
                AuthorizationCode.exchange("code-1", Keyword.put(base, :resource, "not a uri"))
     end
   end
+
+  # Read at run time: a module attribute is fixed when the test compiles,
+  # and the max_age case fails when the suite starts a minute later.
+  defp now, do: System.system_time(:second)
 end
