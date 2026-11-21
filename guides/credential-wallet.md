@@ -10,8 +10,8 @@ that assurance comes from your wallet provider and key-attestation issuer.
 For the encrypted examples, use these dependencies:
 
 ```elixir
-{:attesto, ">= 2.25.0 and < 3.0.0"},
-{:attesto_client, "~> 2.23"}
+{:attesto, ">= 2.30.0 and < 3.0.0"},
+{:attesto_client, "~> 2.24"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.
@@ -271,11 +271,13 @@ including the used trust anchor, until the restrictions can be fully preserved
 and enforced. `rsaEncryption` parameters must be NULL; absent parameters are
 accepted for interoperability. Unrelated unsupported anchors do not invalidate
 another valid path. Ecosystem EKU requirements are a separate
-policy from permission to sign. Algorithm allowlists must be nonempty and can
-only narrow the supported wallet algorithms; callers cannot enable weak
-algorithms or remove the PS256 key-strength check. Select
-`enforce_fapi_alg_policy: true` when the ecosystem also requires FAPI's narrower
-signature algorithm set.
+policy from permission to sign. Use a nonempty allowlist to narrow the supported
+wallet algorithms. RSA verification requires at least 2048 bits under every
+algorithm policy (RFC 7518 §3.3). Each certificate in the selected path,
+including the anchor, must use a supported key and signature and contain each
+extension OID at most once. A leaf with `cA` set to `TRUE` is eligible only as the
+selected anchor (RFC 5280). Select `enforce_fapi_alg_policy: true` when the
+ecosystem also requires FAPI's narrower signature algorithm set.
 
 Signed presentation requests require `typ: oauth-authz-req+jwt`, an explicit
 supported `response_mode`, and URL-safe ASCII nonce and state values. The
@@ -322,12 +324,13 @@ are never accepted from token-endpoint JSON.
 
 This mode requires an issuer certificate chain in the SD-JWT VC or mdoc,
 validates it to the supplied anchors, and verifies the credential with the
-leaf key. It does not fall back to fixed `trusted:` keys. Successful held
+leaf key. Every configured anchor must meet the key, signature, and extension
+requirements above. It does not fall back to fixed `trusted:` keys. Successful held
 credentials include the verified `issuer_certificate_chain` and
 `authority_key_identifiers`; failed signature or holder-binding checks never
 produce a held credential. Add `certificate_trust:` for further issuer policy.
 Certificate-identified SD-JWT credentials may omit `iss`. This package
-requires Attesto `>= 2.25.0 and < 3.0.0`. A present issuer must equal the offer's
+requires Attesto `>= 2.30.0 and < 3.0.0`. A present issuer must equal the offer's
 Credential Issuer Identifier. Use `certificate_trust:` to bind certificate
 subjects to the issuer identities allowed by your ecosystem policy.
 
@@ -395,7 +398,7 @@ and [VP testing instructions](https://openid.net/certification/conformance-testi
 
 When developing both libraries in sibling source checkouts, use
 `ATTESTO_PATH=1 mix test` to exercise the coordinated core. AttestoClient
-requires Attesto `>= 2.25.0 and < 3.0.0`, including for unencrypted wallet
+requires Attesto `>= 2.30.0 and < 3.0.0`, including for unencrypted wallet
 operations, so installations use the shared JWS, DPoP, URI, outbound-address,
 X.509, and strict CBOR implementations.
 

@@ -14,8 +14,8 @@ defmodule AttestoClient.Wallet.PresentationRequest do
   `Attesto.RequestObject`. All signed requests require `oauth-authz-req+jwt`;
   `iss` is ignored and the verified `client_id` identifies the verifier.
   Algorithm policies must be nonempty and can only narrow supported algorithms.
-  HAIP retains the wallet signature and key-strength policy. An explicit
-  `enforce_fapi_alg_policy: true` additionally narrows algorithms to FAPI.
+  RSA verification requires at least 2048 bits under every policy. Set
+  `enforce_fapi_alg_policy: true` to use FAPI's algorithm and curve restrictions.
   This module supports `direct_post` and encrypted `direct_post.jwt`.
   Unsupported transaction data fails closed before credential selection.
 

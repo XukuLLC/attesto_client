@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.0] - 2026-11-20
+
+Requires `attesto >= 2.30.0 and < 3.0.0`.
+
+### Breaking
+
+- The client refuses RSA keys under 2048 bits and certificates with unsupported keys or signatures, duplicate extension OIDs, or `cA` set to `TRUE` on a leaf other than the selected trust anchor, including under an explicit non-FAPI or broader algorithm policy (RFC 7518 §3.3, RFC 5280). Hosts receive `:untrusted_certificate` for wallet paths refused on these certificate checks.
+- The client still returns `:weak_key` when an otherwise eligible RSA verification key is too small and no candidate remains.
+
 ## [2.23.1] - 2026-11-17
 
 ### Security

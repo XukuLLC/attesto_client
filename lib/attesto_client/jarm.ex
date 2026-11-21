@@ -14,8 +14,9 @@ defmodule AttestoClient.JARM do
 
     * **Signature** verifies against one of the authorization server's JWKS keys,
       restricted to an algorithm allow-list (`:accepted_algs`, default the FAPI
-      algorithms PS256/ES256/EdDSA/Ed25519 - `none` is never accepted). The
-      default also enforces the FAPI RSA-strength and Ed25519-only key policy.
+      algorithms PS256/ES256/EdDSA/Ed25519 - `none` is never accepted). RSA keys
+      require at least 2048 bits under every policy. The default FAPI policy
+      restricts legacy `EdDSA` to Ed25519.
       When the JWT header carries a `kid`, exactly one suitable matching key
       must exist.
     * `iss` equals the expected authorization server identifier (`:issuer`).
@@ -74,7 +75,8 @@ defmodule AttestoClient.JARM do
   `:client_id` (the expected audience). Optional: `:accepted_algs` (default the
   FAPI algorithms) and `:now` (Unix seconds, for tests). Supplying an explicit
   `:accepted_algs` list selects a non-FAPI algorithm policy unless
-  `:enforce_fapi_alg_policy` is also `true`.
+  `:enforce_fapi_alg_policy` is also `true`. RSA verification requires at least
+  2048 bits under either policy (RFC 7518 §3.3).
   """
   @spec verify(String.t(), jwks(), [verify_opt()]) :: {:ok, map()} | {:error, error()}
   def verify(response_jwt, jwks, opts) when is_binary(response_jwt) and is_list(opts) do
@@ -124,7 +126,7 @@ defmodule AttestoClient.JARM do
   # Preserve the shared verifier's long-standing `nil`-means-default behavior
   # for its other public consumers. At this FAPI boundary, however, only an
   # actual non-empty list is an explicit non-FAPI policy; a present `nil` must
-  # not disable the curve/strength defaults.
+  # not disable the FAPI algorithm and curve restrictions.
   defp accepted_algs(opts) do
     case Keyword.fetch(opts, :accepted_algs) do
       {:ok, nil} -> {:error, :unsupported_alg}

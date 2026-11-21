@@ -267,7 +267,7 @@ defmodule AttestoClient.EdwardsAlgorithmsTest do
                JARM.verify(ed448_token, ed448_jwks, jarm_opts(accepted_algs: ["Ed448"]))
     end
 
-    test "rejects ambiguous, unsuitable, algorithm-confused, and weak JWKs" do
+    test "rejects ambiguous, unsuitable, and algorithm-confused JWKs and refuses weak RSA under either policy" do
       key = JOSE.JWK.generate_key({:ec, "P-256"})
       token = sign(key, "ES256", jarm_claims(), "jarm-key")
       public = public_map(key, "ES256", "jarm-key")
@@ -299,8 +299,10 @@ defmodule AttestoClient.EdwardsAlgorithmsTest do
       weak = JOSE.JWK.generate_key({:rsa, 1024})
       weak_token = sign(weak, "PS256", jarm_claims(), "weak-rsa")
 
-      assert {:error, :weak_key} =
-               JARM.verify(weak_token, jwks(weak, "PS256", "weak-rsa"), jarm_opts())
+      for opts <- [jarm_opts(), Keyword.put(jarm_opts(), :accepted_algs, ["PS256"])] do
+        assert {:error, :weak_key} =
+                 JARM.verify(weak_token, jwks(weak, "PS256", "weak-rsa"), opts)
+      end
     end
   end
 

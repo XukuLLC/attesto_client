@@ -380,7 +380,7 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     refute Base.url_encode64(ski, padding: false) in provenance.authority_key_identifiers
   end
 
-  test "PS256 rejects a correctly signed weak RSA leaf even with an explicit algorithm policy",
+  test "PS256 requests require a trusted RSA leaf of at least 2048 bits under either policy",
        context do
     for bits <- [1024, 2048] do
       data =
@@ -394,12 +394,17 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
       jwt = sign(rsa_context, %{}, %{"alg" => "PS256"})
       opts = Keyword.put(options(rsa_context), :accepted_algs, ["PS256"])
 
-      # The chain is trusted and the RSA signature is cryptographically valid;
-      # only the independent key-strength policy must reject the weak leaf.
-      assert {:ok, _provenance} = CertificateTrust.verify([rsa_context.leaf], opts)
-
       assert {true, %JOSE.JWT{}, _} =
                JOSE.JWT.verify_strict(JOSE.JWK.to_public(rsa_context.key), ["PS256"], jwt)
+
+      case bits do
+        1024 ->
+          assert {:error, :untrusted_certificate} =
+                   CertificateTrust.verify([rsa_context.leaf], opts)
+
+        2048 ->
+          assert {:ok, _provenance} = CertificateTrust.verify([rsa_context.leaf], opts)
+      end
 
       assert_ps256_result(PresentationRequest.verify(jwt, nil, opts), bits)
 
@@ -452,6 +457,6 @@ defmodule AttestoClient.Wallet.PresentationX509Test do
     }
   end
 
-  defp assert_ps256_result(result, 1024), do: assert(result == {:error, :invalid_signature})
+  defp assert_ps256_result(result, 1024), do: assert(result == {:error, :untrusted_certificate})
   defp assert_ps256_result({:ok, %PresentationRequest{}}, 2048), do: :ok
 end

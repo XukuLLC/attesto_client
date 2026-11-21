@@ -341,7 +341,7 @@ defmodule AttestoClient.IDTokenTest do
                IDToken.verify("not.a.jwt", issuer: @issuer, client_id: @client_id, jwks: jwks())
     end
 
-    test "rejects ambiguous, unknown, ineligible, and weak verification keys" do
+    test "reports weak keys only when otherwise eligible and no candidate remains" do
       pem = Keystore.signing_pem()
       jwt = sign(base_claims())
       key = public_jwk(pem, %{"alg" => "RS256"})
@@ -378,18 +378,34 @@ defmodule AttestoClient.IDTokenTest do
 
       weak = JOSE.JWK.generate_key({:rsa, 1024})
       {_, weak_public} = JOSE.JWK.to_public_map(weak)
+      weak_public = Map.merge(weak_public, %{"kid" => "weak", "alg" => "RS256"})
 
       {_, weak_jwt} =
         weak
         |> JOSE.JWT.sign(%{"alg" => "RS256", "kid" => "weak", "typ" => "JWT"}, base_claims())
         |> JOSE.JWS.compact()
 
-      assert {:error, :weak_key} =
+      assert {:error, :weak_key} = verify(weak_jwt, jwks: %{"keys" => [weak_public]})
+
+      assert {:error, :invalid_signature} =
                verify(weak_jwt,
-                 jwks: %{
-                   "keys" => [Map.merge(weak_public, %{"kid" => "weak", "alg" => "RS256"})]
-                 }
+                 jwks: %{"keys" => [weak_public]},
+                 accepted_algs: ["RS256", "RS256"]
                )
+
+      for override <- [
+            %{"kid" => "other"},
+            %{"alg" => "PS256"},
+            %{"use" => nil},
+            %{"key_ops" => ["verify", 42]},
+            %{"e" => "AA"}
+          ] do
+        assert {:error, :invalid_signature} =
+                 verify(weak_jwt, jwks: %{"keys" => [Map.merge(weak_public, override)]})
+      end
+
+      assert {:ok, _claims} =
+               verify(jwt, jwks: %{"keys" => [%{weak_public | "kid" => key["kid"]}, key]})
     end
 
     test "rejects a huge RSA exponent before JOSE bignum verification" do

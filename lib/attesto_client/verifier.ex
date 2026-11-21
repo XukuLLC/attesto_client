@@ -1,10 +1,8 @@
 defmodule AttestoClient.Verifier do
   @moduledoc false
 
-  alias Attesto.{JWS, NumericDate, SigningAlg}
+  alias Attesto.{JWS, Key, NumericDate, SigningAlg}
   alias AttestoClient.Discovery
-
-  @minimum_rsa_bits 2048
 
   @type compact_segments :: {binary(), binary(), binary()}
 
@@ -104,7 +102,7 @@ defmodule AttestoClient.Verifier do
              crit_error: :unsupported_critical_header
            ),
          :ok <- check_algorithm(header, accepted_algs),
-         :ok <- Attesto.Key.validate_kid(keys, Map.get(header, "kid"), opts),
+         :ok <- Key.validate_kid(keys, Map.get(header, "kid"), opts),
          {:ok, candidate} <- verification_candidate(keys, header, accepted_algs, opts),
          {:ok, claims, {_kid, _alg, verified_jwk}} <-
            JWS.verify_strict(jwt, [candidate],
@@ -250,7 +248,7 @@ defmodule AttestoClient.Verifier do
           [_],
           JWS.verification_candidates(
             [key],
-            candidate_opts(alg, accepted_algs, [], @minimum_rsa_bits)
+            candidate_opts(alg, accepted_algs)
           )
         )
       end)
@@ -262,39 +260,39 @@ defmodule AttestoClient.Verifier do
   defp check_algorithm(_header, _accepted_algs), do: {:error, :invalid_signature}
 
   defp verification_candidate(keys, %{"alg" => alg} = header, accepted_algs, opts) do
-    key_policy_opts = Keyword.put(opts, :enforce_fapi_alg_policy, false)
-
-    selection_opts =
-      candidate_opts(alg, accepted_algs, key_policy_opts, nil, Map.get(header, "kid"))
-
+    kid = Map.get(header, "kid")
     strict_keys = Enum.filter(keys, &strict_key_metadata?/1)
 
-    case JWS.verification_candidates(strict_keys, selection_opts) do
+    case JWS.verification_candidates(strict_keys, candidate_opts(alg, accepted_algs, kid)) do
       [] ->
-        {:error, :invalid_signature}
+        if SigningAlg.valid_verification_algorithms?(accepted_algs) and
+             Enum.any?(strict_keys, &weak_rsa_key?(&1, alg, kid)),
+           do: {:error, :weak_key},
+           else: {:error, :invalid_signature}
 
       [_one, _two | _rest] ->
         {:error, :ambiguous_key}
 
-      [_candidate] ->
-        strong_opts = Keyword.put(selection_opts, :min_rsa_bits, @minimum_rsa_bits)
-
-        case JWS.verification_candidates(strict_keys, strong_opts) do
-          [candidate] -> enforce_candidate_policy(candidate, strict_keys, strong_opts, opts)
-          [] -> {:error, :weak_key}
-        end
+      [candidate] ->
+        enforce_candidate_policy(candidate, accepted_algs, opts)
     end
   end
 
-  defp enforce_candidate_policy(candidate, keys, selection_opts, opts) do
-    if Keyword.get(opts, :enforce_fapi_alg_policy, false) do
-      case JWS.verification_candidates(keys, Keyword.put(selection_opts, :fapi?, true)) do
-        [_candidate] -> {:ok, candidate}
-        [] -> {:error, :invalid_signature}
-      end
-    else
-      {:ok, candidate}
-    end
+  defp weak_rsa_key?(%{"kty" => "RSA"} = key, alg, kid) do
+    (is_nil(kid) or Map.get(key, "kid") === kid) and
+      Key.verification_jwk(key, alg: alg) == {:error, :weak_key} and
+      match?({:ok, _jwk}, Key.verification_jwk(key, alg: alg, minimum_rsa_bits: 1))
+  end
+
+  defp weak_rsa_key?(_key, _alg, _kid), do: false
+
+  defp enforce_candidate_policy({_kid, alg, jwk} = candidate, accepted_algs, opts) do
+    if Keyword.get(opts, :enforce_fapi_alg_policy, false) and
+         not Enum.any?(SigningAlg.verification_algs(alg, jwk), fn alg ->
+           alg in accepted_algs and SigningAlg.fapi_compatible?(alg, jwk)
+         end),
+       do: {:error, :invalid_signature},
+       else: {:ok, candidate}
   end
 
   # Core treats an explicit JSON null like an absent optional JWK member. The
@@ -321,13 +319,11 @@ defmodule AttestoClient.Verifier do
 
   defp optional_verify_ops?(_other), do: false
 
-  defp candidate_opts(alg, accepted_algs, opts, minimum_bits, kid \\ nil) do
+  defp candidate_opts(alg, accepted_algs, kid \\ nil) do
     [
       alg: alg,
       accepted_algs: accepted_algs,
-      fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, false),
       kid: kid,
-      min_rsa_bits: minimum_bits,
       ambiguous_kid: :allow,
       malformed_key: :skip
     ]

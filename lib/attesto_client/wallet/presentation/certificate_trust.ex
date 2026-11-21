@@ -3,7 +3,6 @@ defmodule AttestoClient.Wallet.Presentation.CertificateTrust do
   Bounded X.509 trust validation for wallet presentation requests and issuer provenance.
 
   This public compatibility module delegates validation to `Attesto.X509`.
-  Existing function names, options, return values, and errors are preserved.
 
   `verify/2` accepts a leaf-first DER certificate chain and explicit DER trust
   anchors in `:trusted_certificates`. It validates the complete path with OTP's
@@ -11,6 +10,12 @@ defmodule AttestoClient.Wallet.Presentation.CertificateTrust do
   for additional host policy. The callback cannot replace path validation.
   Returns the verified leaf public JWK and authority key identifiers from the
   validated chain. Hosts still own ecosystem policy and revocation checking.
+
+  Every certificate in the path, including the selected anchor, must use a
+  supported key and signature. RSA keys require at least 2048 bits, each
+  extension OID may occur once, and a leaf with `cA` set to `TRUE` is eligible
+  only as the selected anchor. See `Attesto.X509.verify/2` for the supported
+  keys and signatures.
 
   `:purpose` defaults to `:generic`. The `:mdoc_issuer` purpose recognizes a
   critical mdoc document-signer extended key usage on the leaf certificate.

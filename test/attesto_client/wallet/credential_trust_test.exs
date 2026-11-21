@@ -102,7 +102,7 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
       assert {:error, :holder_binding_mismatch} = request(@format, wrong_binding, context)
     end
 
-    test "#{@format} applies additional policy without allowing it to bypass PKIX", context do
+    test "#{@format} requires both PKIX and the configured certificate policy", context do
       credential = issue(@format, context, [context.leaf])
 
       assert {:error, :untrusted_certificate} =
@@ -110,7 +110,8 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
                  certificate_trust: fn _ -> {:error, :denied} end
                )
 
-      unrelated = :public_key.pkix_test_root_cert(~c"unrelated-policy-root", key: @curve)
+      unrelated =
+        :public_key.pkix_test_root_cert(~c"unrelated-policy-root", key: @curve, digest: :sha256)
 
       assert {:error, :untrusted_certificate} =
                request(@format, credential, context,
@@ -227,7 +228,7 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
              )
   end
 
-  test "HAIP and default fixed-key PS256 issuance enforce RSA2048; explicit broader policy is available",
+  test "HAIP and fixed-key PS256 issuance require 2048-bit RSA under every algorithm policy",
        context do
     for bits <- [1024, 2048] do
       data =
@@ -243,32 +244,38 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
         issue("dc+sd-jwt", issuer, [issuer.leaf])
         |> resign_sd_jwt(issuer.key, %{"alg" => "PS256"})
 
-      assert {:ok, _provenance} =
-               CertificateTrust.verify(
-                 [issuer.leaf],
-                 options(issuer)
-               )
+      case bits do
+        1024 ->
+          assert {:error, :untrusted_certificate} =
+                   CertificateTrust.verify([issuer.leaf], options(issuer))
+
+        2048 ->
+          assert {:ok, _provenance} = CertificateTrust.verify([issuer.leaf], options(issuer))
+      end
 
       jwt = credential |> String.split("~") |> hd()
       assert {true, %JOSE.JWT{}, _} = JOSE.JWT.verify_strict(issuer.key, ["PS256"], jwt)
 
       for overrides <- [[], [verify_opts: [accepted_algs: ["PS256"]]]] do
-        assert_rsa_result(request("dc+sd-jwt", credential, issuer, overrides), bits)
+        assert_rsa_result(
+          request("dc+sd-jwt", credential, issuer, overrides),
+          bits,
+          :untrusted_certificate
+        )
       end
 
       trusted = issuer.key |> JOSE.JWK.to_public_map() |> elem(1)
 
-      assert {:ok, %{credentials: [_]}} =
-               request("dc+sd-jwt", credential, issuer,
-                 haip: false,
-                 trusted: trusted,
-                 verify_opts: [enforce_fapi_alg_policy: false]
-               )
+      for verify_opts <- [[], [enforce_fapi_alg_policy: false]] do
+        result =
+          request("dc+sd-jwt", credential, issuer,
+            haip: false,
+            trusted: trusted,
+            verify_opts: verify_opts
+          )
 
-      assert_rsa_result(
-        request("dc+sd-jwt", credential, issuer, haip: false, trusted: trusted),
-        bits
-      )
+        assert_rsa_result(result, bits, :invalid_signature)
+      end
     end
   end
 
@@ -553,8 +560,8 @@ defmodule AttestoClient.Wallet.CredentialTrustTest do
     Enum.join([signed | rest], "~")
   end
 
-  defp assert_rsa_result(result, 1024), do: assert(result == {:error, :invalid_signature})
-  defp assert_rsa_result({:ok, %{credentials: [_]}}, 2048), do: :ok
+  defp assert_rsa_result(result, 1024, reason), do: assert(result == {:error, reason})
+  defp assert_rsa_result({:ok, %{credentials: [_]}}, 2048, _reason), do: :ok
 
   defp bytes(value), do: %CBOR.Tag{tag: :bytes, value: value}
 end
