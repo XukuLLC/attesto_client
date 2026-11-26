@@ -36,6 +36,7 @@ defmodule AttestoClient.TokenSetTest do
     assert {:ok, tokens} = TokenSet.from_response(Map.put(@response, "extension", "value"), nil)
     assert tokens.refresh_token_timeout == nil
     assert tokens.authorization_expires_in == nil
+    assert tokens.resources == nil
     assert tokens.extra == %{"extension" => "value"}
   end
 

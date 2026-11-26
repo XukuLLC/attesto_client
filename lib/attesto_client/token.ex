@@ -92,7 +92,7 @@ defmodule AttestoClient.Token do
       with {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts),
            {:ok, tokens} <- TokenSet.from_response(response, nil),
            {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt) do
-        {:ok, Map.merge(tokens, profile)}
+        {:ok, tokens |> Map.merge(profile) |> Map.put(:resources, resources)}
       end
     end
   end
@@ -175,10 +175,29 @@ defmodule AttestoClient.Token do
   the request so an ID Token returned with a rotated refresh token can always
   be verified rather than losing the rotation result after the response.
 
-  `:resource` accepts one or more RFC 8707 resource indicators. Each is sent
-  as a `resource` parameter on the refresh request, as RFC 8707 §2.1 expects
-  for authorization servers that bind issued tokens to resources. A malformed
-  indicator is `{:error, :invalid_target}`.
+  `:resource` names the protected resource(s) the new access token is for
+  (RFC 8707 §2.2): one absolute URI without a fragment, or a list of them.
+  Each is sent as a `resource` parameter on the refresh request. Omitted, the
+  locally retained `tokens.resources` are repeated. An explicit value must be
+  a subset of that grant when it is known. A malformed or out-of-grant value
+  returns `{:error, :invalid_resource}` before any request. A token set
+  persisted before resources were retained has `resources: nil`; omission
+  sends none, while an explicit valid value is accepted and checked by the
+  authorization server.
+
+  `:scopes` optionally narrows the new access token to a list of RFC 6749 scope
+  tokens. Omitted or empty, no `scope` parameter is sent and the authorization
+  server treats the request as the original grant's scope. An invalid list
+  returns `{:error, :invalid_scopes}` before any request. When the response
+  omits `scope`, the token set retains the explicitly requested value.
+
+  One refresh request serves every concurrent caller for a key, and that
+  request names one set of resources and scopes. A caller that joins a refresh
+  running with different request parameters gets
+  `{:error, :refresh_request_mismatch}` and no tokens: its own request was not
+  sent, and the shared access token has another audience or permission set.
+  Where the server rotates refresh tokens the stored token set has been
+  replaced by then, so read it again before refreshing.
 
   `:client_auth` also accepts
   `{:private_key_jwt, jwk, assertion_opts}` for an explicitly registered
@@ -241,6 +260,9 @@ defmodule AttestoClient.Token do
          :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer, opts),
          {:ok, _client_id} <- required_string(opts, :client_id),
          {:ok, _subject} <- required_string(opts, :subject),
+         {:ok, resources} <- refresh_resources(tokens, opts),
+         {:ok, scopes} <- refresh_scopes(opts),
+         request = %{resources: resources, scopes: scopes},
          {:ok, profile} <- refresh_profile(tokens, opts),
          opts = Keyword.put(opts, :retained_authorization_profile, profile.profile),
          {:ok, id_token_alg} <- retained_id_token_alg(tokens, opts),
@@ -254,21 +276,32 @@ defmodule AttestoClient.Token do
         fn context ->
           opts = Keyword.put(opts, :attesto_context, context)
 
-          {:verified_refresh, do_refresh(tokens, dpop_jkt, profile, opts),
-           verification_options(opts)}
+          {:verified_refresh, do_refresh(tokens, dpop_jkt, profile, request, opts),
+           verification_options(opts), request}
         end,
         timeout_ms,
         opts
       )
-      |> adopt_refresh(dpop_jkt, profile, id_token_alg, opts)
+      |> adopt_refresh(request, dpop_jkt, profile, id_token_alg, opts)
     end
   end
 
   def refresh(_coordinator, _key, %TokenSet{}, _opts), do: {:error, :missing_refresh_token}
   def refresh(_coordinator, _key, _tokens, _opts), do: {:error, :invalid_token_set}
 
-  defp adopt_refresh({:verified_refresh, result, verified_opts}, dpop_jkt, profile, alg, opts) do
-    with {:ok, result} <-
+  # The result may come from another caller's request. It is adopted only when
+  # that request named this caller's resources and scopes, and its tokens match
+  # this caller's DPoP key, client authentication and ID Token algorithm.
+  defp adopt_refresh(
+         {:verified_refresh, result, verified_opts, requested},
+         request,
+         dpop_jkt,
+         profile,
+         alg,
+         opts
+       ) do
+    with :ok <- same_refresh_request(requested, request),
+         {:ok, result} <-
            result
            |> check_refresh_result_binding(dpop_jkt)
            |> check_refresh_profile(profile)
@@ -277,7 +310,92 @@ defmodule AttestoClient.Token do
     end
   end
 
-  defp adopt_refresh(error, _dpop_jkt, _profile, _alg, _opts), do: error
+  defp adopt_refresh(error, _request, _dpop_jkt, _profile, _alg, _opts), do: error
+
+  # RFC 8707 §2.2: a refresh request may name the resource(s) the new access
+  # token is for. Checked before the coordinator runs, so a malformed value is
+  # this caller's error and never a result shared with the others.
+  defp refresh_resources(tokens, opts) do
+    retained = Map.get(tokens, :resources)
+
+    with {:ok, retained_resources} <- validate_retained_resources(retained) do
+      requested_refresh_resources(Keyword.get(opts, :resource), retained, retained_resources)
+    end
+  end
+
+  defp requested_refresh_resources(nil, _retained, retained_resources),
+    do: {:ok, retained_resources}
+
+  defp requested_refresh_resources(value, retained, _retained_resources) do
+    with {:ok, resources} <- validate_refresh_resources(value),
+         :ok <- authorize_refresh_resources(resources, retained) do
+      {:ok, resources}
+    end
+  end
+
+  defp validate_retained_resources(nil), do: {:ok, []}
+  defp validate_retained_resources([]), do: {:ok, []}
+
+  defp validate_retained_resources(resources) do
+    case Attesto.ResourceIndicator.validate(resources) do
+      {:ok, resources} -> {:ok, resources}
+      {:error, :invalid_target} -> {:error, :invalid_token_set}
+    end
+  end
+
+  defp validate_refresh_resources(value) do
+    case Attesto.ResourceIndicator.validate(value) do
+      {:ok, resources} -> {:ok, resources}
+      {:error, :invalid_target} -> {:error, :invalid_resource}
+    end
+  end
+
+  # A legacy or application-assembled token set cannot prove the original
+  # resource grant, so the server remains the authority for an explicit value.
+  defp authorize_refresh_resources(_requested, nil), do: :ok
+
+  defp authorize_refresh_resources(requested, retained) do
+    case Attesto.ResourceIndicator.authorize(requested, retained) do
+      {:ok, _resources} -> :ok
+      {:error, :invalid_target} -> {:error, :invalid_resource}
+    end
+  end
+
+  defp refresh_scopes(opts) do
+    case Keyword.get(opts, :scopes) do
+      nil ->
+        {:ok, nil}
+
+      scopes when is_list(scopes) ->
+        if Enum.all?(scopes, &Attesto.Scope.valid_token?/1),
+          do: {:ok, scopes |> Enum.uniq() |> empty_to_nil()},
+          else: {:error, :invalid_scopes}
+
+      _invalid ->
+        {:error, :invalid_scopes}
+    end
+  end
+
+  defp empty_to_nil([]), do: nil
+  defp empty_to_nil(values), do: values
+
+  # Resource and scope lists are sets; their order carries no meaning. This
+  # holds whatever the shared request returned: a caller asking for different
+  # access learns nothing about its own request from that outcome.
+  defp same_refresh_request(requested, request) do
+    if same_set?(requested.resources, request.resources) and
+         same_optional_set?(requested.scopes, request.scopes),
+       do: :ok,
+       else: {:error, :refresh_request_mismatch}
+  end
+
+  defp same_set?(left, right), do: MapSet.new(left) == MapSet.new(right)
+  defp same_optional_set?(nil, nil), do: true
+
+  defp same_optional_set?(left, right) when is_list(left) and is_list(right),
+    do: same_set?(left, right)
+
+  defp same_optional_set?(_left, _right), do: false
 
   defp reverify_shared(result, verified_opts, opts) do
     if verified_opts == verification_options(opts) do
@@ -318,33 +436,38 @@ defmodule AttestoClient.Token do
   def revoke(_token, _opts), do: {:error, :invalid_token}
 
   defp do_refresh(
-         %TokenSet{refresh_token: refresh_token, scope: old_scope},
+         %TokenSet{refresh_token: refresh_token, scope: old_scope} = old_tokens,
          dpop_jkt,
          profile,
+         request,
          opts
        ) do
+    form =
+      %{"grant_type" => "refresh_token", "refresh_token" => refresh_token}
+      |> maybe_put("scope", requested_scope(request.scopes))
+      |> maybe_put("resource", if(request.resources == [], do: nil, else: request.resources))
+
+    default_scope = requested_scope(request.scopes) || old_scope
+
     with {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, jwks} <- Issuer.resolve_jwks(opts, issuer),
-         {:ok, resources} <- Attesto.ResourceIndicator.validate(Keyword.get(opts, :resource)),
-         {:ok, response} <-
-           OAuthHTTP.post_form(
-             endpoint,
-             %{"grant_type" => "refresh_token", "refresh_token" => refresh_token}
-             |> maybe_put("resource", if(resources == [], do: nil, else: resources)),
-             opts
-           ),
-         {:ok, tokens} <- TokenSet.from_response(response, refresh_token, old_scope),
+         {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts),
+         {:ok, tokens} <- TokenSet.from_response(response, refresh_token, default_scope),
          {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
          {:ok, claims} <- verify_refresh_id_token(tokens, put_resolved_jwks(opts, jwks)) do
       tokens =
         tokens
         |> Map.merge(profile)
         |> Map.put(:id_token_alg, Keyword.fetch!(opts, :id_token_alg))
+        |> Map.put(:resources, Map.get(old_tokens, :resources))
 
       {:ok, %RefreshResult{tokens: tokens, id_token_claims: claims}}
     end
   end
+
+  defp requested_scope(nil), do: nil
+  defp requested_scope(scopes), do: Enum.join(scopes, " ")
 
   defp new_profile(opts) do
     with {:ok, profile} <- AuthorizationProfile.select(opts) do

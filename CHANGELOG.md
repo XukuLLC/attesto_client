@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.0] - 2026-11-26
+
+### Added
+
+- `AttestoClient.Token.refresh/4` accepts `:resource`: one RFC 8707 resource
+  indicator or a list of them, each sent as a `resource` parameter on the
+  refresh request (RFC 8707 §2.2). An authorization server that binds tokens
+  to resources may refuse a refresh without it, and the MCP authorization
+  specification requires the parameter on every token request. Malformed or
+  out-of-grant values return `:invalid_resource` before any request. Thanks to
+  [@romul](https://github.com/romul) for the contribution in
+  [#11](https://github.com/XukuLLC/attesto_client/pull/11).
+- `AttestoClient.TokenSet.resources` retains the RFC 8707 resource indicators
+  known to belong to the authorization grant. Authorization-code and
+  client-credentials token sets populate it; refresh repeats it by default,
+  allows an explicit subset and preserves the full retained grant in the new
+  token set. `nil` identifies an older, imported or application-assembled
+  token set whose resource grant is unknown.
+- `AttestoClient.Token.refresh/4` accepts `:scopes` to downscope the new access
+  token under RFC 6749 §6. An invalid list returns `:invalid_scopes` before any
+  request. If the response omits `scope`, the token set retains the scope the
+  client requested.
+- One refresh request serves every concurrent caller for a key. A caller that
+  joins a refresh already running for other resources or scopes gets
+  `:refresh_request_mismatch` and no tokens, because the shared access token
+  has different access. Resource and scope order does not affect matching.
+  `AttestoClient.Error.project/1` retains the new code.
+
+### Behavior change
+
+- `AttestoClient.Token.refresh/4` ignored `:resource` before this release. A
+  caller that already passes it, for example in an option list shared with
+  `AttestoClient.AuthorizationCode.start/2`, now sends it. Before:
+  `grant_type=refresh_token&refresh_token=...`. After: the same form plus
+  `resource=<uri>` for each indicator.
+- Token sets created before this release have no retained resource grant and
+  continue to omit `resource` by default. Newly obtained token sets retain the
+  known grant and repeat it by default, so a later refresh remains
+  audience-bound without the application copying the option. Pass an explicit
+  subset to request a more narrowly targeted access token.
+- `AttestoClient.Token.refresh/4` ignored `:scopes` before this release. It now
+  sends a de-duplicated, space-delimited `scope` value. Omit it or pass an empty
+  list to keep the original grant scope.
+
 ## [2.24.0] - 2026-11-20
 
 Requires `attesto >= 2.30.0 and < 3.0.0`.

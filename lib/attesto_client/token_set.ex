@@ -25,6 +25,12 @@ defmodule AttestoClient.TokenSet do
   `:id_token_alg` retains the locally selected ID Token verification algorithm
   from authorization or refresh. Persist it with the token set so refresh uses
   the same policy. It never comes from token-endpoint JSON.
+
+  `:resources` retains the RFC 8707 resource indicators known to belong to the
+  authorization grant. Refresh repeats them by default and may request a
+  subset. It is local metadata, not a token-endpoint response member. `nil`
+  means the grant's resources are unknown, as with a token set persisted before
+  this field existed or assembled by an application.
   """
 
   alias Attesto.Thumbprint
@@ -43,6 +49,7 @@ defmodule AttestoClient.TokenSet do
     :id_token,
     :id_token_alg,
     :scope,
+    :resources,
     :dpop_jkt,
     :client_id,
     :issuer,
@@ -61,6 +68,7 @@ defmodule AttestoClient.TokenSet do
           id_token: String.t() | nil,
           id_token_alg: String.t() | nil,
           scope: String.t() | nil,
+          resources: [String.t()] | nil,
           dpop_jkt: String.t() | nil,
           client_id: String.t() | nil,
           issuer: String.t() | nil,

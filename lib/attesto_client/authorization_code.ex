@@ -629,7 +629,8 @@ defmodule AttestoClient.AuthorizationCode do
              http_options(grant, opts)
            ),
          {:ok, tokens} <- TokenSet.from_response(response, nil) do
-      TokenSet.bind_dpop(tokens, dpop_jkt)
+      with {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
+           do: {:ok, %{tokens | resources: resources}}
     end
   end
 
@@ -698,7 +699,8 @@ defmodule AttestoClient.AuthorizationCode do
          client_auth_binding: Map.get(transaction, :client_auth_binding),
          client_id: transaction.client_id,
          issuer: transaction.issuer,
-         id_token_alg: transaction.id_token_alg
+         id_token_alg: transaction.id_token_alg,
+         resources: Map.get(transaction, :resources, [])
      }}
   end
 

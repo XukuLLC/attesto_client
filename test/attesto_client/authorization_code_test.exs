@@ -390,14 +390,16 @@ defmodule AttestoClient.AuthorizationCodeTest do
     query = started.url |> URI.parse() |> Map.fetch!(:query)
     assert query_values(query, "resource") == resources
 
-    assert {:ok, _result} = exchange.(started, [])
+    assert {:ok, result} = exchange.(started, [])
+    assert result.tokens.resources == resources
     assert_receive {:token_body, body}
     assert query_values(body, "resource") == resources
     assert URI.decode_query(body)["grant_type"] == "authorization_code"
 
     # The token request may narrow to a subset of what was authorized.
     assert {:ok, narrowed} = start_flow(store, resource: resources)
-    assert {:ok, _result} = exchange.(narrowed, resource: "https://rs.example/mcp")
+    assert {:ok, result} = exchange.(narrowed, resource: "https://rs.example/mcp")
+    assert result.tokens.resources == resources
     assert_receive {:token_body, body}
     assert query_values(body, "resource") == ["https://rs.example/mcp"]
 
@@ -985,7 +987,12 @@ defmodule AttestoClient.AuthorizationCodeTest do
 
       {:ok, verifier} = {:ok, PKCE.code_verifier()}
 
-      assert {:ok, %AttestoClient.TokenSet{access_token: "access-1", refresh_token: "refresh-1"}} =
+      assert {:ok,
+              %AttestoClient.TokenSet{
+                access_token: "access-1",
+                refresh_token: "refresh-1",
+                resources: ["https://rs.example/api"]
+              }} =
                AuthorizationCode.exchange("code-1",
                  token_endpoint: "#{@issuer}/token",
                  issuer: @issuer,
