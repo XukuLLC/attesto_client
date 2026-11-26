@@ -175,6 +175,11 @@ defmodule AttestoClient.Token do
   the request so an ID Token returned with a rotated refresh token can always
   be verified rather than losing the rotation result after the response.
 
+  `:resource` accepts one or more RFC 8707 resource indicators. Each is sent
+  as a `resource` parameter on the refresh request, as RFC 8707 §2.1 expects
+  for authorization servers that bind issued tokens to resources. A malformed
+  indicator is `{:error, :invalid_target}`.
+
   `:client_auth` also accepts
   `{:private_key_jwt, jwk, assertion_opts}` for an explicitly registered
   assertion algorithm, key id, audience, lifetime, time, or JWT id.
@@ -321,10 +326,12 @@ defmodule AttestoClient.Token do
     with {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, jwks} <- Issuer.resolve_jwks(opts, issuer),
+         {:ok, resources} <- Attesto.ResourceIndicator.validate(Keyword.get(opts, :resource)),
          {:ok, response} <-
            OAuthHTTP.post_form(
              endpoint,
-             %{"grant_type" => "refresh_token", "refresh_token" => refresh_token},
+             %{"grant_type" => "refresh_token", "refresh_token" => refresh_token}
+             |> maybe_put("resource", if(resources == [], do: nil, else: resources)),
              opts
            ),
          {:ok, tokens} <- TokenSet.from_response(response, refresh_token, old_scope),
