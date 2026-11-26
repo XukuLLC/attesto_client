@@ -47,7 +47,12 @@ defmodule AttestoClient.ClientCredentialsTest do
       response(conn)
     end
 
-    assert {:ok, %TokenSet{access_token: "opaque", extra: %{"extension" => %{"kept" => true}}}} =
+    assert {:ok,
+            %TokenSet{
+              access_token: "opaque",
+              resources: ["https://api.example/a", "https://api.example/b"],
+              extra: %{"extension" => %{"kept" => true}}
+            }} =
              Token.client_credentials(
                options(plug,
                  scopes: ["read", "write", "read"],

@@ -5,6 +5,7 @@ defmodule AttestoClient.TokenIDTokenAlgorithmTest do
   alias AttestoClient.AuthorizationTransaction.Store.ETS
   alias AttestoClient.Builder
   alias AttestoClient.RefreshCoordinator
+  alias AttestoClient.Test.RefreshFlight
   alias AttestoClient.Token
   alias AttestoClient.TokenSet
 
@@ -264,27 +265,11 @@ defmodule AttestoClient.TokenIDTokenAlgorithmTest do
     second =
       Task.async(fn -> Token.refresh(coordinator, :shared, generic_tokens("PS256"), opts) end)
 
-    await_waiters(coordinator, 2, 500)
+    RefreshFlight.await_waiters(coordinator, :shared, 2)
     send(worker, :complete)
     assert {:ok, result} = Task.await(first)
     assert result.tokens.id_token_alg == "ES256"
     assert {:error, :id_token_alg_mismatch} = Task.await(second)
     refute_received {:http_started, _another_worker}
-  end
-
-  defp await_waiters(coordinator, count, attempts) do
-    waiters = :sys.get_state(coordinator) |> Map.fetch!(:shared) |> Map.fetch!(:waiters)
-
-    cond do
-      length(waiters) == count ->
-        :ok
-
-      attempts == 0 ->
-        flunk("concurrent callers did not join the shared refresh")
-
-      true ->
-        Process.sleep(10)
-        await_waiters(coordinator, count, attempts - 1)
-    end
   end
 end

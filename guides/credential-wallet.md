@@ -11,7 +11,7 @@ For the encrypted examples, use these dependencies:
 
 ```elixir
 {:attesto, ">= 2.30.0 and < 3.0.0"},
-{:attesto_client, "~> 2.24"}
+{:attesto_client, "~> 2.25"}
 ```
 
 Add `{:cbor, "~> 1.0"}` when accepting or presenting `mso_mdoc` credentials.

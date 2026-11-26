@@ -3,6 +3,7 @@ defmodule AttestoClient.TokenTest do
 
   alias AttestoClient.RefreshCoordinator
   alias AttestoClient.RefreshResult
+  alias AttestoClient.Test.RefreshFlight
   alias AttestoClient.Token
   alias AttestoClient.TokenSet
 
@@ -12,12 +13,13 @@ defmodule AttestoClient.TokenTest do
   @now System.system_time(:second)
   @key JOSE.JWK.generate_key({:rsa, 2048})
 
-  defp tokens(refresh \\ "refresh-old", scope \\ nil) do
+  defp tokens(refresh \\ "refresh-old", scope \\ nil, resources \\ nil) do
     %TokenSet{
       access_token: "access-old",
       token_type: "Bearer",
       refresh_token: refresh,
-      scope: scope
+      scope: scope,
+      resources: resources
     }
   end
 
@@ -457,8 +459,9 @@ defmodule AttestoClient.TokenTest do
              )
   end
 
-  test "sends resource indicators on the refresh request" do
+  test "repeats retained resource indicators on the refresh request" do
     coordinator = start_supervised!(RefreshCoordinator)
+    resources = ["https://api.example/a", "https://api.example/b"]
 
     plug = fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -480,13 +483,61 @@ defmodule AttestoClient.TokenTest do
       client_id: @client_id,
       subject: "subject-1",
       jwks: public_jwks(),
-      resource: ["https://api.example/a", "https://api.example/b"],
       req_options: [plug: plug],
       timeout: 30_000
     ]
 
-    assert {:ok, %RefreshResult{tokens: %TokenSet{access_token: "access-new"}}} =
-             Token.refresh(coordinator, :account, tokens(), opts)
+    assert {:ok,
+            %RefreshResult{
+              tokens: %TokenSet{access_token: "access-new", resources: ^resources}
+            }} = Token.refresh(coordinator, :account, tokens("refresh-old", nil, resources), opts)
+  end
+
+  test "an explicit resource may narrow a retained grant but not exceed it" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    resources = ["https://api.example/a", "https://api.example/b"]
+    owner = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(owner, {:refresh_form, Enum.to_list(URI.query_decoder(body))})
+      json(conn, 200, %{"access_token" => "access-new", "token_type" => "Bearer"})
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug]
+    ]
+
+    old_tokens = tokens("refresh-old", nil, resources)
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{resources: ^resources}}} =
+             Token.refresh(
+               coordinator,
+               :narrowed,
+               old_tokens,
+               Keyword.put(opts, :resource, "https://api.example/a")
+             )
+
+    assert_received {:refresh_form, pairs}
+
+    assert Enum.filter(pairs, &(elem(&1, 0) == "resource")) == [
+             {"resource", "https://api.example/a"}
+           ]
+
+    assert {:error, :invalid_resource} =
+             Token.refresh(
+               coordinator,
+               :outside,
+               old_tokens,
+               Keyword.put(opts, :resource, "https://other.example/api")
+             )
+
+    refute_received {:refresh_form, _pairs}
   end
 
   test "omits the resource parameter when no indicators are given" do
@@ -530,7 +581,186 @@ defmodule AttestoClient.TokenTest do
       timeout: 30_000
     ]
 
-    assert {:error, :invalid_target} = Token.refresh(coordinator, :account, tokens(), opts)
+    assert {:error, :invalid_resource} = Token.refresh(coordinator, :account, tokens(), opts)
+  end
+
+  test "refuses malformed retained resource metadata before any request" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    plug = fn _conn -> flunk("no request expected") end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug]
+    ]
+
+    assert {:error, :invalid_token_set} =
+             Token.refresh(coordinator, :account, tokens("refresh-old", nil, ["not a uri"]), opts)
+  end
+
+  test "sends a narrowed scope and retains it when the response omits scope" do
+    coordinator = start_supervised!(RefreshCoordinator)
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assert URI.decode_query(body)["scope"] == "openid email"
+      json(conn, 200, %{"access_token" => "access-new", "token_type" => "Bearer"})
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      scopes: ["openid", "email", "openid"],
+      req_options: [plug: plug]
+    ]
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{scope: "openid email"}}} =
+             Token.refresh(
+               coordinator,
+               :scope,
+               tokens("refresh-old", "openid email profile"),
+               opts
+             )
+  end
+
+  test "refuses malformed refresh scopes before any request" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    plug = fn _conn -> flunk("no request expected") end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug]
+    ]
+
+    for scopes <- ["openid", ["two scopes"], ["openid", 1]] do
+      assert {:error, :invalid_scopes} =
+               Token.refresh(coordinator, :scope, tokens(), Keyword.put(opts, :scopes, scopes))
+    end
+  end
+
+  test "a caller naming other resources does not adopt a shared refresh" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    owner = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      resources = for {"resource", resource} <- URI.query_decoder(body), do: resource
+      send(owner, {:http_started, self(), resources})
+
+      receive do
+        :complete -> json(conn, 200, %{"access_token" => "access-new", "token_type" => "Bearer"})
+      end
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug],
+      timeout: 30_000
+    ]
+
+    refresh = fn resource, scopes ->
+      Task.async(fn ->
+        Token.refresh(
+          coordinator,
+          :shared,
+          tokens(),
+          opts |> Keyword.put(:resource, resource) |> Keyword.put(:scopes, scopes)
+        )
+      end)
+    end
+
+    first =
+      refresh.(["https://api.example/a", "https://api.example/b"], ["read", "write"])
+
+    assert_receive {:http_started, worker, ["https://api.example/a", "https://api.example/b"]},
+                   10_000
+
+    reordered =
+      refresh.(["https://api.example/b", "https://api.example/a"], ["write", "read"])
+
+    other_resource = refresh.("https://api.example/c", ["read", "write"])
+
+    other_scopes =
+      refresh.(["https://api.example/a", "https://api.example/b"], ["read"])
+
+    unnamed = Task.async(fn -> Token.refresh(coordinator, :shared, tokens(), opts) end)
+    RefreshFlight.await_waiters(coordinator, :shared, 5)
+
+    # A malformed value is refused without joining the refresh in flight.
+    assert {:error, :invalid_resource} =
+             Token.refresh(
+               coordinator,
+               :shared,
+               tokens(),
+               Keyword.put(opts, :resource, "not a uri")
+             )
+
+    send(worker, :complete)
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{access_token: "access-new"}}} =
+             Task.await(first)
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{access_token: "access-new"}}} =
+             Task.await(reordered)
+
+    assert {:error, :refresh_request_mismatch} = Task.await(other_resource)
+    assert {:error, :refresh_request_mismatch} = Task.await(other_scopes)
+    assert {:error, :refresh_request_mismatch} = Task.await(unnamed)
+    refute_received {:http_started, _another_worker, _resources}
+  end
+
+  test "a caller naming other resources does not adopt a shared failure" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    owner = self()
+
+    plug = fn conn ->
+      send(owner, {:http_started, self()})
+
+      receive do
+        :complete -> json(conn, 400, %{"error" => "invalid_target"})
+      end
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug],
+      timeout: 30_000
+    ]
+
+    refresh = fn resource ->
+      Task.async(fn ->
+        Token.refresh(coordinator, :shared, tokens(), Keyword.put(opts, :resource, resource))
+      end)
+    end
+
+    first = refresh.("https://api.example/a")
+    assert_receive {:http_started, worker}, 10_000
+    same = refresh.("https://api.example/a")
+    other = refresh.("https://api.example/b")
+    RefreshFlight.await_waiters(coordinator, :shared, 3)
+    send(worker, :complete)
+
+    assert {:error, {:oauth_error, 400, %{"error" => "invalid_target"}}} = Task.await(first)
+    assert {:error, {:oauth_error, 400, %{"error" => "invalid_target"}}} = Task.await(same)
+    assert {:error, :refresh_request_mismatch} = Task.await(other)
   end
 
   defp public_jwks do

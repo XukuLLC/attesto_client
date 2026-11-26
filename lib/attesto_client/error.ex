@@ -271,6 +271,7 @@ defmodule AttestoClient.Error do
     profile_scope_required
     profile_token_set_required
     proxy
+    refresh_request_mismatch
     refresh_task_exit
     refresh_timeout
     reserved_claim_conflict

@@ -3,6 +3,7 @@ defmodule AttestoClient.TokenDPoPRefreshTest do
 
   alias Attesto.Thumbprint
   alias AttestoClient.RefreshCoordinator
+  alias AttestoClient.Test.RefreshFlight
   alias AttestoClient.Token
   alias AttestoClient.TokenSet
   alias Plug.Conn.Query
@@ -345,28 +346,12 @@ defmodule AttestoClient.TokenDPoPRefreshTest do
         )
       end)
 
-    await_waiters(coordinator, 3, 500)
+    RefreshFlight.await_waiters(coordinator, :shared, 3)
     send(worker, :complete)
     assert {:ok, result} = Task.await(first)
     assert result.tokens.dpop_jkt == expected
     assert {:error, :dpop_key_mismatch} = Task.await(different)
     assert {:error, :dpop_key_mismatch} = Task.await(unbound)
     refute_received {:http_started, _another_worker}
-  end
-
-  defp await_waiters(coordinator, count, attempts) do
-    waiters = :sys.get_state(coordinator) |> Map.fetch!(:shared) |> Map.fetch!(:waiters)
-
-    cond do
-      length(waiters) == count ->
-        :ok
-
-      attempts == 0 ->
-        flunk("concurrent refresh callers did not enter the shared flight")
-
-      true ->
-        Process.sleep(10)
-        await_waiters(coordinator, count, attempts - 1)
-    end
   end
 end
