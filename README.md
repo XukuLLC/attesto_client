@@ -23,6 +23,9 @@ revoke tokens, build RP-Initiated Logout requests, and build or verify the OAuth
 and OpenID Connect wire artifacts an Elixir client needs: `private_key_jwt`,
 signed authorization request objects (JAR), strict ID Token verification, JARM,
 ID-JAG/EMA assertions, signed introspection and UserInfo, and discovery/JWKS.
+It also coordinates MCP authorization discovery, registration, scope
+escalation, authorization-server migration, and Bearer token use without
+coupling those policies to an MCP transport implementation.
 
 Use it when you are writing a relying party or OAuth client that needs secure
 protocol mechanics without delegating application policy:
@@ -35,6 +38,9 @@ protocol mechanics without delegating application policy:
 - Build ID-JAG/EMA identity assertions for the JWT-bearer grant.
 - Generate S256 PKCE verifier/challenge pairs.
 - Fetch authorization-server metadata and JWKS with issuer validation.
+- Authorize an MCP client from a protected-resource challenge, with
+  issuer-bound registration, RFC 8707 resource binding, bounded scope step-up,
+  and safe authorization-server migration.
 - Verify RFC 9068 JWT access tokens from a remote issuer with coordinated JWKS
   rotation, bounded caching and stale-key use, DPoP/mTLS binding, and Plug
   integration.
@@ -93,7 +99,14 @@ the tool for DPoP-binding arbitrary outgoing requests.
   JWKS (RFC 8414 / OpenID Connect Discovery 1.0), and find the authorization
   server for a protected resource from its RFC 9728 metadata.
 - `AttestoClient.WWWAuthenticate` — read `WWW-Authenticate` challenges,
-  including the RFC 9728 `resource_metadata` pointer.
+  including the RFC 9728 `resource_metadata` pointer and Bearer scopes.
+- `AttestoClient.MCPAuthorization` — discover and validate an MCP protected
+  resource and authorization server, select or create an issuer-bound client
+  registration, run code + S256 PKCE and refresh, build the Bearer header, and
+  apply bounded insufficient-scope retries.
+- `AttestoClient.DynamicClientRegistration` — send and validate a minimal RFC
+  7591 registration request. Protocol-specific policy decides whether to use
+  it and which metadata to register.
 - `AttestoClient.Issuer` — a supervised cache of one issuer's discovery
   metadata and JWKS, refreshed on a schedule and on an unknown `kid`; pass
   `issuer: {AttestoClient.Issuer, name}` to verify ID Tokens against it.
@@ -172,6 +185,10 @@ For a full authorization flow, store setup, callback handling, refresh,
 revocation, and logout, see the
 [Authorization Code guide](guides/authorization-code.md).
 
+For MCP protected-resource discovery, registration choices, migration,
+scope escalation, and token presentation, see the
+[MCP authorization guide](guides/mcp-authorization.md).
+
 For inbound JWT access-token verification backed by a remote issuer, including
 key rotation, stale-key behavior, scope checks, and Plug wiring, see the
 [Remote issuer resource-server guide](guides/resource-server.md).
@@ -204,11 +221,11 @@ When `ATTESTO_CLIENT_PYTHON` is unset the harness falls back to `python3` on the
 
 A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) —
 minor and patch releases are backward-compatible, and breaking changes wait for
-a new major version. Pin to `~> 2.25`.
+a new major version. Pin to `~> 2.26`.
 
 ## Requirements
 
-AttestoClient requires Elixir 1.18 or later, Attesto `>= 2.30.0 and < 3.0.0`,
+AttestoClient requires Elixir 1.18 or later, Attesto `>= 2.32.0 and < 3.0.0`,
 and JOSE 1.11.13 or later within the JOSE 1.x line.
 The JOSE range keeps the patched
 security floor while allowing native OTP SHA-3 and Ed448 improvements in later

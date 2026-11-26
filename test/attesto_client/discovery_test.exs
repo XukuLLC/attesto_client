@@ -176,6 +176,32 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:ok, _} = Discovery.fetch_resource(resource, req_options: [plug: plug])
     end
 
+    test "can request the root well-known location without changing resource identity" do
+      resource = "https://rs.example.com/mcp?tenant=a"
+
+      plug = fn conn ->
+        assert conn.request_path == "/.well-known/oauth-protected-resource"
+        assert conn.query_string == ""
+        json_plug(200, resource_doc(resource)).(conn)
+      end
+
+      assert {:ok, %{"resource" => ^resource}} =
+               Discovery.fetch_resource(resource,
+                 resource_well_known: :root,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "rejects an unknown resource well-known location" do
+      plug = fn _conn -> flunk("no request expected") end
+
+      assert {:error, :invalid_resource_well_known} =
+               Discovery.fetch_resource(@resource,
+                 resource_well_known: :nearest,
+                 req_options: [plug: plug]
+               )
+    end
+
     test "removes the terminating slash for the request URL but matches the resource exactly" do
       resource = "https://rs.example.com/mcp/"
 
@@ -235,6 +261,16 @@ defmodule AttestoClient.DiscoveryTest do
         assert {:error, :invalid_resource} =
                  Discovery.fetch_resource(resource, req_options: [plug: plug])
       end
+    end
+
+    test "does not apply a loopback development exception to a deployed resource" do
+      plug = fn _conn -> flunk("no request expected") end
+
+      assert {:error, :invalid_outbound} =
+               Discovery.fetch_resource(@resource,
+                 outbound: [allow_loopback_http: true],
+                 req_options: [plug: plug]
+               )
     end
 
     test "refuses a document whose resource differs from the requested identifier (RFC 9728 §3.3)" do
@@ -352,6 +388,41 @@ defmodule AttestoClient.DiscoveryTest do
                Discovery.authorization_server(@resource, req_options: [plug: plug])
     end
 
+    test "tries both OpenID Connect constructions for a path-based issuer" do
+      issuer = "https://op.example.com/tenant"
+      oauth = "/.well-known/oauth-authorization-server/tenant"
+      oidc_inserted = "/.well-known/openid-configuration/tenant"
+      oidc_appended = "/tenant/.well-known/openid-configuration"
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, {:metadata_request, conn.request_path})
+
+        case conn.request_path do
+          @prm_path ->
+            json_plug(200, resource_doc(@resource, %{"authorization_servers" => [issuer]})).(conn)
+
+          ^oauth ->
+            json_plug(404, %{}).(conn)
+
+          ^oidc_inserted ->
+            json_plug(404, %{}).(conn)
+
+          ^oidc_appended ->
+            json_plug(200, issuer_doc(issuer)).(conn)
+        end
+      end
+
+      assert {:ok, %{issuer: ^issuer}} =
+               Discovery.authorization_server(@resource, req_options: [plug: plug])
+
+      assert_receive {:metadata_request, @prm_path}
+      assert_receive {:metadata_request, ^oauth}
+      assert_receive {:metadata_request, ^oidc_inserted}
+      assert_receive {:metadata_request, ^oidc_appended}
+      refute_receive {:metadata_request, _}
+    end
+
     test "fetches only the named issuer document when :well_known is given" do
       plug =
         router(%{
@@ -441,6 +512,87 @@ defmodule AttestoClient.DiscoveryTest do
       assert {:ok, %{issuer: @issuer}} =
                Discovery.authorization_server(@resource,
                  www_authenticate: [~s(Basic realm="x"), challenge],
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "accepts the exact origin identifier only on the root fallback" do
+      origin = "https://rs.example.com"
+
+      plug =
+        router(%{
+          @prm_path => {404, %{}},
+          "/.well-known/oauth-protected-resource" => {200, resource_doc(origin)},
+          @oauth_path => {200, issuer_doc()}
+        })
+
+      assert {:ok, %{resource: %{"resource" => ^origin}}} =
+               Discovery.authorization_server(@resource,
+                 resource_well_known: :path_then_root,
+                 req_options: [plug: plug]
+               )
+
+      assert {:error, :resource_mismatch} =
+               Discovery.fetch_resource(@resource,
+                 resource_well_known: :root,
+                 req_options: [plug: json_plug(200, resource_doc(origin))]
+               )
+    end
+
+    test "does not fetch an identical root location twice" do
+      resource = "https://rs.example.com"
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, {:request, conn.request_path})
+        json_plug(404, %{}).(conn)
+      end
+
+      assert {:error, {:http_status, 404}} =
+               Discovery.authorization_server(resource,
+                 resource_well_known: :path_then_root,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:request, "/.well-known/oauth-protected-resource"}
+      refute_receive {:request, _path}
+    end
+
+    test "treats an explicit metadata URL as one location under path-then-root" do
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, {:request, conn.request_path})
+        json_plug(404, %{}).(conn)
+      end
+
+      assert {:error, {:http_status, 404}} =
+               Discovery.authorization_server(@resource,
+                 metadata_url: "https://rs.example.com/custom/prm",
+                 resource_well_known: :path_then_root,
+                 req_options: [plug: plug]
+               )
+
+      assert_receive {:request, "/custom/prm"}
+      refute_receive {:request, _path}
+    end
+
+    test "refuses a remote issuer while the loopback development exception is active" do
+      resource = "http://127.0.0.1:4100/mcp"
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/.well-known/oauth-protected-resource/mcp" ->
+            json_plug(200, resource_doc(resource)).(conn)
+
+          _other ->
+            flunk("issuer metadata request must not run")
+        end
+      end
+
+      assert {:error, :invalid_outbound} =
+               Discovery.authorization_server(resource,
+                 outbound: [allow_loopback_http: true],
                  req_options: [plug: plug]
                )
     end
@@ -540,6 +692,8 @@ defmodule AttestoClient.DiscoveryTest do
         {valid_document(%{"issuer" => "https://other.example.com"}), :issuer_mismatch},
         {Map.delete(valid_document(), "token_endpoint"), :invalid_metadata},
         {valid_document(%{"token_endpoint" => "http://op.example.com/token"}), :invalid_endpoint},
+        {valid_document(%{"registration_endpoint" => "http://127.0.0.1/register"}),
+         :invalid_endpoint},
         {valid_document(%{"response_types_supported" => ["token"]}), :invalid_metadata},
         {valid_document(%{"code_challenge_methods_supported" => ["plain"]}), :invalid_metadata},
         {%{}, :invalid_metadata},

@@ -24,11 +24,11 @@ defmodule AttestoClient.Outbound do
   `AttestoClient.Wallet.request_credential/3`.
 
   `AttestoClient.Discovery.fetch_resource/2` accepts `:outbound` for the
-  resource's own well-known URL, and refuses it with
-  `{:error, :outbound_not_supported}` when `:metadata_url` is supplied;
-  `AttestoClient.Discovery.authorization_server/2` accepts `:outbound` only
-  when no `:metadata_url` (or `WWW-Authenticate` `resource_metadata` URL) is
-  used and `:issuer` is explicitly pinned by the caller.
+  resource's own well-known URL. A challenge-selected `:metadata_url` and an
+  unpinned authorization server normally refuse it. The narrow exception is
+  `allow_loopback_http: true` for a loopback resource and loopback metadata
+  pointer; CIDR widening still requires the caller to pin the issuer and is
+  never applied to a challenge-selected URL.
 
   Calls that connect to an address written by another party refuse `:outbound`
   with `{:error, :outbound_not_supported}`:
@@ -129,6 +129,29 @@ defmodule AttestoClient.Outbound do
   end
 
   @doc false
+  @spec allow_loopback_http?(keyword()) :: boolean()
+  def allow_loopback_http?(opts) when is_list(opts) do
+    case Keyword.get(opts, :outbound) do
+      outbound when is_list(outbound) ->
+        Keyword.get(outbound, :allow_loopback_http, false) == true
+
+      _absent_or_invalid ->
+        false
+    end
+  end
+
+  @doc false
+  @spec loopback_url?(term()) :: boolean()
+  def loopback_url?(url) when is_binary(url) do
+    case URI.new(url) do
+      {:ok, %URI{host: host}} -> Attesto.URI.loopback_host?(host)
+      {:error, _part} -> false
+    end
+  end
+
+  def loopback_url?(_other), do: false
+
+  @doc false
   # `Attesto.URI.https_identifier?/2` under this call's exceptions.
   @spec https_identifier?(term(), keyword()) :: boolean()
   def https_identifier?(value, opts) when is_list(opts) do
@@ -155,25 +178,6 @@ defmodule AttestoClient.Outbound do
   end
 
   defp put_loopback(screen_opts, _url, false), do: screen_opts
-
-  defp allow_loopback_http?(opts) do
-    case Keyword.get(opts, :outbound) do
-      outbound when is_list(outbound) ->
-        Keyword.get(outbound, :allow_loopback_http, false) == true
-
-      _absent ->
-        false
-    end
-  end
-
-  defp loopback_url?(url) when is_binary(url) do
-    case URI.new(url) do
-      {:ok, %URI{host: host}} -> Attesto.URI.loopback_host?(host)
-      {:error, _part} -> false
-    end
-  end
-
-  defp loopback_url?(_other), do: false
 
   defp valid?(outbound) do
     Keyword.keyword?(outbound) and

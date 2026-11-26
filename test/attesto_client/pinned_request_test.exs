@@ -147,6 +147,24 @@ defmodule AttestoClient.PinnedRequestTest do
     assert transport_opts[:partial_chain] == nil
   end
 
+  test "pinning removes TLS transport options from loopback HTTP requests" do
+    target = %{
+      url: "http://127.0.0.1:4000/document",
+      addresses: [{127, 0, 0, 1}],
+      host: "127.0.0.1",
+      authority: "127.0.0.1:4000"
+    }
+
+    assert {:ok, options} =
+             PinnedRequest.prepare(target,
+               connect_options: [timeout: 321, transport_opts: [cacerts: []]]
+             )
+
+    assert options[:connect_options][:hostname] == "127.0.0.1"
+    assert options[:connect_options][:timeout] == 321
+    refute Keyword.has_key?(options[:connect_options], :transport_opts)
+  end
+
   test "pinning rejects ambiguous duplicate transport options" do
     target = %{
       url: "https://93.184.216.34/document",

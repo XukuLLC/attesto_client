@@ -104,9 +104,47 @@ defmodule AttestoClient.WWWAuthenticateTest do
                ])
     end
 
+    test "accepts loopback HTTP only under its explicit development option" do
+      header =
+        ~s(Bearer resource_metadata="http://127.0.0.1:4000/.well-known/oauth-protected-resource/mcp")
+
+      assert :error = WWWAuthenticate.resource_metadata(header)
+
+      assert {:ok, "http://127.0.0.1:4000/.well-known/oauth-protected-resource/mcp"} =
+               WWWAuthenticate.resource_metadata(header, allow_loopback_http: true)
+
+      assert :error =
+               WWWAuthenticate.resource_metadata(
+                 ~s(Bearer resource_metadata="http://resource.example/prm"),
+                 allow_loopback_http: true
+               )
+    end
+
     test "is :error without a pointer" do
       assert :error = WWWAuthenticate.resource_metadata(~s(Bearer realm="api"))
       assert :error = WWWAuthenticate.resource_metadata([])
+    end
+  end
+
+  describe "bearer_scopes/1" do
+    test "reads and de-duplicates scope tokens from a Bearer challenge" do
+      header =
+        ~s(Basic realm="login", Bearer error="insufficient_scope", scope="read write read")
+
+      assert {:ok, ["read", "write"]} = WWWAuthenticate.bearer_scopes(header)
+
+      assert {:ok, ["admin"]} =
+               [~s(DPoP scope="ignored"), ~s(BEARER scope="admin")]
+               |> WWWAuthenticate.parse()
+               |> WWWAuthenticate.bearer_scopes()
+    end
+
+    test "distinguishes an absent scope from a malformed one" do
+      assert :none = WWWAuthenticate.bearer_scopes(~s(Bearer error="invalid_token"))
+      assert {:error, :invalid_scope} = WWWAuthenticate.bearer_scopes(~s(Bearer scope=""))
+
+      assert {:error, :invalid_scope} =
+               WWWAuthenticate.bearer_scopes("Bearer scope=\"read\twrite\"")
     end
   end
 end

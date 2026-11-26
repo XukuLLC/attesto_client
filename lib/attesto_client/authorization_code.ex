@@ -214,6 +214,7 @@ defmodule AttestoClient.AuthorizationCode do
                profile: profile,
                client_auth_binding: client_auth_binding,
                resources: resources,
+               scopes: scopes,
                issuer_aliases: issuer_aliases
              },
              ttl_ms
@@ -348,6 +349,7 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, state} <- callback_state(params),
          {:ok, transaction} <- take_transaction(store, state, opts),
          :ok <- check_transaction_deadline(transaction, opts),
+         :ok <- check_transaction_binding(transaction, opts),
          :ok <- Outbound.check_issuer(transaction.issuer, opts),
          :ok <- check_issuer_cache(transaction, opts),
          :ok <- check_browser_binding(transaction, opts),
@@ -371,6 +373,25 @@ defmodule AttestoClient.AuthorizationCode do
   end
 
   def callback(_store, _params, _opts), do: {:error, :invalid_callback}
+
+  @doc false
+  @spec callback_bound(
+          transaction_target(),
+          map() | String.t(),
+          %{
+            issuer: String.t(),
+            client_id: String.t(),
+            protocol: :oauth | :oidc,
+            resources: [String.t()]
+          },
+          keyword()
+        ) :: {:ok, %{tokens: TokenSet.t(), id_token_claims: map() | nil}} | {:error, term()}
+  def callback_bound(store, response, binding, opts) when is_map(binding) and is_list(opts) do
+    callback(store, response, Keyword.put(opts, :transaction_binding, binding))
+  end
+
+  def callback_bound(_store, _response, _binding, _opts),
+    do: {:error, :transaction_binding_mismatch}
 
   defp decode_callback_response(response) when byte_size(response) <= @max_callback_bytes do
     with {:ok, query} <- callback_query(response),
@@ -507,6 +528,33 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
+  defp check_transaction_binding(transaction, opts) do
+    case Keyword.fetch(opts, :transaction_binding) do
+      :error -> :ok
+      {:ok, binding} -> match_transaction_binding(transaction, binding)
+    end
+  end
+
+  defp match_transaction_binding(
+         transaction,
+         %{issuer: issuer, client_id: client_id, protocol: protocol, resources: resources} =
+           binding
+       )
+       when is_binary(issuer) and is_binary(client_id) and protocol in [:oauth, :oidc] and
+              is_list(resources) do
+    actual = %{
+      issuer: transaction.issuer,
+      client_id: transaction.client_id,
+      protocol: Map.get(transaction, :protocol, :oidc),
+      resources: Map.get(transaction, :resources, [])
+    }
+
+    if actual == binding, do: :ok, else: {:error, :transaction_binding_mismatch}
+  end
+
+  defp match_transaction_binding(_transaction, _invalid),
+    do: {:error, :transaction_binding_mismatch}
+
   defp transaction_not_expired(now, expires_at) when now < expires_at, do: :ok
   defp transaction_not_expired(_now, _expires_at), do: {:error, {:invalid_state, :expired}}
 
@@ -563,7 +611,9 @@ defmodule AttestoClient.AuthorizationCode do
   `:attestation_challenge_received`, `:req_options`, `:resolver`, `:outbound`
   and `:timeout` mean what they mean to `callback/3`. With `:dpop` the returned token set is
   bound to that key's thumbprint. `:resource` adds RFC 8707 resource
-  indicators to the request.
+  indicators to the request. `:scopes`, when supplied, records the scopes from
+  the corresponding authorization request so a token response that omits
+  `scope` still yields the effective scope in the returned token set.
 
   The caller is responsible for everything `callback/3` does around the
   request: matching `state`, the RFC 9207 `iss` check, and verifying a returned
@@ -582,6 +632,7 @@ defmodule AttestoClient.AuthorizationCode do
          {:ok, redirect_uri} <- required_string(opts, :redirect_uri),
          {:ok, code_verifier} <- required_string(opts, :code_verifier),
          {:ok, resources} <- exchange_resources(opts),
+         {:ok, requested_scope} <- exchange_scope(opts),
          {:ok, dpop_jkt} <- TokenSet.dpop_thumbprint(opts),
          {:ok, _timeout_ms} <- HTTPPolicy.timeout(opts) do
       request_tokens(
@@ -595,6 +646,7 @@ defmodule AttestoClient.AuthorizationCode do
         code,
         dpop_jkt,
         resources,
+        requested_scope,
         opts
       )
     end
@@ -610,9 +662,27 @@ defmodule AttestoClient.AuthorizationCode do
     end
   end
 
+  defp exchange_scope(opts) do
+    case Keyword.fetch(opts, :scopes) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, scopes} when is_list(scopes) ->
+        if Enum.all?(scopes, &Attesto.Scope.valid_token?/1),
+          do: {:ok, scopes |> Enum.uniq() |> Enum.join(" ") |> empty_scope()},
+          else: {:error, :invalid_scopes}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_scopes}
+    end
+  end
+
+  defp empty_scope(""), do: nil
+  defp empty_scope(scope), do: scope
+
   # The one authorization-code token request, behind both `exchange/2` and
   # `callback/3`.
-  defp request_tokens(grant, code, dpop_jkt, resources, opts) do
+  defp request_tokens(grant, code, dpop_jkt, resources, requested_scope, opts) do
     form =
       %{
         "grant_type" => "authorization_code",
@@ -628,7 +698,7 @@ defmodule AttestoClient.AuthorizationCode do
              form,
              http_options(grant, opts)
            ),
-         {:ok, tokens} <- TokenSet.from_response(response, nil) do
+         {:ok, tokens} <- TokenSet.from_response(response, nil, requested_scope) do
       with {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
            do: {:ok, %{tokens | resources: resources}}
     end
@@ -645,10 +715,25 @@ defmodule AttestoClient.AuthorizationCode do
 
     with {:ok, jwks} <- verification_keys(transaction, opts),
          :ok <- check_transaction_deadline(transaction, opts),
-         {:ok, tokens} <- request_tokens(grant, code, dpop_jkt, resources, opts),
+         {:ok, tokens} <-
+           request_tokens(
+             grant,
+             code,
+             dpop_jkt,
+             resources,
+             requested_scope(transaction),
+             opts
+           ),
          {:ok, tokens} <- bind_token_profile(tokens, transaction),
          {:ok, claims} <- protocol_claims(tokens, transaction, jwks, code, opts) do
       {:ok, %{tokens: tokens, id_token_claims: claims}}
+    end
+  end
+
+  defp requested_scope(transaction) do
+    case Map.get(transaction, :scopes, []) do
+      [] -> nil
+      scopes -> Enum.join(scopes, " ")
     end
   end
 

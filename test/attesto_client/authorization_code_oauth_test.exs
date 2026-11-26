@@ -53,7 +53,9 @@ defmodule AttestoClient.AuthorizationCodeOAuthTest do
 
   test "plain OAuth callback needs no JWKS or ID Token and cannot change stored protocol" do
     store = store()
-    assert {:ok, started} = AuthorizationCode.start(store, opts())
+
+    assert {:ok, started} =
+             AuthorizationCode.start(store, opts(scopes: ["files:read", "files:write"]))
 
     plug = fn conn ->
       assert conn.request_path == "/token"
@@ -67,7 +69,11 @@ defmodule AttestoClient.AuthorizationCodeOAuthTest do
 
     response = %{"state" => started.state, "code" => "authorization-code"}
 
-    assert {:ok, %{tokens: %{access_token: "access"}, id_token_claims: nil}} =
+    assert {:ok,
+            %{
+              tokens: %{access_token: "access", scope: "files:read files:write"},
+              id_token_claims: nil
+            }} =
              AuthorizationCode.callback(store, response,
                browser_binding: "browser-session",
                protocol: :oidc,

@@ -275,12 +275,16 @@ does not return the authorization-response `iss` parameter.
 
 ## Refresh rotation
 
-Use a stable, non-secret key for the token record. Concurrent calls using the
-same key share one request and result:
+Use a stable, non-secret key that includes the exact issuer, client identifier,
+and token-record identifier. Concurrent calls using the same key share one
+request and result:
 
 ```elixir
 {:ok, result} =
-  AttestoClient.Token.refresh(MyApp.OIDCRefreshes, token_record_key, tokens,
+  AttestoClient.Token.refresh(
+    MyApp.OIDCRefreshes,
+    {metadata["issuer"], "my-client", token_record_id},
+    tokens,
     token_endpoint: metadata["token_endpoint"],
     issuer: metadata["issuer"],
     metadata: metadata,

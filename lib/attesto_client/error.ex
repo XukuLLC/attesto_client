@@ -27,6 +27,7 @@ defmodule AttestoClient.Error do
     ambiguous_credential_offer
     ambiguous_key
     auth_time_required
+    authorization_server_changed
     authorization_error
     authorization_transaction_expired
     blocked_host
@@ -35,6 +36,7 @@ defmodule AttestoClient.Error do
     client_attestation
     client_auth_mismatch
     client_not_allowed
+    client_registration_required
     conflicting_profiles
     connect_options
     coordinator_exit
@@ -87,6 +89,8 @@ defmodule AttestoClient.Error do
     invalid_client_assertion_options
     invalid_client_auth
     invalid_client_id
+    invalid_client_id_metadata
+    invalid_client_metadata
     invalid_clock_skew_seconds
     invalid_context
     invalid_credential
@@ -110,6 +114,7 @@ defmodule AttestoClient.Error do
     invalid_deferred_sleep
     invalid_dpop_key
     invalid_dpop_nonce
+    invalid_dynamic_registration
     invalid_encryption_metadata
     invalid_endpoint
     invalid_endpoint_query
@@ -146,19 +151,24 @@ defmodule AttestoClient.Error do
     invalid_nonce_endpoint
     invalid_nonce_response
     invalid_offer
+    invalid_offline_access
     invalid_options
     invalid_outbound
     invalid_par_option
     invalid_par_response
     invalid_params
     invalid_policy
+    invalid_pre_registered_clients
     invalid_pre_authorized_code
     invalid_pre_authorized_code_grant
     invalid_profile
     invalid_profile_client_auth
     invalid_profile_dpop_key
+    invalid_prompt
     invalid_protocol
     invalid_redirect_uri
+    invalid_registration
+    invalid_registration_response
     invalid_request
     invalid_request_object
     invalid_request_uri_method
@@ -168,6 +178,7 @@ defmodule AttestoClient.Error do
     invalid_require_typ
     invalid_resolver
     invalid_resource
+    invalid_resource_well_known
     invalid_response_content_type
     invalid_response_encryption_key
     invalid_response_mode
@@ -175,6 +186,7 @@ defmodule AttestoClient.Error do
     invalid_response_uri
     invalid_s_hash
     invalid_scope
+    invalid_scope_retry_limit
     invalid_scopes
     invalid_selection
     invalid_signature
@@ -232,6 +244,7 @@ defmodule AttestoClient.Error do
     missing_id_token
     missing_issuer
     missing_kid
+    missing_pkce_support
     missing_par_endpoint
     missing_pre_authorized_code_grant
     missing_redirect_uri
@@ -259,6 +272,7 @@ defmodule AttestoClient.Error do
     nonce_mismatch
     nonce_required
     not_found
+    not_insufficient_scope
     not_sent
     not_yet_valid
     oauth_error
@@ -279,6 +293,7 @@ defmodule AttestoClient.Error do
     response_encryption_key_mismatch
     response_issuer_not_supported
     response_too_large
+    scope_retry_limit
     select_authorization_server
     signing_failed
     state_collision
@@ -289,7 +304,9 @@ defmodule AttestoClient.Error do
     subject_not_allowed
     timeout
     token_lifetime_exceeded
+    token_binding_mismatch
     token_too_old
+    transaction_binding_mismatch
     transaction_store
     transport
     transport_error
@@ -312,6 +329,8 @@ defmodule AttestoClient.Error do
     unsupported_key
     unsupported_mdoc
     unsupported_profile_client_auth
+    unsupported_token_endpoint_auth_method
+    unsupported_token_type
     unsupported_request_encryption_key
     unsupported_response_mode
     unsupported_sd_alg

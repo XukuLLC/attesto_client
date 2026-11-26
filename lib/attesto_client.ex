@@ -27,7 +27,12 @@ defmodule AttestoClient do
       and JWKS (RFC 8414 / OpenID Connect Discovery 1.0), and find the
       authorization server for a protected resource (RFC 9728).
     * `AttestoClient.WWWAuthenticate` - read `WWW-Authenticate` challenges,
-      including the RFC 9728 `resource_metadata` pointer.
+      including the RFC 9728 `resource_metadata` pointer and Bearer scopes.
+    * `AttestoClient.MCPAuthorization` - coordinate MCP protected-resource and
+      issuer discovery, registration, authorization, refresh, scope step-up,
+      migration, and Bearer presentation over the generic OAuth primitives.
+    * `AttestoClient.DynamicClientRegistration` - send and validate minimal
+      RFC 7591 client registration requests.
     * `AttestoClient.ResourceServer` - verify RFC 9068 JWT access tokens from a
       remote issuer with coordinated JWKS rotation, bounded stale-key use, and
       optional DPoP/mTLS request binding.

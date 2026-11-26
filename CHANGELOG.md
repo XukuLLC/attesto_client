@@ -4,6 +4,90 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.0] - 2026-11-26
+
+Requires `attesto >= 2.32.0 and < 3.0.0`.
+
+### Added
+
+- `AttestoClient.MCPAuthorization` runs the MCP 2025-11-25 and 2026-07-28
+  authorization policy over the existing OAuth client: RFC 9728 protected
+  resource discovery, ordered RFC 8414/OpenID Connect issuer discovery,
+  explicit S256 PKCE capability, exact resource and issuer binding, Bearer-only
+  presentation, refresh, bounded insufficient-scope retries, and
+  authorization-server migration.
+- MCP client registration selection prefers an issuer-bound registration, then
+  an exact-issuer pre-registration, a validated Client ID Metadata Document,
+  opt-in Dynamic Client Registration, and finally a host prompt. Credentials
+  issued by one authorization server are never reused at another; CIMD is
+  portable only when the new server advertises it, and a dynamic client is
+  registered again after migration.
+- `AttestoClient.DynamicClientRegistration.register/3` provides a minimal RFC
+  7591 client over the pinned, redirect-free, size-bounded OAuth transport.
+  MCP's dynamic registration policy remains opt-in because registration
+  creates server-side state.
+- `AttestoClient.WWWAuthenticate.bearer_scopes/1` parses and validates the
+  Bearer challenge's OAuth scope tokens.
+- `AttestoClient.Token.refresh/4` accepts `protocol: :oauth` for grants without
+  an OIDC subject, ID Token, or JWKS. The default remains `:oidc`.
+- `AttestoClient.AuthorizationCode.exchange/2` accepts `:scopes`, and stored
+  authorization transactions retain requested scopes, so code and refresh
+  responses that omit `scope` still produce the effective scope.
+- `conformance/` contains a narrow adapter and runner for the official MCP
+  authorization scenarios. Both frozen protocol suites pass against the
+  release implementation; the adapter is test infrastructure and is excluded
+  from the Hex package.
+
+### Changed
+
+- Protected-resource authorization-server discovery tries RFC 8414
+  path-insertion, OpenID Connect path-insertion, and OpenID Connect
+  path-appending metadata URLs in that order. Only HTTP 404 advances to the
+  next candidate; invalid metadata, an issuer mismatch, and every other error
+  fail closed.
+- `AttestoClient.Discovery.authorization_server/2` accepts
+  `resource_well_known: :path_then_root`. It tries the RFC 9728 path-specific
+  document first and the origin-root document only after a 404. At the root
+  compatibility location, the document may identify either the requested URL
+  or its exact origin; the advertised identifier becomes the RFC 8707 resource
+  used by MCP authorization. An explicit metadata pointer remains a single
+  location, and an origin resource is not fetched twice when its path and root
+  well-known URLs are identical.
+- Refresh single-flight adoption now compares the token endpoint, issuer,
+  client identifier, and protocol in addition to resources and scopes. Callers
+  sharing an application key cannot adopt a result or error from a different
+  refresh request identity; the existing per-caller profile, client
+  authentication, DPoP, algorithm, and verification checks still apply to
+  successful results.
+- Malformed or incomplete CIMD selection input returns
+  `:invalid_client_id_metadata` instead of raising. A same-issuer CIMD
+  registration is reused only while the server continues to advertise CIMD
+  support; explicit `nil` registration strategies are treated as absent.
+
+### Security
+
+- Loopback HTTP protected-resource discovery is available only with
+  `outbound: [allow_loopback_http: true]`. A challenge-selected metadata
+  pointer must itself be loopback, and broader CIDR exceptions are never
+  applied to that attacker-selected URL.
+- MCP token presentation requires the token set to remain bound to the exact
+  discovered issuer and sole protected resource. A different token type,
+  issuer, resource, registration, or client identity is refused locally.
+- MCP callbacks bind the consumed authorization transaction to the exact
+  discovered issuer, client identifier, OAuth protocol, and protected
+  resource before token HTTP. Registration authentication is revalidated at
+  callback time.
+- MCP authorization is Bearer-only at every boundary: DPoP options and DPoP
+  token sets are refused before authorization state is created or consumed and
+  before refresh HTTP. Refresh also revalidates the registration's advertised
+  token-endpoint authentication method locally.
+- The loopback development exception is valid only when the protected resource
+  and authorization server are themselves loopback. Registration endpoints
+  are validated with the other server endpoints, and a deployed issuer cannot
+  redirect Dynamic Client Registration to a loopback service. MCP dynamic
+  registration accepts HTTPS redirects, plus loopback HTTP redirects only for
+  native clients.
+
 ## [2.25.0] - 2026-11-26
 
 ### Added

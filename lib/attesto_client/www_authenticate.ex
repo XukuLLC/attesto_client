@@ -68,24 +68,68 @@ defmodule AttestoClient.WWWAuthenticate do
 
   Only an absolute `https` URL without userinfo or fragment is returned, since
   the client will fetch it; a challenge advertising anything else is skipped.
+  `allow_loopback_http: true` also accepts a loopback HTTP URL for local
+  development. The fetcher must independently enforce its outbound policy.
 
       iex> AttestoClient.WWWAuthenticate.resource_metadata(
       ...>   ~s(Bearer resource_metadata="https://rs.example/.well-known/oauth-protected-resource/mcp")
       ...> )
       {:ok, "https://rs.example/.well-known/oauth-protected-resource/mcp"}
   """
-  @spec resource_metadata(String.t() | [String.t()] | [challenge()]) :: {:ok, String.t()} | :error
-  def resource_metadata(values) do
+  @spec resource_metadata(String.t() | [String.t()] | [challenge()], keyword()) ::
+          {:ok, String.t()} | :error
+  def resource_metadata(values, opts \\ []) do
     values
     |> challenges()
-    |> Enum.find_value(:error, &metadata_pointer/1)
+    |> Enum.find_value(:error, &metadata_pointer(&1, opts))
   end
 
-  defp metadata_pointer(%{params: %{"resource_metadata" => url}}) do
-    if Attesto.URI.https_identifier?(url), do: {:ok, url}
+  @doc """
+  Return the scope tokens from the first Bearer challenge that carries a
+  `scope` parameter.
+
+  The result is `:none` when no Bearer challenge names a scope and
+  `{:error, :invalid_scope}` when the named value is empty or contains a value
+  that is not an OAuth scope token. Repeated tokens are removed while retaining
+  their first-seen order.
+
+      iex> AttestoClient.WWWAuthenticate.bearer_scopes(
+      ...>   ~s(Bearer error="insufficient_scope", scope="files:read files:write")
+      ...> )
+      {:ok, ["files:read", "files:write"]}
+  """
+  @spec bearer_scopes(String.t() | [String.t()] | [challenge()]) ::
+          {:ok, [String.t()]} | :none | {:error, :invalid_scope}
+  def bearer_scopes(values) do
+    values
+    |> challenges()
+    |> Enum.find(&bearer_scope?/1)
+    |> parse_bearer_scope()
   end
 
-  defp metadata_pointer(_challenge), do: nil
+  defp bearer_scope?(%{scheme: "bearer", params: params}),
+    do: Map.has_key?(params, "scope")
+
+  defp bearer_scope?(_challenge), do: false
+
+  defp parse_bearer_scope(nil), do: :none
+
+  defp parse_bearer_scope(%{params: %{"scope" => scope}}) when is_binary(scope) do
+    scopes = String.split(scope, " ", trim: true)
+
+    if scopes != [] and Enum.all?(scopes, &Attesto.Scope.valid_token?/1),
+      do: {:ok, Enum.uniq(scopes)},
+      else: {:error, :invalid_scope}
+  end
+
+  defp metadata_pointer(%{params: %{"resource_metadata" => url}}, opts) do
+    if Attesto.URI.https_identifier?(url,
+         allow_loopback_http: Keyword.get(opts, :allow_loopback_http, false)
+       ),
+       do: {:ok, url}
+  end
+
+  defp metadata_pointer(_challenge, _opts), do: nil
 
   defp challenges([%{scheme: _scheme} | _rest] = parsed), do: parsed
   defp challenges(values), do: parse(values)

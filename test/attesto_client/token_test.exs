@@ -194,6 +194,42 @@ defmodule AttestoClient.TokenTest do
              )
   end
 
+  test "plain OAuth refresh needs no subject or JWKS resolution" do
+    coordinator = start_supervised!(RefreshCoordinator)
+
+    plug = fn conn ->
+      assert conn.request_path == "/token"
+      json(conn, 200, %{"access_token" => "new", "token_type" => "Bearer"})
+    end
+
+    assert {:ok,
+            %RefreshResult{
+              tokens: %TokenSet{id_token_alg: nil, access_token: "new"},
+              id_token_claims: nil
+            }} =
+             Token.refresh(coordinator, :oauth, tokens(),
+               protocol: :oauth,
+               token_endpoint: @endpoint,
+               issuer: @issuer,
+               client_id: @client_id,
+               req_options: [plug: plug]
+             )
+  end
+
+  test "rejects an unknown refresh protocol before any request" do
+    coordinator = start_supervised!(RefreshCoordinator)
+    plug = fn _conn -> flunk("no request expected") end
+
+    assert {:error, :invalid_protocol} =
+             Token.refresh(coordinator, :protocol, tokens(),
+               protocol: :mcp,
+               token_endpoint: @endpoint,
+               issuer: @issuer,
+               client_id: @client_id,
+               req_options: [plug: plug]
+             )
+  end
+
   test "deadline wakes all waiters, clears the flight, and does not retry" do
     coordinator = start_supervised!(RefreshCoordinator)
     counter = start_supervised!({Agent, fn -> 0 end})
@@ -755,12 +791,46 @@ defmodule AttestoClient.TokenTest do
     assert_receive {:http_started, worker}, 10_000
     same = refresh.("https://api.example/a")
     other = refresh.("https://api.example/b")
-    RefreshFlight.await_waiters(coordinator, :shared, 3)
+
+    other_issuer =
+      Task.async(fn ->
+        Token.refresh(
+          coordinator,
+          :shared,
+          tokens(),
+          Keyword.put(opts, :issuer, "https://other-issuer.example")
+        )
+      end)
+
+    other_client =
+      Task.async(fn ->
+        Token.refresh(
+          coordinator,
+          :shared,
+          tokens(),
+          Keyword.put(opts, :client_id, "other-client")
+        )
+      end)
+
+    other_protocol =
+      Task.async(fn ->
+        Token.refresh(
+          coordinator,
+          :shared,
+          tokens(),
+          Keyword.put(opts, :protocol, :oauth)
+        )
+      end)
+
+    RefreshFlight.await_waiters(coordinator, :shared, 6)
     send(worker, :complete)
 
     assert {:error, {:oauth_error, 400, %{"error" => "invalid_target"}}} = Task.await(first)
     assert {:error, {:oauth_error, 400, %{"error" => "invalid_target"}}} = Task.await(same)
     assert {:error, :refresh_request_mismatch} = Task.await(other)
+    assert {:error, :refresh_request_mismatch} = Task.await(other_issuer)
+    assert {:error, :refresh_request_mismatch} = Task.await(other_client)
+    assert {:error, :refresh_request_mismatch} = Task.await(other_protocol)
   end
 
   defp public_jwks do

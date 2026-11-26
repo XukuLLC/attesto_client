@@ -37,6 +37,7 @@ defmodule AttestoClient.Token do
     :require_typ,
     :require_kid,
     :require_auth_time,
+    :protocol,
     :issuer_aliases,
     :trusted_audiences,
     :subject,
@@ -168,8 +169,10 @@ defmodule AttestoClient.Token do
   @doc """
   Refresh a token set through a single-flight coordinator.
 
-  Required options are `:token_endpoint`, `:issuer`, `:client_id`, and the
-  `:subject` from the previously verified ID Token; `:client_auth` and
+  Required options are `:token_endpoint`, `:issuer`, and `:client_id`.
+  With the default `protocol: :oidc`, the `:subject` from the previously
+  verified ID Token is required too; `protocol: :oauth` omits ID Token and
+  JWKS processing for a plain OAuth grant. `:client_auth` and
   `:req_options` match
   `AttestoClient.AuthorizationCode.callback/3`. The issuer is validated before
   the request so an ID Token returned with a rotated refresh token can always
@@ -255,21 +258,31 @@ defmodule AttestoClient.Token do
          :ok <- IDToken.validate_require_kid(opts),
          {:ok, opts} <- Issuer.expand_option(opts),
          {:ok, timeout_ms} <- HTTPPolicy.timeout(opts),
-         {:ok, _endpoint} <- required_string(opts, :token_endpoint),
+         {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
          :ok <- AttestoClient.Discovery.validate_issuer_identifier(issuer, opts),
-         {:ok, _client_id} <- required_string(opts, :client_id),
-         {:ok, _subject} <- required_string(opts, :subject),
+         {:ok, client_id} <- required_string(opts, :client_id),
+         {:ok, protocol} <- refresh_protocol(opts),
+         :ok <- require_refresh_subject(protocol, opts),
          {:ok, resources} <- refresh_resources(tokens, opts),
          {:ok, scopes} <- refresh_scopes(opts),
-         request = %{resources: resources, scopes: scopes},
          {:ok, profile} <- refresh_profile(tokens, opts),
          opts = Keyword.put(opts, :retained_authorization_profile, profile.profile),
-         {:ok, id_token_alg} <- retained_id_token_alg(tokens, opts),
+         {:ok, id_token_alg} <- refresh_id_token_alg(protocol, tokens, opts),
          opts = Keyword.put(opts, :id_token_alg, id_token_alg),
+         opts = Keyword.put(opts, :protocol, protocol),
          {:ok, dpop_jkt} <- refresh_dpop_binding(tokens, opts),
          :ok <- AuthorizationProfile.require_dpop(profile.profile, dpop_jkt),
          :ok <- AuthorizationProfile.dpop_policy(profile.profile, opts) do
+      request = %{
+        token_endpoint: endpoint,
+        issuer: issuer,
+        client_id: client_id,
+        protocol: protocol,
+        resources: resources,
+        scopes: scopes
+      }
+
       RefreshCoordinator.run_with_context(
         coordinator,
         key,
@@ -384,9 +397,21 @@ defmodule AttestoClient.Token do
   # access learns nothing about its own request from that outcome.
   defp same_refresh_request(requested, request) do
     if same_set?(requested.resources, request.resources) and
-         same_optional_set?(requested.scopes, request.scopes),
+         same_optional_set?(requested.scopes, request.scopes) and
+         same_refresh_identity?(requested, request),
        do: :ok,
        else: {:error, :refresh_request_mismatch}
+  end
+
+  defp same_refresh_identity?(left, right) do
+    fields = [
+      :token_endpoint,
+      :issuer,
+      :client_id,
+      :protocol
+    ]
+
+    Map.take(left, fields) == Map.take(right, fields)
   end
 
   defp same_set?(left, right), do: MapSet.new(left) == MapSet.new(right)
@@ -451,7 +476,7 @@ defmodule AttestoClient.Token do
 
     with {:ok, endpoint} <- required_string(opts, :token_endpoint),
          {:ok, issuer} <- required_string(opts, :issuer),
-         {:ok, jwks} <- Issuer.resolve_jwks(opts, issuer),
+         {:ok, jwks} <- refresh_jwks(opts, issuer),
          {:ok, response} <- OAuthHTTP.post_form(endpoint, form, opts),
          {:ok, tokens} <- TokenSet.from_response(response, refresh_token, default_scope),
          {:ok, tokens} <- TokenSet.bind_dpop(tokens, dpop_jkt),
@@ -468,6 +493,28 @@ defmodule AttestoClient.Token do
 
   defp requested_scope(nil), do: nil
   defp requested_scope(scopes), do: Enum.join(scopes, " ")
+
+  defp refresh_protocol(opts) do
+    case Keyword.get(opts, :protocol, :oidc) do
+      protocol when protocol in [:oauth, :oidc] -> {:ok, protocol}
+      _invalid -> {:error, :invalid_protocol}
+    end
+  end
+
+  defp require_refresh_subject(:oauth, _opts), do: :ok
+
+  defp require_refresh_subject(:oidc, opts) do
+    case required_string(opts, :subject) do
+      {:ok, _subject} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp refresh_jwks(opts, issuer) do
+    if Keyword.get(opts, :protocol, :oidc) == :oauth,
+      do: {:ok, nil},
+      else: Issuer.resolve_jwks(opts, issuer)
+  end
 
   defp new_profile(opts) do
     with {:ok, profile} <- AuthorizationProfile.select(opts) do
@@ -563,9 +610,15 @@ defmodule AttestoClient.Token do
 
   defp same_result_dpop_key(_presented, _returned), do: {:error, :dpop_key_mismatch}
 
-  defp verify_refresh_id_token(%TokenSet{id_token: nil}, _opts), do: {:ok, nil}
+  defp verify_refresh_id_token(tokens, opts) when is_list(opts) do
+    if Keyword.get(opts, :protocol, :oidc) == :oauth,
+      do: {:ok, nil},
+      else: verify_oidc_refresh_id_token(tokens, opts)
+  end
 
-  defp verify_refresh_id_token(%TokenSet{id_token: id_token} = tokens, opts) do
+  defp verify_oidc_refresh_id_token(%TokenSet{id_token: nil}, _opts), do: {:ok, nil}
+
+  defp verify_oidc_refresh_id_token(%TokenSet{id_token: id_token} = tokens, opts) do
     with {:ok, issuer} <- required_string(opts, :issuer),
          {:ok, client_id} <- required_string(opts, :client_id),
          {:ok, id_token_alg} <- id_token_alg(opts) do
@@ -611,9 +664,11 @@ defmodule AttestoClient.Token do
   # issuer cache they are left to the cache, so an unknown `kid` can refresh
   # them; a caller-supplied `:jwks` is already in `opts`.
   defp put_resolved_jwks(opts, jwks) do
-    if Keyword.has_key?(opts, :issuer_cache) and not Keyword.has_key?(opts, :jwks),
-      do: opts,
-      else: Keyword.put(opts, :jwks, jwks)
+    cond do
+      is_nil(jwks) -> opts
+      Keyword.has_key?(opts, :issuer_cache) and not Keyword.has_key?(opts, :jwks) -> opts
+      true -> Keyword.put(opts, :jwks, jwks)
+    end
   end
 
   defp id_token_alg(opts) do
@@ -638,6 +693,10 @@ defmodule AttestoClient.Token do
         end
     end
   end
+
+  defp refresh_id_token_alg(:oauth, _tokens, _opts), do: {:ok, nil}
+
+  defp refresh_id_token_alg(:oidc, tokens, opts), do: retained_id_token_alg(tokens, opts)
 
   defp check_refresh_id_token_alg({:ok, %RefreshResult{tokens: tokens}} = result, expected) do
     if Map.get(tokens, :id_token_alg) == expected,

@@ -160,6 +160,7 @@ defmodule AttestoClient.OpenIDMetadata do
       end_session_endpoint
       token_endpoint
       jwks_uri
+      registration_endpoint
       revocation_endpoint
       pushed_authorization_request_endpoint
     )

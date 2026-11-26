@@ -86,6 +86,7 @@ defmodule AttestoClient.Discovery do
           | {:resolver,
              (charlist(), :inet | :inet6 -> {:ok, [:inet.ip_address()]} | {:error, term()})}
           | {:metadata_url, String.t()}
+          | {:resource_well_known, :path | :root | :path_then_root}
           | {:www_authenticate, String.t() | [String.t()]}
           | {:issuer, String.t()}
           | {:outbound, Outbound.t()}
@@ -101,6 +102,7 @@ defmodule AttestoClient.Discovery do
           | :invalid_metadata
           | :invalid_resource
           | :invalid_metadata_url
+          | :invalid_resource_well_known
           | :resource_mismatch
           | :no_authorization_server
           | :unadvertised_authorization_server
@@ -135,9 +137,7 @@ defmodule AttestoClient.Discovery do
     with :ok <- validate_issuer_identifier(issuer, opts),
          {:ok, uri, canonical} <- validate_issuer(issuer, opts),
          {:ok, well_known} <- well_known(opts),
-         {:ok, body} <- get_json(metadata_url(uri, well_known), opts) do
-      check_issuer(body, canonical)
-    end
+         do: fetch_metadata_url(metadata_url(uri, well_known), canonical, opts)
   end
 
   @doc """
@@ -145,7 +145,9 @@ defmodule AttestoClient.Discovery do
   `{:ok, metadata}` (a string-keyed map) or `{:error, reason}`.
 
   `resource` is the resource identifier: an `https` URL with no fragment
-  (RFC 9728 §1.2). Without a `:metadata_url`, the document is requested from
+  (RFC 9728 §1.2). Explicit `outbound: [allow_loopback_http: true]` also permits
+  a loopback HTTP resource during local development. Without a `:metadata_url`,
+  the document is requested from
   the well-known location derived from it (§3.1): the
   `/.well-known/oauth-protected-resource` segment is inserted between the host
   and the path, after any terminating slash is removed, so
@@ -158,7 +160,15 @@ defmodule AttestoClient.Discovery do
     * `:metadata_url` - the URL a `WWW-Authenticate` challenge advertised in
       its `resource_metadata` parameter (§5.1);
       `AttestoClient.WWWAuthenticate.resource_metadata/1` reads it from the
-      header. It must be an `https` URL without userinfo or fragment.
+      header. It must be an `https` URL without userinfo or fragment. A
+      loopback HTTP pointer is accepted only for a loopback resource under the
+      explicit loopback outbound exception; CIDR exceptions remain forbidden
+      for challenge-selected URLs.
+    * `:resource_well_known` - `:path` (the default) for the path-specific
+      RFC 9728 location, or `:root` for the resource origin's root location.
+      `authorization_server/2` also accepts `:path_then_root`, which retries at
+      the root only when the path-specific resource document returns 404.
+      `fetch_resource/2` itself always selects one location.
     * `:req_options`, `:timeout`, `:max_response_bytes`, and `:resolver` - as
       for `fetch/2`.
 
@@ -172,16 +182,24 @@ defmodule AttestoClient.Discovery do
   """
   @spec fetch_resource(String.t(), [opt()]) :: {:ok, map()} | {:error, error()}
   def fetch_resource(resource, opts \\ []) when is_list(opts) do
-    with :ok <- maybe_refuse_outbound_for_metadata_url(opts),
-         {:ok, uri} <- validate_resource(resource),
-         {:ok, url} <- resource_metadata_url(uri, opts),
-         {:ok, body} <- get_json(url, opts) do
-      check_resource(body, resource)
+    with {:ok, body} <- fetch_resource_document(resource, opts) do
+      check_resource(body, resource, opts)
     end
   end
 
-  defp maybe_refuse_outbound_for_metadata_url(opts) do
-    if Keyword.has_key?(opts, :metadata_url), do: Outbound.refuse(opts), else: :ok
+  defp fetch_resource_document(resource, opts) do
+    with :ok <- Outbound.validate(opts),
+         :ok <- maybe_refuse_outbound_for_metadata_url(resource, opts),
+         :ok <- Outbound.check_issuer(resource, opts),
+         {:ok, uri} <- validate_resource(resource, opts),
+         {:ok, url} <- resource_metadata_url(uri, opts),
+         do: get_json(url, opts)
+  end
+
+  defp maybe_refuse_outbound_for_metadata_url(resource, opts) do
+    if Keyword.has_key?(opts, :metadata_url) and not local_pointer_exception?(resource, opts),
+      do: Outbound.refuse(opts),
+      else: :ok
   end
 
   @doc """
@@ -204,9 +222,15 @@ defmodule AttestoClient.Discovery do
       `:metadata_url` takes precedence.
     * `:issuer` - the issuer to use when the resource advertises more than
       one. It must be among them.
-    * `:well_known` - which issuer document to fetch. Without it, the RFC 8414
-      `oauth-authorization-server` document is tried first and the OpenID
-      Connect `openid-configuration` document when that returns 404.
+    * `:resource_well_known` - `:path_then_root` tries the path-specific
+      resource document first and the origin-root document only after a 404.
+      At that compatibility location the document may identify the requested
+      resource or its exact origin; the returned document remains
+      authoritative for the resource identifier.
+    * `:well_known` - which issuer document to fetch. Without it, metadata
+      candidates are tried in interoperability order: RFC 8414 path insertion,
+      OpenID Connect path insertion, then OpenID Connect path appending. A
+      candidate is skipped only when it returns 404.
 
   Errors are `:no_authorization_server` when the resource advertises none,
   `{:select_authorization_server, issuers}` when it advertises several and no
@@ -216,18 +240,82 @@ defmodule AttestoClient.Discovery do
   """
   @spec authorization_server(String.t(), [opt()]) :: {:ok, resolution()} | {:error, error()}
   def authorization_server(resource, opts \\ []) when is_list(opts) do
-    with :ok <- maybe_refuse_outbound_for_issuer(opts),
-         {:ok, metadata} <- fetch_resource(resource, resource_opts(opts)),
+    with :ok <- maybe_refuse_outbound_for_issuer(resource, opts),
+         {:ok, metadata} <- fetch_authorization_resource(resource, resource_opts(opts)),
          {:ok, issuer} <- select_issuer(metadata, opts),
          {:ok, issuer_metadata} <- fetch_issuer(issuer, opts) do
       {:ok, %{resource: metadata, issuer: issuer, authorization_server: issuer_metadata}}
     end
   end
 
-  defp maybe_refuse_outbound_for_issuer(opts) do
+  defp fetch_authorization_resource(resource, opts) do
+    case {Keyword.has_key?(opts, :metadata_url), Keyword.get(opts, :resource_well_known, :path)} do
+      {false, :path_then_root} ->
+        case fetch_resource(resource, Keyword.put(opts, :resource_well_known, :path)) do
+          {:error, {:http_status, 404}} ->
+            fetch_root_resource(resource, opts)
+
+          result ->
+            result
+        end
+
+      _single_location ->
+        fetch_resource(resource, opts)
+    end
+  end
+
+  # MCP's root-location compatibility form may publish the origin itself as
+  # the authorization resource. Accept only that exact origin, and only after
+  # the path-specific document was absent. Reuse the single fetched document
+  # so a stateful metadata endpoint is not observed twice.
+  defp fetch_root_resource(resource, opts) do
+    root_opts = Keyword.put(opts, :resource_well_known, :root)
+
+    with true <- distinct_root_resource_url?(resource, opts),
+         {:ok, body} <- fetch_resource_document(resource, root_opts) do
+      check_root_resource(body, resource, root_opts)
+    else
+      false -> {:error, {:http_status, 404}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp distinct_root_resource_url?(resource, opts) do
+    with {:ok, uri} <- validate_resource(resource, opts),
+         {:ok, path_url} <- resource_well_known_url(uri, :path),
+         {:ok, root_url} <- resource_well_known_url(uri, :root) do
+      path_url != root_url
+    else
+      _invalid -> false
+    end
+  end
+
+  defp check_root_resource(body, resource, opts) do
+    case check_resource(body, resource, opts) do
+      {:error, :resource_mismatch} -> check_root_resource_origin(body, resource, opts)
+      result -> result
+    end
+  end
+
+  defp check_root_resource_origin(body, resource, opts) do
+    with {:ok, origin} <- resource_origin(resource, opts) do
+      check_resource(body, origin, opts)
+    end
+  end
+
+  defp resource_origin(resource, opts) do
+    with {:ok, uri} <- validate_resource(resource, opts) do
+      {:ok, URI.to_string(%{uri | path: nil, query: nil})}
+    end
+  end
+
+  defp maybe_refuse_outbound_for_issuer(resource, opts) do
     case Keyword.get(opts, :issuer) do
-      issuer when is_binary(issuer) and issuer != "" -> :ok
-      _other -> Outbound.refuse(opts)
+      issuer when is_binary(issuer) and issuer != "" ->
+        :ok
+
+      _other ->
+        if(local_resource_exception?(resource, opts), do: :ok, else: Outbound.refuse(opts))
     end
   end
 
@@ -368,7 +456,7 @@ defmodule AttestoClient.Discovery do
   # RFC 8414 §2: the issuer is an https URL with no query or fragment. Returns
   # the parsed URI and the issuer exactly as supplied, which is what the §3.3
   # document match compares against.
-  defp validate_issuer(issuer, opts \\ [])
+  defp validate_issuer(issuer, opts)
 
   defp validate_issuer(issuer, opts) when is_binary(issuer) do
     with true <- Outbound.https_identifier?(issuer, opts),
@@ -383,45 +471,58 @@ defmodule AttestoClient.Discovery do
 
   # RFC 9728 §1.2: an https URL with no fragment. A query component is allowed
   # (the RFC advises against one) and travels into the derived well-known URL.
-  defp validate_resource(resource) when is_binary(resource) do
-    if Attesto.URI.https_identifier?(resource),
+  defp validate_resource(resource, opts) when is_binary(resource) do
+    if Outbound.https_identifier?(resource, opts),
       do: {:ok, URI.parse(resource)},
       else: {:error, :invalid_resource}
   end
 
-  defp validate_resource(_other), do: {:error, :invalid_resource}
+  defp validate_resource(_other, _opts), do: {:error, :invalid_resource}
 
   # RFC 9728 §3.1: the well-known segment goes between the host and the path,
   # with the terminating slash removed first - the same placement RFC 8414 uses.
   defp resource_metadata_url(uri, opts) do
     case Keyword.fetch(opts, :metadata_url) do
       :error ->
-        {:ok, URI.to_string(%{uri | path: @protected_resource_segment <> issuer_path(uri)})}
+        resource_well_known_url(uri, Keyword.get(opts, :resource_well_known, :path))
 
       {:ok, url} ->
-        validate_https(url, :invalid_metadata_url, [])
+        validate_https(url, :invalid_metadata_url, opts)
     end
   end
+
+  defp resource_well_known_url(uri, :path) do
+    {:ok, URI.to_string(%{uri | path: @protected_resource_segment <> issuer_path(uri)})}
+  end
+
+  defp resource_well_known_url(uri, :root) do
+    {:ok, URI.to_string(%{uri | path: @protected_resource_segment, query: nil})}
+  end
+
+  defp resource_well_known_url(_uri, _invalid),
+    do: {:error, :invalid_resource_well_known}
 
   # RFC 9728 §3.3 / §7.3: the document's `resource` MUST be identical to the
   # identifier the metadata was requested for, or its contents must not be
   # used. Exact comparison, as for the issuer: a slash-normalising match would
   # accept a subtly different identifier.
-  defp check_resource(%{"resource" => resource} = metadata, resource) do
-    if valid_resource_members?(metadata), do: {:ok, metadata}, else: {:error, :invalid_metadata}
+  defp check_resource(%{"resource" => resource} = metadata, resource, opts) do
+    if valid_resource_members?(metadata, opts),
+      do: {:ok, metadata},
+      else: {:error, :invalid_metadata}
   end
 
-  defp check_resource(%{"resource" => other}, _resource) when is_binary(other),
+  defp check_resource(%{"resource" => other}, _resource, _opts) when is_binary(other),
     do: {:error, :resource_mismatch}
 
-  defp check_resource(_metadata, _resource), do: {:error, :invalid_metadata}
+  defp check_resource(_metadata, _resource, _opts), do: {:error, :invalid_metadata}
 
-  defp valid_resource_members?(metadata) do
+  defp valid_resource_members?(metadata, opts) do
     Enum.all?(@resource_string_lists, &optional_string_list?(Map.get(metadata, &1))) and
       Enum.all?(@resource_booleans, &optional_boolean?(Map.get(metadata, &1))) and
       optional_string?(Map.get(metadata, "resource_name")) and
-      valid_issuers?(Map.get(metadata, "authorization_servers")) and
-      optional_https?(Map.get(metadata, "jwks_uri"))
+      valid_issuers?(Map.get(metadata, "authorization_servers"), opts) and
+      optional_https?(Map.get(metadata, "jwks_uri"), opts)
   end
 
   defp optional_string_list?(nil), do: true
@@ -431,15 +532,15 @@ defmodule AttestoClient.Discovery do
   defp optional_boolean?(value), do: is_nil(value) or is_boolean(value)
   defp optional_string?(value), do: is_nil(value) or is_binary(value)
 
-  defp valid_issuers?(nil), do: true
+  defp valid_issuers?(nil, _opts), do: true
 
-  defp valid_issuers?(issuers) when is_list(issuers),
-    do: Enum.all?(issuers, &match?({:ok, _uri, _canonical}, validate_issuer(&1)))
+  defp valid_issuers?(issuers, opts) when is_list(issuers),
+    do: Enum.all?(issuers, &match?({:ok, _uri, _canonical}, validate_issuer(&1, opts)))
 
-  defp valid_issuers?(_other), do: false
+  defp valid_issuers?(_other, _opts), do: false
 
-  defp optional_https?(nil), do: true
-  defp optional_https?(url), do: Attesto.URI.https_identifier?(url)
+  defp optional_https?(nil, _opts), do: true
+  defp optional_https?(url, opts), do: Outbound.https_identifier?(url, opts)
 
   # An explicit :metadata_url wins. Otherwise a challenge's resource_metadata
   # pointer is used when it is a valid URL, and the well-known location when
@@ -447,10 +548,27 @@ defmodule AttestoClient.Discovery do
   defp resource_opts(opts) do
     with :error <- Keyword.fetch(opts, :metadata_url),
          {:ok, header} <- Keyword.fetch(opts, :www_authenticate),
-         {:ok, url} <- WWWAuthenticate.resource_metadata(header) do
+         {:ok, url} <- WWWAuthenticate.resource_metadata(header, pointer_options(opts)) do
       Keyword.put(opts, :metadata_url, url)
     else
       _other -> opts
+    end
+  end
+
+  defp pointer_options(opts) do
+    [allow_loopback_http: Outbound.allow_loopback_http?(opts)]
+  end
+
+  defp local_pointer_exception?(resource, opts) do
+    local_resource_exception?(resource, opts) and
+      Keyword.has_key?(opts, :metadata_url) and
+      Outbound.loopback_url?(Keyword.get(opts, :metadata_url))
+  end
+
+  defp local_resource_exception?(resource, opts) do
+    case Keyword.get(opts, :outbound) do
+      [allow_loopback_http: true] -> Outbound.loopback_url?(resource)
+      _other -> false
     end
   end
 
@@ -474,23 +592,33 @@ defmodule AttestoClient.Discovery do
     end
   end
 
-  # RFC 8414 §5: an OAuth authorization server publishes one or both documents.
-  # A caller that names one gets exactly that one; otherwise the OAuth document
-  # is tried first and the OpenID one only when the first is absent.
+  # A caller that names one metadata format gets its standard URL exactly.
+  # Otherwise use the shared candidate builder: OAuth path insertion, OIDC path
+  # insertion, then OIDC path appending. Only an absent document advances to
+  # the next candidate; a malformed or mismatched document fails closed.
   defp fetch_issuer(issuer, opts) do
     case Keyword.fetch(opts, :well_known) do
       {:ok, _well_known} ->
         fetch(issuer, opts)
 
       :error ->
-        case fetch(issuer, Keyword.put(opts, :well_known, :oauth_authorization_server)) do
-          {:error, {:http_status, 404}} ->
-            fetch(issuer, Keyword.put(opts, :well_known, :openid_configuration))
-
-          result ->
-            result
+        with :ok <- validate_issuer_identifier(issuer, opts),
+             {:ok, candidates} <-
+               Attesto.Discovery.metadata_candidates(issuer, candidate_options(opts)) do
+          fetch_candidates(candidates, issuer, opts)
         end
     end
+  end
+
+  defp fetch_candidates([{_kind, url} | rest], issuer, opts) do
+    case fetch_metadata_url(url, issuer, opts) do
+      {:error, {:http_status, 404}} when rest != [] -> fetch_candidates(rest, issuer, opts)
+      result -> result
+    end
+  end
+
+  defp candidate_options(opts) do
+    [allow_loopback_http: Outbound.allow_loopback_http?(opts)]
   end
 
   defp validate_https(url, error, opts) when is_binary(url) do
@@ -517,6 +645,10 @@ defmodule AttestoClient.Discovery do
   # RFC 8414 §3.1: insert the segment before the issuer's path component.
   defp metadata_url(uri, :oauth_authorization_server) do
     %{uri | path: @oauth_segment <> issuer_path(uri)} |> URI.to_string()
+  end
+
+  defp fetch_metadata_url(url, issuer, opts) do
+    with {:ok, body} <- get_json(url, opts), do: check_issuer(body, issuer)
   end
 
   defp issuer_path(%URI{path: path}) do

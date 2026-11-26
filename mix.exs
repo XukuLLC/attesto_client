@@ -2,7 +2,7 @@ defmodule AttestoClient.MixProject do
   @moduledoc false
   use Mix.Project
 
-  @version "2.25.0"
+  @version "2.26.0"
   @url "https://github.com/XukuLLC/attesto_client"
   @maintainers ["Neil Berkman"]
 
@@ -14,8 +14,8 @@ defmodule AttestoClient.MixProject do
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       description:
-        "Secure OpenID Connect code + PKCE, refresh, revocation, logout, and " <>
-          "OAuth 2.0 / FAPI client artifacts and verification.",
+        "Secure OAuth 2.0, OpenID Connect, FAPI, and MCP authorization client " <>
+          "flows, artifacts, and verification.",
       package: package(),
       source_url: @url,
       homepage_url: @url,
@@ -78,7 +78,7 @@ defmodule AttestoClient.MixProject do
          not Enum.any?(System.argv(), &(&1 in ["hex.build", "hex.publish"])) do
       {:attesto, path: "../attesto"}
     else
-      {:attesto, ">= 2.30.0 and < 3.0.0"}
+      {:attesto, ">= 2.32.0 and < 3.0.0"}
     end
   end
 
@@ -121,6 +121,7 @@ defmodule AttestoClient.MixProject do
       extras: [
         "README.md",
         "guides/authorization-code.md",
+        "guides/mcp-authorization.md",
         "guides/resource-server.md",
         "guides/credential-wallet.md",
         "guides/digital_wallet.livemd",

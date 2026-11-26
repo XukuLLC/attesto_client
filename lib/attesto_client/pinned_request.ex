@@ -211,11 +211,25 @@ defmodule AttestoClient.PinnedRequest do
   # with per-request connection options, so it is rejected above. An
   # in-process `:plug` replaces the adapter set here.
   defp put_connect_options(options, target, connect_options) do
+    connect_options = protocol_connect_options(target, connect_options)
+
     options
     |> Keyword.delete(:finch)
     |> Keyword.put(:connect_options, Keyword.put(connect_options, :hostname, target.host))
     |> Keyword.put(:attesto_target, target)
     |> Keyword.put(:adapter, adapter())
+  end
+
+  # TLS trust options are meaningful only to the SSL transport. Passing them
+  # to a loopback HTTP connection makes Mint hand `:verify` to `:gen_tcp`,
+  # which rejects the socket options before a byte can be written. HTTP is
+  # permitted only by the separately enforced loopback policy; remove the TLS
+  # sub-options while retaining connection timeouts and the pinned hostname.
+  defp protocol_connect_options(%{url: url}, connect_options) do
+    case URI.new(url) do
+      {:ok, %URI{scheme: "http"}} -> Keyword.delete(connect_options, :transport_opts)
+      _https_or_invalid -> connect_options
+    end
   end
 
   # Req 0.7 calls `run/1` on an adapter module and deprecates an adapter

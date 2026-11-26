@@ -7,7 +7,7 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
   @jwt "header.payload.signature"
 
   test "unauthenticated GET and POST never send caller credentials or custom headers" do
-    for method <- [:json_get, :jwt_get, :jwt_post, :direct_post] do
+    for method <- [:json_get, :json_post, :jwt_get, :jwt_post, :direct_post] do
       plug = fn conn ->
         assert conn.host == "untrusted.example"
         assert conn.query_string == "original=1"
@@ -29,7 +29,7 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         refute String.contains?(body, "private-value")
         assert_request(method, conn, body)
-        respond(conn, 200, response_type(method), response_body(method))
+        respond(conn, response_status(method), response_type(method), response_body(method))
       end
 
       assert {:ok, _result} = invoke(method, hostile_options(plug))
@@ -64,6 +64,27 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
       assert {:error, {:http_status, ^status}} =
                OAuthHTTP.post_form_open(@endpoint, %{}, req_options: [plug: plug])
     end
+  end
+
+  test "open JSON POST requires and enforces its successful status" do
+    assert {:error, :invalid_expected_status} =
+             OAuthHTTP.post_json_open(@endpoint, %{}, req_options: [plug: &json_response/1])
+
+    for status <- [200, 202, 204] do
+      plug = &respond(&1, status, "application/json", "{}")
+
+      assert {:error, {:unexpected_http_status, ^status}} =
+               OAuthHTTP.post_json_open(@endpoint, %{},
+                 expected_status: 201,
+                 req_options: [plug: plug]
+               )
+    end
+
+    assert {:ok, %{"client_id" => "registered"}} =
+             OAuthHTTP.post_json_open(@endpoint, %{"client_name" => "client"},
+               expected_status: 201,
+               req_options: [plug: &json_response/1]
+             )
   end
 
   test "direct_post requires application/json rather than a JSON-looking body" do
@@ -108,14 +129,14 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
   end
 
   test "ambiguous Content-Type headers are rejected for both response families" do
-    for method <- [:json_get, :jwt_get, :jwt_post, :direct_post] do
+    for method <- [:json_get, :json_post, :jwt_get, :jwt_post, :direct_post] do
       plug = fn conn ->
         conn
         |> Plug.Conn.prepend_resp_headers([
           {"content-type", response_type(method)},
           {"content-type", "text/plain"}
         ])
-        |> Plug.Conn.send_resp(200, response_body(method))
+        |> Plug.Conn.send_resp(response_status(method), response_body(method))
       end
 
       assert {:error, :invalid_response_content_type} =
@@ -210,6 +231,15 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
   end
 
   defp invoke(:json_get, opts), do: OAuthHTTP.get_json(@endpoint, opts)
+
+  defp invoke(:json_post, opts),
+    do:
+      OAuthHTTP.post_json_open(
+        @endpoint,
+        %{"public" => "value"},
+        Keyword.put(opts, :expected_status, 201)
+      )
+
   defp invoke(:jwt_get, opts), do: OAuthHTTP.get_text(@endpoint, opts)
 
   defp invoke(:jwt_post, opts),
@@ -218,14 +248,25 @@ defmodule AttestoClient.OAuthHTTPReferenceSecurityTest do
   defp invoke(:direct_post, opts),
     do: OAuthHTTP.post_form_open(@endpoint, %{"response" => "encrypted"}, opts)
 
+  defp json_response(conn) do
+    respond(conn, 201, "application/json", ~s({"client_id":"registered"}))
+  end
+
   defp response_type(method) when method in [:jwt_get, :jwt_post],
     do: "application/oauth-authz-req+jwt"
 
   defp response_type(_method), do: "application/json"
+  defp response_status(:json_post), do: 201
+  defp response_status(_method), do: 200
   defp response_body(method) when method in [:jwt_get, :jwt_post], do: @jwt
   defp response_body(_method), do: "{}"
 
   defp assert_request(:json_get, conn, ""), do: assert(conn.method == "GET")
+
+  defp assert_request(:json_post, conn, body) do
+    assert conn.method == "POST"
+    assert JSON.decode!(body) == %{"public" => "value"}
+  end
 
   defp assert_request(:jwt_get, conn, "") do
     assert conn.method == "GET"

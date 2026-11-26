@@ -991,6 +991,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
               %AttestoClient.TokenSet{
                 access_token: "access-1",
                 refresh_token: "refresh-1",
+                scope: "read write",
                 resources: ["https://rs.example/api"]
               }} =
                AuthorizationCode.exchange("code-1",
@@ -999,6 +1000,7 @@ defmodule AttestoClient.AuthorizationCodeTest do
                  client_id: @client_id,
                  redirect_uri: @redirect_uri,
                  code_verifier: verifier,
+                 scopes: ["read", "write", "read"],
                  resource: "https://rs.example/api",
                  req_options: [plug: plug],
                  timeout: 30_000
@@ -1041,6 +1043,11 @@ defmodule AttestoClient.AuthorizationCodeTest do
 
       assert {:error, :invalid_resource} =
                AuthorizationCode.exchange("code-1", Keyword.put(base, :resource, "not a uri"))
+
+      for scopes <- ["read", ["read write"], [nil]] do
+        assert {:error, :invalid_scopes} =
+                 AuthorizationCode.exchange("code-1", Keyword.put(base, :scopes, scopes))
+      end
     end
   end
 

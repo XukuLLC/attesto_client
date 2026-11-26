@@ -114,6 +114,40 @@ defmodule AttestoClient.OAuthHTTP do
     end)
   end
 
+  @doc """
+  POST an unauthenticated JSON object and return a decoded JSON object.
+
+  This is the JSON counterpart to `post_form_open/3` for protocol endpoints
+  such as RFC 7591 Dynamic Client Registration. The request is endpoint
+  screened, cannot inherit caller credentials or routing, does not follow
+  redirects, and applies the usual deadline and response-size limit.
+
+  `:expected_status` is required and must be a successful HTTP status. Keeping
+  it explicit prevents one protocol's success response from being accepted by
+  another protocol with different status semantics.
+  """
+  @spec post_json_open(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def post_json_open(endpoint, body, opts) when is_map(body) and is_list(opts) do
+    with {:ok, expected_status} <- required_expected_status(opts) do
+      run_open_screened(endpoint, opts, fn target, prepared_opts, timeout_ms ->
+        open_json_request(
+          target,
+          body,
+          req_options(prepared_opts),
+          timeout_ms,
+          expected_status
+        )
+      end)
+    end
+  end
+
+  defp required_expected_status(opts) do
+    case Keyword.get(opts, :expected_status) do
+      status when is_integer(status) and status in 200..299 -> {:ok, status}
+      _invalid -> {:error, :invalid_expected_status}
+    end
+  end
+
   # Credential and deferred endpoints can exchange either JSON or compact JWE.
   # Retain the status and headers so the wallet can validate media types and
   # distinguish immediate issuance from a deferred response before verification.
@@ -819,6 +853,41 @@ defmodule AttestoClient.OAuthHTTP do
     case run_req(options) do
       {:ok, %Req.Response{status: 200} = response} ->
         open_response_body(response, response_mode)
+
+      {:ok, %Req.Response{} = response} ->
+        open_error_response(response)
+
+      {:error, :response_too_large} = error ->
+        error
+
+      {:error, reason} ->
+        transport_error(reason)
+    end
+  rescue
+    _error -> {:error, :transport_error}
+  end
+
+  defp open_json_request(target, body, req_options, timeout_ms, expected_status) do
+    options =
+      req_options ++
+        [
+          url: target.url,
+          method: :post,
+          json: body,
+          redirect: false,
+          retry: false,
+          receive_timeout: timeout_ms,
+          compressed: false,
+          raw: true,
+          into: PinnedRequest.bounded_response_into(@max_response_bytes)
+        ]
+
+    case run_req(options) do
+      {:ok, %Req.Response{status: ^expected_status} = response} ->
+        open_response_body(response, :json)
+
+      {:ok, %Req.Response{status: status}} when status in 200..299 ->
+        {:error, {:unexpected_http_status, status}}
 
       {:ok, %Req.Response{} = response} ->
         open_error_response(response)

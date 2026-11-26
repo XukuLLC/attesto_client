@@ -49,6 +49,7 @@ defmodule AttestoClient.AuthorizationTransaction do
                 profile: :generic,
                 client_auth_binding: nil,
                 resources: [],
+                scopes: [],
                 issuer_aliases: [],
                 expires_at: nil
               ]
@@ -70,6 +71,7 @@ defmodule AttestoClient.AuthorizationTransaction do
           profile: :generic | :haip | :fapi,
           client_auth_binding: map() | nil,
           resources: [String.t()],
+          scopes: [String.t()],
           issuer_aliases: [String.t()],
           expires_at: integer() | nil
         }
