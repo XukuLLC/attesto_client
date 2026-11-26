@@ -457,6 +457,82 @@ defmodule AttestoClient.TokenTest do
              )
   end
 
+  test "sends resource indicators on the refresh request" do
+    coordinator = start_supervised!(RefreshCoordinator)
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      pairs = Enum.to_list(URI.query_decoder(body))
+      assert {"grant_type", "refresh_token"} in pairs
+      assert {"refresh_token", "refresh-old"} in pairs
+
+      assert Enum.filter(pairs, &(elem(&1, 0) == "resource")) == [
+               {"resource", "https://api.example/a"},
+               {"resource", "https://api.example/b"}
+             ]
+
+      json(conn, 200, %{"access_token" => "access-new", "token_type" => "Bearer"})
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      resource: ["https://api.example/a", "https://api.example/b"],
+      req_options: [plug: plug],
+      timeout: 30_000
+    ]
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{access_token: "access-new"}}} =
+             Token.refresh(coordinator, :account, tokens(), opts)
+  end
+
+  test "omits the resource parameter when no indicators are given" do
+    coordinator = start_supervised!(RefreshCoordinator)
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      pairs = Enum.to_list(URI.query_decoder(body))
+      refute Enum.any?(pairs, &(elem(&1, 0) == "resource"))
+
+      json(conn, 200, %{"access_token" => "access-new", "token_type" => "Bearer"})
+    end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      req_options: [plug: plug],
+      timeout: 30_000
+    ]
+
+    assert {:ok, %RefreshResult{tokens: %TokenSet{access_token: "access-new"}}} =
+             Token.refresh(coordinator, :account, tokens(), opts)
+  end
+
+  test "refuses a malformed resource indicator before any request" do
+    coordinator = start_supervised!(RefreshCoordinator)
+
+    plug = fn _conn -> flunk("no request expected") end
+
+    opts = [
+      token_endpoint: @endpoint,
+      issuer: @issuer,
+      client_id: @client_id,
+      subject: "subject-1",
+      jwks: public_jwks(),
+      resource: "not a uri",
+      req_options: [plug: plug],
+      timeout: 30_000
+    ]
+
+    assert {:error, :invalid_target} = Token.refresh(coordinator, :account, tokens(), opts)
+  end
+
   defp public_jwks do
     {_, map} = JOSE.JWK.to_public_map(@key)
     %{"keys" => [Map.merge(map, %{"kid" => "refresh-signing", "alg" => "RS256"})]}
